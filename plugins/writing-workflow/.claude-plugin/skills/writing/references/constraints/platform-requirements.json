@@ -1,0 +1,199 @@
+{
+  "linkedin": {
+    "hook_max_words": 25,
+    "article_length": {
+      "min": 1900,
+      "max": 2000,
+      "target": 1950
+    },
+    "tone": "professional_conversational",
+    "structure": {
+      "opening": "hook that appears before 'see more'",
+      "sections": "clear section breaks with headers",
+      "paragraphs": "3-5 sentences, scannable"
+    },
+    "cta": "comment_prompt or connection_request",
+    "formatting": {
+      "headers": true,
+      "bullets": true,
+      "emojis": "minimal_professional",
+      "hashtags": 3
+    }
+  },
+  "twitter": {
+    "optimal_length": {
+      "min": 40,
+      "max": 80,
+      "description": "characters for optimal engagement"
+    },
+    "max_length": 280,
+    "tone": "conversational",
+    "structure": {
+      "opening": "lead with insight",
+      "body": "context second"
+    },
+    "formatting": {
+      "hashtags": 2,
+      "mentions": "strategic",
+      "threads": {
+        "max_tweets": 10,
+        "numbering": "1/10 format"
+      }
+    }
+  },
+  "bluesky": {
+    "max_length": 300,
+    "tone": "conversational",
+    "formatting": {
+      "hashtags": 2,
+      "threads": true
+    }
+  },
+  "instagram": {
+    "length": {
+      "min": 125,
+      "max": 200,
+      "target": 150
+    },
+    "tone": "authentic_personal",
+    "structure": {
+      "opening": "first sentence is hook",
+      "visual_reference": "required - must reference image/video",
+      "paragraphs": "short, punchy"
+    },
+    "formatting": {
+      "hashtags": {
+        "min": 3,
+        "max": 5
+      },
+      "emojis": "encouraged",
+      "line_breaks": "generous for readability"
+    }
+  },
+  "substack": {
+    "length": {
+      "quick": {
+        "min": 800,
+        "max": 1200
+      },
+      "standard": {
+        "min": 1200,
+        "max": 2000
+      },
+      "deep_dive": {
+        "min": 2000,
+        "max": 3000
+      }
+    },
+    "tone": "authentic_educational",
+    "structure": {
+      "opening": "BLUF - Bottom Line Up Front",
+      "headers": "scannable, descriptive",
+      "paragraphs": "3-5 sentences, white space",
+      "links": "inline",
+      "cta": "subscribe at bottom only"
+    },
+    "formatting": {
+      "headers": "markdown h2 for sections",
+      "bullets": "for lists and summaries",
+      "code_blocks": "for technical content",
+      "images": "embedded with captions"
+    }
+  },
+  "email": {
+    "subject": {
+      "max_length": 50,
+      "tone": "clear_compelling",
+      "avoid": "spammy words, all caps, excessive punctuation"
+    },
+    "body": {
+      "opening": "first sentence sets expectation",
+      "structure": "bullet points for scannability",
+      "cta": "single clear call-to-action",
+      "length": {
+        "max": 300,
+        "description": "words for marketing emails"
+      }
+    },
+    "tone": "conversational_purposeful",
+    "formatting": {
+      "paragraphs": "short - 2-3 sentences max",
+      "bullets": "required for key points",
+      "bold": "strategic emphasis only",
+      "links": "minimal - focus on one CTA"
+    }
+  },
+  "proposal": {
+    "structure": {
+      "executive_summary": "first page, decision-ready",
+      "sections": [
+        "executive_summary",
+        "problem_statement",
+        "proposed_solution",
+        "evidence_and_data",
+        "risk_assessment",
+        "resource_requirements",
+        "timeline",
+        "recommendations"
+      ],
+      "appendices": "supporting details"
+    },
+    "tone": "professional_formal",
+    "evidence": "data_driven_claims_required",
+    "formatting": {
+      "headers": "hierarchical numbering",
+      "tables": "for data presentation",
+      "charts": "for visualizing trends",
+      "citations": "footnotes or endnotes"
+    },
+    "length": {
+      "executive_summary": 1,
+      "main_body": {
+        "min": 5,
+        "max": 15
+      },
+      "unit": "pages"
+    }
+  },
+  "shared_constraints": {
+    "readability": {
+      "hemingway_grade": {
+        "max": 10,
+        "target": 8,
+        "description": "appropriate for general business audience"
+      },
+      "sentence_length": {
+        "avg_max": 20,
+        "description": "words per sentence"
+      },
+      "paragraph_length": {
+        "sentences": {
+          "min": 2,
+          "max": 5
+        }
+      }
+    },
+    "voice": {
+      "avoid": [
+        "passive voice (except when necessary)",
+        "jargon without definition",
+        "hedging (it might be argued, perhaps)",
+        "corporate speak (leverage synergies, paradigm shift)",
+        "excessive adverbs",
+        "clichés"
+      ],
+      "prefer": [
+        "active voice",
+        "concrete examples",
+        "specific metrics",
+        "direct statements",
+        "simple language"
+      ]
+    },
+    "links": {
+      "validation": "required - all links must be HTTP 200",
+      "format": "inline markdown [text](url)",
+      "avoid": "naked URLs, 'click here' text"
+    }
+  }
+}

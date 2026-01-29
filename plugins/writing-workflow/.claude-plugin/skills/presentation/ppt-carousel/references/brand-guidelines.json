@@ -1,0 +1,73 @@
+{
+  "colors": {
+    "primary": {
+      "orange": "#ff6b35",
+      "foreground": "#ffffff"
+    },
+    "background": {
+      "navy": "#171d28",
+      "muted": "#f1f5f9"
+    },
+    "accent": {
+      "electric_blue": "#0ea5e9",
+      "electric_cyan": "#00d9ff"
+    },
+    "text": {
+      "primary": "#0f172a",
+      "muted": "#64748b",
+      "white": "#ffffff"
+    }
+  },
+  "fonts": {
+    "heading": "Poppins",
+    "body": "Inter",
+    "monospace": "SF Mono",
+    "fallback": "Arial, Helvetica, sans-serif",
+    "sizes": {
+      "super_headline": 72,
+      "headline": 48,
+      "subheadline": 36,
+      "body_large": 32,
+      "body": 28,
+      "small": 24,
+      "label": 12
+    },
+    "weights": {
+      "bold": 700,
+      "semibold": 600,
+      "medium": 500,
+      "regular": 400
+    }
+  },
+  "spacing": {
+    "margins": {
+      "slide": 80,
+      "text_block": 40,
+      "line_spacing": 1.4
+    },
+    "logo_zone": {
+      "position": "bottom-right",
+      "width": 200,
+      "height": 130,
+      "padding": 20
+    }
+  },
+  "formats": {
+    "square": {
+      "width": 1080,
+      "height": 1080,
+      "use_case": "LinkedIn feed (mobile-optimized)"
+    },
+    "portrait": {
+      "width": 1080,
+      "height": 1350,
+      "use_case": "LinkedIn stories, vertical formats"
+    }
+  },
+  "readability": {
+    "max_lines_per_slide": 5,
+    "min_body_font_size": 28,
+    "max_chars_per_line": 60,
+    "contrast_ratio_min": 4.5
+  }
+}

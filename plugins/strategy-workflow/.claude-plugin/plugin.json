@@ -1,0 +1,48 @@
+{
+  "name": "strategy-workflow",
+  "version": "1.0.0",
+  "description": "Strategic planning with COS orchestration, PR-FAQ, buy-vs-build analysis, PMF validation, and tenets framework",
+  "author": "Travis Sparks",
+  "tags": ["strategy", "planning", "cos", "product-management", "decision-making"],
+  "anthropic_marketplace": {
+    "category": "business-strategy",
+    "visibility": "public"
+  },
+  "agents": "./agents/",
+  "skills": [
+    {
+      "name": "cos-intake",
+      "description": "Request parsing and staffing for COS deliverables",
+      "path": "skills/cos/intake"
+    },
+    {
+      "name": "prfaq",
+      "description": "Amazon-style PR-FAQ generator",
+      "path": "skills/cos/prfaq"
+    },
+    {
+      "name": "buy-vs-build",
+      "description": "7-dimension decision matrix with TCO calculator",
+      "path": "skills/cos/buy-vs-build"
+    },
+    {
+      "name": "pmf-validation",
+      "description": "Product-market fit validation framework",
+      "path": "skills/cos/pmf-validation"
+    },
+    {
+      "name": "tenets",
+      "description": "Non-negotiable principles framework",
+      "path": "skills/cos/tenets"
+    },
+    {
+      "name": "security-review",
+      "description": "Third-party skill security review",
+      "path": "skills/cos/security-review"
+    }
+  ],
+  "dependencies": {
+    "python": ">=3.8"
+  },
+  "license": "MIT"
+}

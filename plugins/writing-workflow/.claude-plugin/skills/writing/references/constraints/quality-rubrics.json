@@ -1,0 +1,337 @@
+{
+  "overall_target": {
+    "average_score": 85,
+    "minimum_per_metric": 80,
+    "scale": "0-100"
+  },
+  "metrics": {
+    "groundedness": {
+      "description": "Claims supported by credible sources",
+      "weight": 1.0,
+      "scoring": {
+        "90-100": {
+          "criteria": [
+            "Tier-1 sources (academic, official docs, authoritative industry)",
+            "Direct citations with links",
+            "All major claims verifiable",
+            "Source independence (≥2 independent sources for key claims)"
+          ]
+        },
+        "80-89": {
+          "criteria": [
+            "Mix of Tier-1 and Tier-2 sources",
+            "Most claims supported",
+            "Minor claims may lack direct citation",
+            "Source quality is good"
+          ]
+        },
+        "70-79": {
+          "criteria": [
+            "Mostly Tier-2 sources (reputable blogs, industry reports)",
+            "Some unsupported claims",
+            "Limited source independence",
+            "Could use stronger evidence"
+          ]
+        },
+        "below_70": {
+          "criteria": [
+            "Weak sources or missing citations",
+            "Many unsupported claims",
+            "Tier-3/4 sources (forums, social media)",
+            "Not publication ready"
+          ]
+        }
+      },
+      "source_tiers": {
+        "tier_1": [
+          "Academic papers (peer-reviewed)",
+          "Official documentation",
+          "Government/regulatory sources",
+          "Primary research",
+          "Authoritative industry sources (Gartner, McKinsey)"
+        ],
+        "tier_2": [
+          "Reputable industry blogs",
+          "Industry analyst reports",
+          "News from established outlets",
+          "Expert interviews",
+          "Case studies from known companies"
+        ],
+        "tier_3": [
+          "Community forums (HN, Reddit)",
+          "Personal blogs",
+          "Social media posts",
+          "Unverified case studies"
+        ],
+        "tier_4": [
+          "Anonymous sources",
+          "Unverifiable claims",
+          "AI-generated content",
+          "Marketing materials"
+        ]
+      }
+    },
+    "relevance": {
+      "description": "Content serves reader's goal and stays on topic",
+      "weight": 1.0,
+      "scoring": {
+        "90-100": {
+          "criteria": [
+            "Every paragraph addresses core question",
+            "No unnecessary tangents",
+            "Clear value proposition maintained",
+            "Reader goal achieved"
+          ]
+        },
+        "80-89": {
+          "criteria": [
+            "Mostly on-topic",
+            "Minor tangents that add context",
+            "Clear connection to reader goal",
+            "Good focus overall"
+          ]
+        },
+        "70-79": {
+          "criteria": [
+            "Some drift from main topic",
+            "Unnecessary content included",
+            "Reader goal partially met",
+            "Could be tighter"
+          ]
+        },
+        "below_70": {
+          "criteria": [
+            "Significant irrelevance",
+            "Multiple tangents",
+            "Reader goal not clear",
+            "Needs refocus"
+          ]
+        }
+      }
+    },
+    "readability": {
+      "description": "Clear, scannable, appropriate for audience",
+      "weight": 1.0,
+      "scoring": {
+        "90-100": {
+          "criteria": [
+            "Hemingway grade ≤8 (or appropriate for technical audience)",
+            "Scannable headers and structure",
+            "Clear, concise sentences",
+            "White space and formatting aid comprehension",
+            "Jargon defined when used"
+          ]
+        },
+        "80-89": {
+          "criteria": [
+            "Good readability with minor improvements possible",
+            "Mostly clear structure",
+            "Occasional complex sentences",
+            "Generally accessible"
+          ]
+        },
+        "70-79": {
+          "criteria": [
+            "Readable but could be clearer",
+            "Some dense paragraphs",
+            "Structure could improve",
+            "Jargon not always explained"
+          ]
+        },
+        "below_70": {
+          "criteria": [
+            "Dense or confusing",
+            "Poor structure",
+            "Inappropriate complexity",
+            "Hard to scan"
+          ]
+        }
+      },
+      "metrics": {
+        "hemingway_grade": {
+          "target": 8,
+          "max_acceptable": 10,
+          "technical_content_allowance": 12
+        },
+        "sentence_length": {
+          "avg_target": 15,
+          "avg_max": 20
+        },
+        "paragraph_sentences": {
+          "min": 2,
+          "max": 5,
+          "target": 3
+        }
+      }
+    },
+    "voice": {
+      "description": "Matches persona and sounds authentic",
+      "weight": 1.0,
+      "scoring": {
+        "90-100": {
+          "criteria": [
+            "Perfect persona match",
+            "Authentic and natural",
+            "No AI tells or generic phrases",
+            "Consistent throughout"
+          ]
+        },
+        "80-89": {
+          "criteria": [
+            "Mostly matches persona",
+            "Minor AI tells",
+            "Generally authentic",
+            "Good consistency"
+          ]
+        },
+        "70-79": {
+          "criteria": [
+            "Voice present but inconsistent",
+            "Some generic AI language",
+            "Persona recognizable but imperfect",
+            "Needs polish"
+          ]
+        },
+        "below_70": {
+          "criteria": [
+            "Generic AI voice",
+            "Doesn't match persona",
+            "Many AI tells",
+            "Not authentic"
+          ]
+        }
+      },
+      "ai_tells_to_avoid": [
+        "it's important to note",
+        "it's worth noting",
+        "leverage",
+        "utilize",
+        "paradigm shift",
+        "game-changer",
+        "revolutionary",
+        "seamless",
+        "robust",
+        "cutting-edge",
+        "delve into",
+        "at the end of the day",
+        "in today's fast-paced world"
+      ],
+      "numbered_frameworks": {
+        "rule": "When frameworks are numbered, ALWAYS include numbers in every reference",
+        "bad_example": "three layers (Decision Rights, Quality Contracts, Handoff Protocols)",
+        "good_example": "three layers (1. Decision Rights, 2. Quality Contracts, 3. Handoff Protocols)"
+      }
+    },
+    "originality": {
+      "description": "Unique insights, specific examples, fresh perspective",
+      "weight": 1.0,
+      "scoring": {
+        "90-100": {
+          "criteria": [
+            "Unique insights not found elsewhere",
+            "Specific, concrete examples",
+            "Fresh perspective or angle",
+            "Original frameworks or mental models",
+            "No clichés"
+          ]
+        },
+        "80-89": {
+          "criteria": [
+            "Some original insights",
+            "Good examples",
+            "Few clichés",
+            "Mostly fresh perspective"
+          ]
+        },
+        "70-79": {
+          "criteria": [
+            "Mostly original",
+            "Some generic content",
+            "Examples could be more specific",
+            "A few clichés"
+          ]
+        },
+        "below_70": {
+          "criteria": [
+            "Generic insights",
+            "Clichéd language",
+            "Predictable examples",
+            "No unique perspective"
+          ]
+        }
+      },
+      "cliches_to_avoid": [
+        "think outside the box",
+        "low-hanging fruit",
+        "move the needle",
+        "synergy",
+        "win-win",
+        "boil the ocean",
+        "drink the Kool-Aid",
+        "it is what it is",
+        "at the end of the day",
+        "push the envelope"
+      ]
+    }
+  },
+  "priority_levels": {
+    "P0": {
+      "description": "Blocking - must fix before publication",
+      "examples": [
+        "Broken links",
+        "Unsupported major claims",
+        "Factual errors",
+        "Wrong persona/voice for platform",
+        "Platform constraint violations",
+        "Missing critical context"
+      ]
+    },
+    "P1": {
+      "description": "Strongly recommended - quality significantly improved",
+      "examples": [
+        "AI tells in voice",
+        "Generic examples (could be more specific)",
+        "Minor readability issues",
+        "Weak transitions",
+        "Could add stronger sources",
+        "Numbered framework inconsistencies"
+      ]
+    },
+    "P2": {
+      "description": "Optional - nice to have",
+      "examples": [
+        "Minor word choice improvements",
+        "Could add one more example",
+        "Alternative phrasing suggestions",
+        "Stylistic preferences"
+      ]
+    }
+  },
+  "iteration_policy": {
+    "max_passes": 3,
+    "stop_conditions": [
+      "Overall score ≥85/100",
+      "All metrics ≥80/100",
+      "3 passes completed (diminishing returns)",
+      "No P0 issues remaining"
+    ],
+    "pass_1": "Initial evaluation, identify all P0/P1/P2 issues",
+    "pass_2": "Re-evaluate after P0/P1 fixes",
+    "pass_3": "Final pass, focus on remaining P1 issues"
+  },
+  "recommendation_thresholds": {
+    "publish": {
+      "overall": 85,
+      "minimum_per_metric": 80
+    },
+    "revise": {
+      "overall_min": 70,
+      "overall_max": 84,
+      "or_any_metric_below": 80
+    },
+    "major_revision": {
+      "overall": "below_70",
+      "or_any_metric_below": 70
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "steps": [
+    "roadmap",
+    "ladder",
+    "mountain_climb",
+    "assembly_line",
+    "staircase",
+    "journey_path"
+  ],
+  "pillars": [
+    "columns",
+    "control_panel",
+    "foundation_blocks",
+    "support_beams",
+    "temple_pillars"
+  ],
+  "layers": [
+    "stacked_blocks",
+    "pyramid",
+    "elevation_chart",
+    "tiered_cake",
+    "building_floors"
+  ],
+  "principles": [
+    "compass",
+    "core_values",
+    "guideposts",
+    "foundation_stones",
+    "north_stars"
+  ],
+  "stages": [
+    "timeline_path",
+    "evolution_chart",
+    "growth_stages",
+    "maturity_model",
+    "lifecycle_phases"
+  ],
+  "loops": [
+    "orbit_model",
+    "loop_track",
+    "circular_flow",
+    "feedback_cycle",
+    "continuous_rotation"
+  ],
+  "description": "Maps framework types to visual metaphor options for creative infographic generation"
+}

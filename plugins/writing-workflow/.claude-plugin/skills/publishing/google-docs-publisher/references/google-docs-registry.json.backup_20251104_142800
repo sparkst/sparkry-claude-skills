@@ -1,0 +1,15 @@
+{
+  "articles": {
+    "content/articles/week-02/W02-THU-test.md": {
+      "doc_id": "1abc123def456",
+      "doc_url": "https://docs.google.com/document/d/1abc123def456",
+      "doc_name": "Substack: Test Article",
+      "created_at": "2025-11-04T14:27:41Z",
+      "updated_at": "2025-11-04T14:27:41Z",
+      "category": "Substack",
+      "version": 1
+    }
+  },
+  "schema_version": "1.0",
+  "last_updated": "2025-11-04T14:27:41Z"
+}

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1456, height=1048">
+    <title>Hero Image - Typography-First with Visual Texture</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@700;800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            width: 1456px;
+            height: 1048px;
+            background: linear-gradient(135deg, #171d28 0%, #1e2a3a 100%); /* Subtle navy gradient */
+            position: relative;
+            overflow: hidden;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #ffffff;
+        }
+
+        /* Diagonal stripe texture */
+        .texture {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0.05;
+            z-index: 1;
+            background-image: repeating-linear-gradient(
+                45deg,
+                transparent,
+                transparent 35px,
+                rgba(255, 255, 255, 0.1) 35px,
+                rgba(255, 255, 255, 0.1) 70px
+            );
+            pointer-events: none;
+        }
+
+        /* Subtle noise overlay */
+        .noise {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0.04;
+            z-index: 2;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 400 400' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+            pointer-events: none;
+        }
+
+        /* Content container */
+        .container {
+            position: relative;
+            z-index: 10;
+            max-width: 1200px;
+            padding: 100px 80px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            min-height: 1048px;
+        }
+
+        .title {
+            font-family: 'Poppins', sans-serif;
+            font-size: 80px;
+            font-weight: 800;
+            line-height: 1.1;
+            margin-bottom: 50px;
+            letter-spacing: -0.025em;
+            max-width: 1000px;
+        }
+
+        /* Orange accent on key words (applied via JavaScript or manual span) */
+        .title .accent {
+            color: #ff6b35; /* Sparkry orange */
+            display: inline;
+        }
+
+        .subtitle {
+            font-family: 'Inter', sans-serif;
+            font-size: 32px;
+            font-weight: 400;
+            line-height: 1.65;
+            opacity: 0.88;
+            max-width: 900px;
+        }
+
+        /* Brand logo */
+        .brand {
+            position: absolute;
+            bottom: 50px;
+            right: 60px;
+            font-family: 'Poppins', sans-serif;
+            font-size: 24px;
+            font-weight: 600;
+            color: #ff6b35; /* Sparkry orange */
+            opacity: 0.95;
+            z-index: 20;
+        }
+
+        /* Decorative accent bar (top-left) */
+        .accent-bar {
+            position: absolute;
+            top: 80px;
+            left: 80px;
+            width: 6px;
+            height: 120px;
+            background: linear-gradient(180deg, #ff6b35 0%, rgba(255, 107, 53, 0.3) 100%);
+            border-radius: 3px;
+            z-index: 5;
+        }
+    </style>
+</head>
+<body>
+    <!-- Visual texture layers -->
+    <div class="texture"></div>
+    <div class="noise"></div>
+    <div class="accent-bar"></div>
+
+    <!-- Content -->
+    <div class="container">
+        <div class="title">{{ title }}</div>
+        <div class="subtitle">{{ subtitle }}</div>
+    </div>
+
+    <!-- Brand -->
+    <div class="brand">Sparkry.AI</div>
+</body>
+</html>

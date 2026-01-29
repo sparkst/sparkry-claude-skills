@@ -1,0 +1,91 @@
+{
+  "vertical_process": {
+    "description": "Sequential steps flow vertically with numbered progression",
+    "best_for": "3-7 sequential steps, how-to guides",
+    "structure": {
+      "hero": "Full-width title + subtitle with gradient background",
+      "elements": "Stacked cards with progressive numbering, connecting lines",
+      "summary": "Full-width CTA panel"
+    },
+    "css_hints": {
+      "element_layout": "display: block; margin-bottom: 40px;",
+      "connectors": "Use ::after pseudo-elements for arrows/lines between steps",
+      "numbering": "Large circular badges with step numbers"
+    }
+  },
+  "pillars": {
+    "description": "Side-by-side columns representing independent pillars",
+    "best_for": "3-5 independent principles/pillars, foundation elements",
+    "structure": {
+      "hero": "Centered title + subtitle",
+      "elements": "CSS Grid or Flexbox columns, equal height",
+      "summary": "Full-width CTA panel"
+    },
+    "css_hints": {
+      "element_layout": "display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));",
+      "equal_height": "Use flexbox or grid to ensure columns same height",
+      "visual_metaphor": "Icon at top like capital of column"
+    }
+  },
+  "stacked_layers": {
+    "description": "Layers stacked vertically showing hierarchy or building blocks",
+    "best_for": "4-7 layers, maturity levels, building from foundation",
+    "structure": {
+      "hero": "Title + subtitle",
+      "elements": "Cards with increasing/decreasing width to show pyramid/hierarchy",
+      "summary": "Full-width CTA panel"
+    },
+    "css_hints": {
+      "element_layout": "Stack with varying widths: 100%, 90%, 80%, etc.",
+      "visual_hierarchy": "Larger/bolder at base, lighter at top",
+      "connectors": "No explicit connectors, use spacing and alignment"
+    }
+  },
+  "timeline": {
+    "description": "Horizontal or vertical timeline with chronological progression",
+    "best_for": "5-10 stages, historical evolution, roadmap",
+    "structure": {
+      "hero": "Title + subtitle",
+      "elements": "Timeline rail with nodes for each stage",
+      "summary": "End-of-timeline CTA"
+    },
+    "css_hints": {
+      "timeline_rail": "Vertical or horizontal line with position: relative",
+      "nodes": "Circular badges positioned on rail with ::before",
+      "alternating": "Consider alternating left/right for vertical timeline"
+    }
+  },
+  "cycle": {
+    "description": "Circular flow showing continuous loop",
+    "best_for": "4-8 stages in feedback loop, iterative process",
+    "structure": {
+      "hero": "Title + subtitle",
+      "elements": "Circular arrangement (CSS Grid with polar coordinates or SVG)",
+      "summary": "Center or bottom CTA"
+    },
+    "css_hints": {
+      "circular_layout": "Use transform: rotate() and translate() or CSS Grid",
+      "arrows": "Curved arrows between elements (SVG or CSS border tricks)",
+      "central_hub": "Optional central element showing loop purpose"
+    }
+  },
+  "dashboard": {
+    "description": "Grid layout with multiple elements visible at once",
+    "best_for": "6-10+ elements, high information density",
+    "structure": {
+      "hero": "Title + subtitle",
+      "elements": "CSS Grid with 2-3 columns, compact cards",
+      "summary": "Full-width CTA panel"
+    },
+    "css_hints": {
+      "grid_layout": "display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));",
+      "compact_cards": "Smaller padding, less white space than other layouts",
+      "icons_essential": "Icons critical for quick scanning"
+    }
+  },
+  "usage_notes": {
+    "responsive": "All layouts must be mobile-responsive (single column on small screens)",
+    "accessibility": "Maintain semantic HTML hierarchy regardless of visual layout",
+    "creativity": "Use these as starting points, add custom visual elements per metaphor"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "dev-workflow",
+  "version": "1.0.0",
+  "description": "TDD-first development workflow with PE reviewer, test writer, planner, and release manager",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["tdd", "testing", "code-review", "planning"],
+  "agents": "./agents/",
+  "skills": "./skills/"
+}

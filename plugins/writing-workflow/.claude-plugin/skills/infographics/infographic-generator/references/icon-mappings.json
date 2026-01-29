@@ -1,0 +1,100 @@
+{
+  "concept_to_icon": {
+    "data": "fa-database",
+    "foundation": "fa-building-columns",
+    "process": "fa-gears",
+    "analysis": "fa-chart-line",
+    "security": "fa-shield-halved",
+    "transform": "fa-wand-magic-sparkles",
+    "ai": "fa-brain",
+    "team": "fa-users",
+    "strategy": "fa-chess",
+    "scale": "fa-chart-simple",
+    "automation": "fa-robot",
+    "integration": "fa-puzzle-piece",
+    "learn": "fa-graduation-cap",
+    "measure": "fa-gauge-high",
+    "optimize": "fa-sliders",
+    "build": "fa-hammer",
+    "design": "fa-pen-ruler",
+    "test": "fa-flask",
+    "deploy": "fa-rocket",
+    "monitor": "fa-display",
+    "feedback": "fa-comments",
+    "iterate": "fa-arrows-rotate",
+    "plan": "fa-clipboard-list",
+    "execute": "fa-play",
+    "review": "fa-magnifying-glass-chart",
+    "adapt": "fa-arrows-turn-to-dots",
+    "collaborate": "fa-handshake",
+    "communicate": "fa-bullhorn",
+    "document": "fa-file-lines",
+    "innovate": "fa-lightbulb",
+    "research": "fa-microscope",
+    "prototype": "fa-drafting-compass",
+    "validate": "fa-check-double",
+    "quality": "fa-star",
+    "performance": "fa-gauge",
+    "cost": "fa-dollar-sign",
+    "time": "fa-clock",
+    "risk": "fa-triangle-exclamation",
+    "governance": "fa-gavel",
+    "compliance": "fa-clipboard-check",
+    "ethics": "fa-scale-balanced",
+    "privacy": "fa-user-shield",
+    "architecture": "fa-sitemap",
+    "infrastructure": "fa-server",
+    "cloud": "fa-cloud",
+    "code": "fa-code",
+    "api": "fa-plug",
+    "model": "fa-diagram-project",
+    "training": "fa-chalkboard-user",
+    "evaluation": "fa-clipboard-question",
+    "insights": "fa-lightbulb",
+    "decision": "fa-code-branch",
+    "action": "fa-bolt",
+    "outcome": "fa-bullseye",
+    "growth": "fa-chart-line",
+    "pipeline": "fa-pipe",
+    "workflow": "fa-diagram-next"
+  },
+  "fallback_icons": [
+    "fa-circle-dot",
+    "fa-star",
+    "fa-diamond",
+    "fa-square",
+    "fa-hexagon"
+  ],
+  "icon_systems": {
+    "flat_duotone": {
+      "description": "Two-tone flat icons with primary+accent colors",
+      "prefix": "fa-solid"
+    },
+    "outline": {
+      "description": "Line-based outlined icons",
+      "prefix": "fa-regular"
+    },
+    "filled_circle_nodes": {
+      "description": "Solid icons within circular backgrounds",
+      "prefix": "fa-solid",
+      "wrapper": "circular background div"
+    },
+    "solid_bold": {
+      "description": "Bold solid icons for high contrast",
+      "prefix": "fa-solid",
+      "weight": "900"
+    },
+    "line_minimal": {
+      "description": "Thin line icons for elegant look",
+      "prefix": "fa-light",
+      "fallback": "fa-regular"
+    }
+  },
+  "usage_guidelines": {
+    "matching_strategy": "Scan element label for keywords, use longest match",
+    "fallback": "If no match, use contextual icon based on framework type",
+    "consistency": "Use same icon system across all elements in infographic",
+    "size": "Icon size should be 1.5x-2x the font size of heading",
+    "color": "Icons should use brand primary/accent colors, not default black"
+  }
+}

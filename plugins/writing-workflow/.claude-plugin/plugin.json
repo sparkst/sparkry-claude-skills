@@ -1,0 +1,86 @@
+{
+  "name": "writing-workflow",
+  "version": "1.0.0",
+  "description": "Multi-agent content creation system with platform-specific publishing and visual content generation",
+  "author": "Claude Code Community",
+  "license": "MIT",
+  "minClaudeVersion": "1.0.0",
+  "tags": [
+    "writing",
+    "content-creation",
+    "publishing",
+    "infographics",
+    "multi-platform"
+  ],
+  "agents": "./agents/",
+  "skills": [
+    "writing",
+    "infographics/infographic-generator",
+    "content/visual-content-generator",
+    "publishing/google-docs-publisher",
+    "presentation/ppt-carousel"
+  ],
+  "commands": {
+    "QWRITE": {
+      "description": "Multi-platform content creation with persona layering and quality scoring",
+      "skill": "writing",
+      "tools": [
+        "quality-scorer.py",
+        "voice-validator.py",
+        "link-validator.py",
+        "platform-constraints.py",
+        "template-selector.py"
+      ]
+    },
+    "QINFOGRAPHIC": {
+      "description": "Transform article frameworks into visually compelling HTML infographics",
+      "skill": "infographics/infographic-generator",
+      "tools": [
+        "framework-extractor.py",
+        "framework-validator.py",
+        "pattern-selector.py",
+        "html-generator.py"
+      ]
+    },
+    "QVISUAL": {
+      "description": "Generate hero images and diagrams from articles",
+      "skill": "content/visual-content-generator",
+      "tools": [
+        "generate-hero-image.py",
+        "detect-visual-opportunities.py",
+        "render-html-to-image.py"
+      ]
+    },
+    "QPPT": {
+      "description": "Generate brand-compliant PowerPoint carousels for LinkedIn",
+      "skill": "presentation/ppt-carousel",
+      "tools": [
+        "slide-optimizer.py",
+        "ppt-generator.py",
+        "brand-validator.py"
+      ]
+    }
+  },
+  "dependencies": {
+    "python": ">=3.9",
+    "packages": [
+      "anthropic",
+      "python-pptx",
+      "pillow",
+      "beautifulsoup4",
+      "playwright"
+    ]
+  },
+  "configuration": {
+    "required": [],
+    "optional": [
+      "ANTHROPIC_API_KEY",
+      "GOOGLE_DOCS_CREDENTIALS"
+    ]
+  },
+  "documentation": {
+    "readme": "README.md",
+    "examples": "examples/",
+    "architecture": "ARCHITECTURE.md"
+  }
+}

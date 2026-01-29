@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "starter-pack",
+  "version": "1.0.0",
+  "description": "Essential agents for beginners: planner, PE reviewer, and SDE-III implementation",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["starter", "beginner", "essentials"],
+  "agents": "./agents/"
+}

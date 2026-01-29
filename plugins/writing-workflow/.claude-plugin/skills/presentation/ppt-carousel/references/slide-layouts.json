@@ -1,0 +1,125 @@
+{
+  "hook": {
+    "description": "Opening slide that grabs attention",
+    "icon_position": "top-center",
+    "icon_size": 100,
+    "text_alignment": "center",
+    "background": "dark_gradient_overlay",
+    "title_font": "Poppins",
+    "title_size": 48,
+    "subtitle_font": "Inter",
+    "subtitle_size": 36,
+    "text_color": "white",
+    "use_cases": [
+      "First slide",
+      "Attention-grabbing statement",
+      "Problem introduction"
+    ]
+  },
+  "framework": {
+    "description": "Core content with numbered bullets",
+    "icon_position": "top-left",
+    "icon_size": 80,
+    "text_alignment": "left",
+    "background": "default",
+    "title_font": "Poppins",
+    "title_size": 48,
+    "bullet_font": "Inter",
+    "bullet_size": 28,
+    "bullet_style": "electric_blue",
+    "max_bullets": 5,
+    "text_color": "white",
+    "use_cases": [
+      "Framework layers",
+      "Key concepts",
+      "Numbered steps"
+    ]
+  },
+  "example": {
+    "description": "Real-world story or case study",
+    "label": "REAL EXAMPLE",
+    "label_font": "Poppins",
+    "label_size": 12,
+    "label_color": "primary_orange",
+    "icon_position": "top-right",
+    "icon_size": 60,
+    "text_alignment": "left",
+    "background": "muted_tint",
+    "content_font": "Inter",
+    "content_size": 32,
+    "text_color": "text_primary",
+    "max_lines": 5,
+    "use_cases": [
+      "Customer stories",
+      "Real-world applications",
+      "Case studies"
+    ]
+  },
+  "diagnostic": {
+    "description": "Key question or test",
+    "icon_position": "none",
+    "icon_size": 0,
+    "text_alignment": "center",
+    "background": "navy_solid",
+    "content_font": "Poppins",
+    "content_size": 40,
+    "text_color": "white",
+    "emphasis": "high_contrast",
+    "use_cases": [
+      "Diagnostic questions",
+      "Key tests",
+      "Challenge statements"
+    ]
+  },
+  "cta": {
+    "description": "Call-to-action",
+    "icon_position": "top-center",
+    "icon_size": 80,
+    "text_alignment": "center",
+    "background": "default",
+    "question_font": "Poppins",
+    "question_size": 40,
+    "action_font": "Inter",
+    "action_size": 32,
+    "action_color": "primary_orange",
+    "text_color": "white",
+    "use_cases": [
+      "Final slide",
+      "Comment prompts",
+      "Link references"
+    ]
+  },
+  "transition": {
+    "description": "Section break or transition",
+    "icon_position": "center",
+    "icon_size": 100,
+    "text_alignment": "center",
+    "background": "navy_solid",
+    "title_font": "Poppins",
+    "title_size": 60,
+    "text_color": "white",
+    "use_cases": [
+      "Section breaks",
+      "Topic transitions",
+      "Part dividers"
+    ]
+  },
+  "statistic": {
+    "description": "Data point or statistic",
+    "icon_position": "top-center",
+    "icon_size": 60,
+    "text_alignment": "center",
+    "background": "default",
+    "number_font": "Poppins",
+    "number_size": 72,
+    "number_color": "primary_orange",
+    "label_font": "Inter",
+    "label_size": 28,
+    "label_color": "white",
+    "use_cases": [
+      "Key metrics",
+      "Statistics",
+      "Data points"
+    ]
+  }
+}

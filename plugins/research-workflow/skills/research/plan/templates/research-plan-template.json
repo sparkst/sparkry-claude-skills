@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["topic", "claim_budget", "sub_questions", "tier_rules"],
+  "properties": {
+    "topic": {
+      "type": "string",
+      "description": "The main research topic or question",
+      "examples": ["AI coding agents market positioning for solo developers"]
+    },
+    "claim_budget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 15,
+      "description": "Maximum number of load-bearing claims (recommended: ≤10)",
+      "default": 10
+    },
+    "sub_questions": {
+      "type": "array",
+      "description": "3-7 specific sub-questions to decompose the topic",
+      "minItems": 3,
+      "maxItems": 7,
+      "items": {
+        "type": "string",
+        "examples": [
+          "What is the TAM for solo developer tools?",
+          "Who are the top 5 competitors?",
+          "What unmet needs exist in the solo developer segment?"
+        ]
+      }
+    },
+    "tier_rules": {
+      "type": "object",
+      "description": "Source quality requirements",
+      "required": ["tier1_required", "minimum_tier1_sources_per_claim"],
+      "properties": {
+        "tier1_required": {
+          "type": "boolean",
+          "description": "Whether Tier-1 sources are mandatory",
+          "default": true
+        },
+        "minimum_tier1_sources_per_claim": {
+          "type": "integer",
+          "description": "Minimum independent Tier-1 sources per high-stakes claim",
+          "minimum": 1,
+          "maximum": 5,
+          "default": 2
+        },
+        "allow_tier2_fallback": {
+          "type": "boolean",
+          "description": "Allow Tier-2 sources if Tier-1 unavailable",
+          "default": false
+        }
+      }
+    },
+    "query_strategy": {
+      "type": "object",
+      "description": "Optional query configuration",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "description": "Search tools to use",
+          "items": {
+            "type": "string",
+            "enum": ["tavily", "brave_web", "brave_news"]
+          },
+          "default": ["tavily", "brave_web"]
+        },
+        "canonical_domains": {
+          "type": "array",
+          "description": "Tier-1 domains to prioritize",
+          "items": {
+            "type": "string",
+            "examples": ["gartner.com", "idc.com", "sec.gov"]
+          }
+        },
+        "exclude_domains": {
+          "type": "array",
+          "description": "Domains to exclude (noise filtering)",
+          "items": {
+            "type": "string",
+            "examples": ["medium.com", "quora.com"]
+          }
+        },
+        "freshness": {
+          "type": "string",
+          "description": "Tavily freshness parameter",
+          "enum": ["pd", "pw", "pm", "py", ""],
+          "default": ""
+        }
+      }
+    },
+    "deliverable_type": {
+      "type": "string",
+      "description": "Expected output format",
+      "enum": ["proposal", "briefing", "analysis"],
+      "default": "proposal"
+    },
+    "urgency": {
+      "type": "string",
+      "description": "Research timeline urgency",
+      "enum": ["low", "normal", "high"],
+      "default": "normal"
+    },
+    "stakeholders": {
+      "type": "array",
+      "description": "Who will consume this research?",
+      "items": {
+        "type": "string",
+        "examples": ["founder", "board", "investors", "engineering"]
+      }
+    }
+  }
+}

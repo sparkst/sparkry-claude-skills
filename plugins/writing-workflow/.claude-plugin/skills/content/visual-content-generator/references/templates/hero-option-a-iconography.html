@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1456, height=1048">
+    <title>Hero Image - Minimal + Iconography</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@700;800&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            width: 1456px;
+            height: 1048px;
+            background: #171d28; /* Sparkry navy */
+            position: relative;
+            overflow: hidden;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            color: #ffffff;
+        }
+
+        /* Icon container (top-left) */
+        .icon-container {
+            position: absolute;
+            top: 80px;
+            left: 80px;
+            z-index: 5;
+        }
+
+        .icon {
+            font-size: 120px;
+            color: rgba(255, 107, 53, 0.25); /* Sparkry orange, subtle */
+            line-height: 1;
+        }
+
+        /* Content container */
+        .container {
+            position: relative;
+            z-index: 10;
+            max-width: 1200px;
+            padding: 100px 80px;
+            padding-top: 280px; /* Space for icon */
+            display: flex;
+            flex-direction: column;
+        }
+
+        .title {
+            font-family: 'Poppins', sans-serif;
+            font-size: 72px;
+            font-weight: 800;
+            line-height: 1.15;
+            margin-bottom: 40px;
+            letter-spacing: -0.02em;
+            max-width: 1000px;
+        }
+
+        .subtitle {
+            font-family: 'Inter', sans-serif;
+            font-size: 30px;
+            font-weight: 400;
+            line-height: 1.6;
+            opacity: 0.90;
+            max-width: 950px;
+        }
+
+        /* Brand logo */
+        .brand {
+            position: absolute;
+            bottom: 50px;
+            right: 60px;
+            font-family: 'Poppins', sans-serif;
+            font-size: 24px;
+            font-weight: 600;
+            color: #ff6b35; /* Sparkry orange */
+            opacity: 0.95;
+            z-index: 20;
+        }
+
+        /* Subtle gradient accent (bottom-right) */
+        .gradient-accent {
+            position: absolute;
+            bottom: -200px;
+            right: -200px;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(59, 130, 246, 0.15) 0%, transparent 70%); /* Electric blue */
+            filter: blur(80px);
+            z-index: 1;
+        }
+    </style>
+</head>
+<body>
+    <!-- Background accent -->
+    <div class="gradient-accent"></div>
+
+    <!-- Icon (top-left) -->
+    <div class="icon-container">
+        <!-- Default icon: fa-lightbulb (can be replaced with --icon parameter) -->
+        <i class="fa-solid fa-lightbulb icon"></i>
+    </div>
+
+    <!-- Content -->
+    <div class="container">
+        <div class="title">{{ title }}</div>
+        <div class="subtitle">{{ subtitle }}</div>
+    </div>
+
+    <!-- Brand -->
+    <div class="brand">Sparkry.AI</div>
+</body>
+</html>

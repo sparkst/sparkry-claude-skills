@@ -1,0 +1,54 @@
+{
+  "patterns": [
+    {
+      "template": "[FRAMEWORK_NAME]: [OUTCOME]",
+      "example": "The 5 Pillars: Building AI Excellence",
+      "use_case": "Direct, outcome-focused"
+    },
+    {
+      "template": "Your [TOPIC] Stack: [N] [ELEMENTS]",
+      "example": "Your AI Stack: 5 Essential Pillars",
+      "use_case": "Ownership, practical"
+    },
+    {
+      "template": "How to Move From [STATE_A] to [STATE_B] in [N] Moves",
+      "example": "How to Move From Manual to Automated in 5 Steps",
+      "use_case": "Transformation journey"
+    },
+    {
+      "template": "[N] [ELEMENTS] Every [AUDIENCE] Needs for [OUTCOME]",
+      "example": "5 Principles Every PM Needs for AI Success",
+      "use_case": "Audience-specific"
+    },
+    {
+      "template": "The [N] [ELEMENTS] of [TOPIC]",
+      "example": "The 5 Layers of AI Maturity",
+      "use_case": "Classic, authoritative"
+    },
+    {
+      "template": "Mastering [TOPIC]: [N] [ELEMENTS]",
+      "example": "Mastering AI Transformation: 5 Core Stages",
+      "use_case": "Skill-building focus"
+    },
+    {
+      "template": "[N] [ELEMENTS] to [ACTION]",
+      "example": "5 Steps to Scale Your AI Practice",
+      "use_case": "Action-oriented"
+    }
+  ],
+  "usage_rules": {
+    "avoid_repetition": "Do not use same pattern more than 2 consecutive times for same user",
+    "max_words": 10,
+    "substitute_placeholders": {
+      "[FRAMEWORK_NAME]": "Use explicit framework name from article",
+      "[N]": "Number of framework elements",
+      "[ELEMENTS]": "Framework type (Steps, Pillars, Layers, etc.)",
+      "[TOPIC]": "Extract from article title or context",
+      "[AUDIENCE]": "Extract from article or infer (PMs, Engineers, Leaders, etc.)",
+      "[OUTCOME]": "Extract from framework supporting context",
+      "[STATE_A]": "Starting state from framework",
+      "[STATE_B]": "End state from framework",
+      "[ACTION]": "Key action verb (Scale, Build, Transform, Master, etc.)"
+    }
+  }
+}
