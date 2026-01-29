@@ -1,0 +1,7 @@
+# References directory for QTRANSFORM
+
+Place platform constraints and transformation patterns here:
+- platforms/linkedin.json
+- platforms/twitter.json
+- platforms/instagram.json
+- patterns/transformation-patterns.md

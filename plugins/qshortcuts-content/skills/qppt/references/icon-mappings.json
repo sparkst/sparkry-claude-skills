@@ -1,0 +1,39 @@
+{
+  "mappings": {
+    "team|people|split|organization": "lucide:users-2",
+    "problem|warning|mistake|alert": "lucide:alert-triangle",
+    "layers|levels|architecture|framework": "lucide:layers",
+    "example|case|story|sparkles": "lucide:sparkles",
+    "quality|shield|protect|security": "lucide:shield-check",
+    "handoff|transfer|protocol|exchange": "lucide:arrow-right-left",
+    "speed|fast|diagnostic|performance": "lucide:zap",
+    "calendar|book|schedule|meeting": "lucide:calendar-check",
+    "decision|choose|rights|permission": "lucide:check-circle",
+    "contract|agreement|rules|policy": "lucide:file-text",
+    "question|ask|diagnostic|test": "lucide:help-circle",
+    "comment|feedback|discussion|engage": "lucide:message-circle",
+    "link|connection|reference|resource": "lucide:link",
+    "data|database|storage": "lucide:database",
+    "process|workflow|automation": "lucide:gears",
+    "success|achievement|goal": "lucide:trophy",
+    "failure|error|mistake": "lucide:x-circle",
+    "growth|increase|chart": "lucide:trending-up",
+    "decline|decrease": "lucide:trending-down",
+    "time|clock|deadline": "lucide:clock"
+  },
+  "fallback_icon": "lucide:circle",
+  "icon_libraries": {
+    "lucide": {
+      "url_pattern": "https://api.iconify.design/lucide/{name}.svg",
+      "style": "modern_consistent"
+    },
+    "mdi": {
+      "url_pattern": "https://api.iconify.design/mdi/{name}.svg",
+      "style": "comprehensive"
+    },
+    "phosphor": {
+      "url_pattern": "https://api.iconify.design/ph/{name}.svg",
+      "style": "elegant"
+    }
+  }
+}

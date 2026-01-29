@@ -1,0 +1,11 @@
+{
+  "name": "qshortcuts-learning",
+  "version": "1.0.0",
+  "description": "Meta-learning and feedback integration tools for continuous improvement and knowledge management",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["learning", "feedback", "knowledge-management", "meta-learning"]
+}

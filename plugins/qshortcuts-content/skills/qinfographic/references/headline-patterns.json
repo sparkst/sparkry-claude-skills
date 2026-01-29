@@ -1,0 +1,69 @@
+{
+  "patterns": [
+    {
+      "pattern": "[FRAMEWORK_NAME]: [OUTCOME]",
+      "example": "Permission Architecture: Scale AI Without Chaos",
+      "use_case": "Clear value proposition"
+    },
+    {
+      "pattern": "Your [TOPIC] Stack: [N] [ELEMENTS]",
+      "example": "Your AI Transformation Stack: 5 Pillars",
+      "use_case": "Personal/actionable framing"
+    },
+    {
+      "pattern": "How to Move From [STATE_A] to [STATE_B] in [N] Moves",
+      "example": "How to Move From AI Theater to Real Adoption in 3 Moves",
+      "use_case": "Transformation narrative"
+    },
+    {
+      "pattern": "[N] [ELEMENTS] Every [AUDIENCE] Needs for [OUTCOME]",
+      "example": "3 Layers Every Team Needs for AI Scale",
+      "use_case": "Universal application"
+    },
+    {
+      "pattern": "The [N]-[ELEMENT] Framework for [OUTCOME]",
+      "example": "The 5-Pillar Framework for Enterprise AI",
+      "use_case": "Traditional/formal"
+    },
+    {
+      "pattern": "[ACTION] [TOPIC] Like [METAPHOR]",
+      "example": "Scale AI Like Building a City",
+      "use_case": "Metaphor-driven"
+    },
+    {
+      "pattern": "Why [COMMON_BELIEF] Fails (and What Works Instead)",
+      "example": "Why AI Policies Fail (and What Works Instead)",
+      "use_case": "Contrarian hook"
+    },
+    {
+      "pattern": "[N] Steps to [OUTCOME] Without [PAIN_POINT]",
+      "example": "5 Steps to AI Scale Without Team Split",
+      "use_case": "Pain relief"
+    }
+  ],
+  "rotation_rules": {
+    "max_consecutive_identical": 2,
+    "description": "Don't use same pattern more than 2 times in a row",
+    "tracking_window": 5
+  },
+  "variables": {
+    "FRAMEWORK_NAME": "Name from article (e.g., Permission Architecture)",
+    "OUTCOME": "Benefit/result (e.g., Scale Without Chaos)",
+    "N": "Number of elements (e.g., 3, 5)",
+    "ELEMENTS": "Element type (e.g., Pillars, Steps, Layers)",
+    "TOPIC": "Subject area (e.g., AI, Leadership)",
+    "STATE_A": "Current state (e.g., Theater)",
+    "STATE_B": "Desired state (e.g., Real Adoption)",
+    "AUDIENCE": "Target reader (e.g., Teams, Leaders)",
+    "ACTION": "Verb (e.g., Scale, Build)",
+    "METAPHOR": "Comparison (e.g., City, Mountain)",
+    "COMMON_BELIEF": "Mistaken approach (e.g., AI Policies)",
+    "PAIN_POINT": "Problem avoided (e.g., Team Split)"
+  },
+  "length_constraints": {
+    "title_max_words": 10,
+    "subtitle_max_words": 12,
+    "heading_max_words": 7,
+    "bullet_max_words": 15
+  }
+}

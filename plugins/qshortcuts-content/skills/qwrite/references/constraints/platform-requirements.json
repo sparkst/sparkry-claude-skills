@@ -1,0 +1,116 @@
+{
+  "linkedin": {
+    "hook_length": {
+      "max_words": 25,
+      "description": "First 25 words appear before 'see more'",
+      "priority": "P0"
+    },
+    "article_length": {
+      "min_words": 1900,
+      "max_words": 2000,
+      "optimal": 1950,
+      "priority": "P1"
+    },
+    "tone": {
+      "description": "Professional but conversational",
+      "avoid": ["overly casual", "corporate jargon"]
+    },
+    "structure": {
+      "sections": true,
+      "bullets": "encouraged",
+      "white_space": "essential"
+    },
+    "cta": {
+      "type": "comment_prompt",
+      "placement": "end"
+    }
+  },
+  "twitter": {
+    "optimal_length": {
+      "min_chars": 40,
+      "max_chars": 80,
+      "description": "Optimal engagement range"
+    },
+    "max_length": {
+      "chars": 280,
+      "priority": "P0"
+    },
+    "hashtags": {
+      "max": 2,
+      "description": "More than 2 reduces engagement"
+    },
+    "tone": "conversational",
+    "structure": {
+      "lead": "insight_first",
+      "context": "second"
+    }
+  },
+  "instagram": {
+    "length": {
+      "min_words": 125,
+      "max_words": 200,
+      "priority": "P0"
+    },
+    "hashtags": {
+      "min": 3,
+      "max": 5
+    },
+    "tone": "authentic_personal",
+    "structure": {
+      "hook": "first_sentence",
+      "visual_reference": "required"
+    }
+  },
+  "substack": {
+    "length": {
+      "min_words": 800,
+      "max_words": 3000,
+      "topic_dependent": true
+    },
+    "opening": "BLUF",
+    "structure": {
+      "scannable_headers": "required",
+      "white_space": "generous",
+      "paragraphs": "short"
+    },
+    "links": "inline",
+    "cta": {
+      "type": "subscribe",
+      "placement": "bottom_only"
+    }
+  },
+  "email": {
+    "subject": {
+      "max_chars": 50,
+      "description": "Critical for open rates",
+      "priority": "P0"
+    },
+    "opening": "expectation_setting",
+    "structure": {
+      "bullets": "required_for_scannability",
+      "paragraphs": "max_3_sentences"
+    },
+    "cta": {
+      "type": "single_clear_action",
+      "priority": "P0"
+    },
+    "tone": "conversational_purposeful"
+  },
+  "proposal": {
+    "opening": {
+      "type": "executive_summary",
+      "priority": "P0"
+    },
+    "structure": {
+      "sections": "structured_required",
+      "data": "required",
+      "risk_assessment": "required"
+    },
+    "evidence": "data_driven",
+    "ask": {
+      "clarity": "required",
+      "placement": "clear_recommendations"
+    },
+    "tone": "professional_formal"
+  }
+}

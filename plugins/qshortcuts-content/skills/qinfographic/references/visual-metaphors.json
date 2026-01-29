@@ -1,0 +1,141 @@
+{
+  "framework_types": {
+    "steps": {
+      "description": "Sequential process with clear order",
+      "metaphors": [
+        {
+          "name": "roadmap",
+          "description": "Journey with milestones",
+          "visual": "Horizontal path with checkpoints"
+        },
+        {
+          "name": "ladder",
+          "description": "Climbing progression",
+          "visual": "Vertical rungs to reach goal"
+        },
+        {
+          "name": "mountain_climb",
+          "description": "Challenging ascent",
+          "visual": "Steps up mountain to peak"
+        },
+        {
+          "name": "assembly_line",
+          "description": "Production process",
+          "visual": "Conveyor belt with stations"
+        },
+        {
+          "name": "staircase",
+          "description": "Gradual elevation",
+          "visual": "Steps with platforms"
+        }
+      ]
+    },
+    "pillars": {
+      "description": "Independent foundational elements",
+      "metaphors": [
+        {
+          "name": "columns",
+          "description": "Architectural support",
+          "visual": "Vertical columns holding roof"
+        },
+        {
+          "name": "control_panel",
+          "description": "System controls",
+          "visual": "Switches/dials panel"
+        },
+        {
+          "name": "foundation_blocks",
+          "description": "Building blocks",
+          "visual": "Blocks supporting structure"
+        },
+        {
+          "name": "tree_trunks",
+          "description": "Forest of strength",
+          "visual": "Multiple trees"
+        }
+      ]
+    },
+    "layers": {
+      "description": "Stacked hierarchical levels",
+      "metaphors": [
+        {
+          "name": "stacked_blocks",
+          "description": "Building layers",
+          "visual": "Blocks stacked vertically"
+        },
+        {
+          "name": "pyramid",
+          "description": "Hierarchical levels",
+          "visual": "Triangle with horizontal sections"
+        },
+        {
+          "name": "elevation_chart",
+          "description": "Terrain levels",
+          "visual": "Cross-section of elevation"
+        },
+        {
+          "name": "cake_layers",
+          "description": "Distinct strata",
+          "visual": "Layered cake"
+        }
+      ]
+    },
+    "cycle": {
+      "description": "Continuous loop or iteration",
+      "metaphors": [
+        {
+          "name": "orbit_model",
+          "description": "Circular orbit",
+          "visual": "Elements orbiting center"
+        },
+        {
+          "name": "loop_track",
+          "description": "Racing circuit",
+          "visual": "Track with waypoints"
+        },
+        {
+          "name": "circular_flow",
+          "description": "Water cycle",
+          "visual": "Arrows in circle"
+        },
+        {
+          "name": "gear_system",
+          "description": "Interconnected gears",
+          "visual": "Gears rotating together"
+        }
+      ]
+    },
+    "hierarchy": {
+      "description": "Top-down authority or priority",
+      "metaphors": [
+        {
+          "name": "org_chart",
+          "description": "Organizational structure",
+          "visual": "Tree diagram"
+        },
+        {
+          "name": "decision_tree",
+          "description": "Branching choices",
+          "visual": "Tree with yes/no branches"
+        },
+        {
+          "name": "priority_stack",
+          "description": "Ranked importance",
+          "visual": "Stack with numbers"
+        }
+      ]
+    }
+  },
+  "selection_rules": {
+    "steps": "Use for 3-10 sequential actions with clear order",
+    "pillars": "Use for 3-5 independent foundational concepts",
+    "layers": "Use for 2-4 hierarchical levels building on each other",
+    "cycle": "Use for iterative processes or continuous loops",
+    "hierarchy": "Use for branching decisions or priority levels"
+  },
+  "diversity_tracking": {
+    "avoid_repetition_window": 5,
+    "metaphor_cooldown": 2,
+    "description": "Don't use same metaphor within 2 infographics"
+  }
+}

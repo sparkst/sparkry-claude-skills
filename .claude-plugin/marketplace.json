@@ -70,6 +70,56 @@
       "keywords": ["orchestration", "multi-agent", "parallel", "swarm", "qralph"],
       "category": "orchestration",
       "tags": ["multi-agent", "parallel", "swarm", "self-healing", "checkpointing"]
+    },
+    {
+      "name": "qshortcuts-core",
+      "source": "./plugins/qshortcuts-core",
+      "description": "Core TDD development shortcuts: QNEW, QPLAN, QCODET, QCODE, QCHECK, QCHECKF, QCHECKT",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["qshortcuts", "tdd", "planning", "testing", "code-review"],
+      "category": "shortcuts",
+      "tags": ["qnew", "qplan", "qcodet", "qcode", "qcheck", "tdd"]
+    },
+    {
+      "name": "qshortcuts-support",
+      "source": "./plugins/qshortcuts-support",
+      "description": "Development support shortcuts: QUX, QDOC, QIDEA, QGIT",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["qshortcuts", "ux", "documentation", "research", "git"],
+      "category": "shortcuts",
+      "tags": ["qux", "qdoc", "qidea", "qgit", "support"]
+    },
+    {
+      "name": "qshortcuts-ai",
+      "source": "./plugins/qshortcuts-ai",
+      "description": "AI and architecture shortcuts: QARCH, QPROMPT, QTRANSFORM",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["qshortcuts", "ai", "architecture", "rag", "prompts"],
+      "category": "shortcuts",
+      "tags": ["qarch", "qprompt", "qtransform", "rag", "llm"]
+    },
+    {
+      "name": "qshortcuts-content",
+      "source": "./plugins/qshortcuts-content",
+      "description": "Content creation shortcuts: QWRITE, QPPT, QVISUAL, QINFOGRAPHIC",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["qshortcuts", "writing", "presentation", "visual", "infographic"],
+      "category": "shortcuts",
+      "tags": ["qwrite", "qppt", "qvisual", "qinfographic", "content"]
+    },
+    {
+      "name": "qshortcuts-learning",
+      "source": "./plugins/qshortcuts-learning",
+      "description": "Learning and meta-skills shortcuts: QFEEDBACK, QLEARN, QCOMPACT, QSKILL",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["qshortcuts", "learning", "feedback", "skills", "meta"],
+      "category": "shortcuts",
+      "tags": ["qfeedback", "qlearn", "qcompact", "qskill", "learning"]
     }
   ]
 }

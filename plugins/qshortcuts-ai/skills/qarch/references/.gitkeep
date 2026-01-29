@@ -1,0 +1,7 @@
+# References directory for QARCH patterns and examples
+
+Place architecture patterns and example configurations here:
+- rag-patterns.md
+- rlhf-patterns.md
+- persona-patterns.md
+- feedback-patterns.md

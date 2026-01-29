@@ -1,0 +1,16 @@
+{
+  "project_id": "001-convert-qshortcuts-standalone",
+  "project_path": "/Users/travis/SGDrive/dev/exec-team/.qralph/projects/001-package-publish-claude/github-repo/.qralph/projects/001-convert-qshortcuts-standalone",
+  "request": "Convert 22 QSHORTCUTS to standalone skills: QNEW, QPLAN, QCODET, QCODE, QCHECK, QCHECKF, QCHECKT, QUX, QDOC, QIDEA, QGIT, QARCH, QPROMPT, QTRANSFORM, QWRITE, QPPT, QVISUAL, QINFOGRAPHIC, QFEEDBACK, QLEARN, QCOMPACT, QSKILL",
+  "mode": "coding",
+  "phase": "INIT",
+  "created_at": "2026-01-28T23:43:39.959847",
+  "agents": [],
+  "findings": [],
+  "heal_attempts": 0,
+  "circuit_breakers": {
+    "total_tokens": 0,
+    "total_cost_usd": 0.0,
+    "error_counts": {}
+  }
+}
