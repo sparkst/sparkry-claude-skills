@@ -1,0 +1,65 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sparkry-claude-skills",
+  "owner": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "metadata": {
+    "description": "Production-ready Claude Code skills and agents for TDD workflows, research orchestration, content creation, and strategic planning",
+    "version": "1.0.0",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "dev-workflow",
+      "source": "./plugins/dev-workflow",
+      "description": "TDD-first development workflow with PE reviewer, test writer, planner, and release manager",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["tdd", "testing", "code-review", "planning", "development"],
+      "category": "development",
+      "tags": ["tdd", "testing", "code-quality", "planning-poker"]
+    },
+    {
+      "name": "research-workflow",
+      "source": "./plugins/research-workflow",
+      "description": "Multi-agent research orchestration with fact-checking, source evaluation, and synthesis",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["research", "fact-checking", "sources", "synthesis"],
+      "category": "research",
+      "tags": ["research", "analysis", "fact-check", "web-research"]
+    },
+    {
+      "name": "writing-workflow",
+      "source": "./plugins/writing-workflow",
+      "description": "Content creation system with multi-platform publishing, infographics, and quality scoring",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["writing", "content", "publishing", "infographics"],
+      "category": "content",
+      "tags": ["writing", "content-creation", "publishing", "visual-content"]
+    },
+    {
+      "name": "strategy-workflow",
+      "source": "./plugins/strategy-workflow",
+      "description": "Strategic planning with COS orchestration, PR-FAQ generation, and buy-vs-build analysis",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["strategy", "planning", "prfaq", "analysis"],
+      "category": "strategy",
+      "tags": ["strategy", "cos", "prfaq", "buy-vs-build", "pmf"]
+    },
+    {
+      "name": "starter-pack",
+      "source": "./plugins/starter-pack",
+      "description": "Essential agents for beginners: planner, PE reviewer, and SDE-III implementation",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["starter", "beginner", "essentials"],
+      "category": "starter",
+      "tags": ["beginner", "essentials", "quick-start"]
+    }
+  ]
+}
