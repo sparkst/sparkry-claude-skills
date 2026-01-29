@@ -60,6 +60,16 @@
       "keywords": ["starter", "beginner", "essentials"],
       "category": "starter",
       "tags": ["beginner", "essentials", "quick-start"]
+    },
+    {
+      "name": "orchestration-workflow",
+      "source": "./plugins/orchestration-workflow",
+      "description": "Multi-agent swarm orchestration with parallel execution, self-healing, and checkpointing (QRALPH)",
+      "version": "2.1.0",
+      "license": "MIT",
+      "keywords": ["orchestration", "multi-agent", "parallel", "swarm", "qralph"],
+      "category": "orchestration",
+      "tags": ["multi-agent", "parallel", "swarm", "self-healing", "checkpointing"]
     }
   ]
 }
