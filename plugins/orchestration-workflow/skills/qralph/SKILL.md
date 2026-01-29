@@ -1,11 +1,7 @@
 ---
-name: QRALPH Multi-Agent Swarm
-description: Autonomous 5-agent parallel review loop with self-healing, checkpointing, and UAT validation for any request
-version: 2.0.0
-tools: [qralph-orchestrator.py]
-references: [state-machine.md, agent-selection.md, self-healing.md, project-structure.md]
-claude_tools: Task, Read, Grep, Glob, Edit, Write, Bash, TodoWrite
-trigger: QRALPH
+name: qralph
+description: Multi-agent swarm orchestration - spawns 5 parallel specialist agents (security, architecture, requirements, UX, code quality) to review requests before implementation. Includes self-healing, checkpointing, and UAT validation.
+version: 2.1.0
 ---
 
 # QRALPH Multi-Agent Swarm Skill
