@@ -65,7 +65,7 @@
       "name": "orchestration-workflow",
       "source": "./plugins/orchestration-workflow",
       "description": "Multi-agent swarm orchestration with parallel execution, self-healing, and checkpointing (QRALPH)",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "license": "MIT",
       "keywords": ["orchestration", "multi-agent", "parallel", "swarm", "qralph"],
       "category": "orchestration",
