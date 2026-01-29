@@ -1,25 +1,11 @@
 {
-  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "research-workflow",
   "version": "1.0.0",
-  "description": "Multi-agent research orchestration with fact-checking, source evaluation, and synthesis. Validates claims with tiered sources, manages dissent through options matrices, and produces proposal-first deliverables with executive summaries.",
+  "description": "Multi-agent research orchestration with fact-checking, source evaluation, and synthesis",
   "author": {
     "name": "Sparkry.ai",
     "email": "skills@sparkry.ai"
   },
   "license": "MIT",
-  "keywords": [
-    "research",
-    "fact-checking",
-    "sources",
-    "synthesis",
-    "evidence-based",
-    "multi-agent",
-    "orchestration",
-    "claims-validation",
-    "tier-system",
-    "dissent-moderation"
-  ],
-  "agents": "./agents/",
-  "skills": "./skills/"
+  "keywords": ["research", "fact-checking", "sources", "synthesis"]
 }
