@@ -229,6 +229,28 @@ Essential agents for getting started.
 
 ---
 
+## Documentation
+
+Each plugin has a detailed user guide in the `docs/` folder:
+
+| Plugin | User Guide |
+|--------|------------|
+| qshortcuts-core | [QSHORTCUTS-CORE-GUIDE.md](./docs/QSHORTCUTS-CORE-GUIDE.md) |
+| qshortcuts-support | [QSHORTCUTS-SUPPORT-GUIDE.md](./docs/QSHORTCUTS-SUPPORT-GUIDE.md) |
+| qshortcuts-ai | [QSHORTCUTS-AI-GUIDE.md](./docs/QSHORTCUTS-AI-GUIDE.md) |
+| qshortcuts-content | [QSHORTCUTS-CONTENT-GUIDE.md](./docs/QSHORTCUTS-CONTENT-GUIDE.md) |
+| qshortcuts-learning | [QSHORTCUTS-LEARNING-GUIDE.md](./docs/QSHORTCUTS-LEARNING-GUIDE.md) |
+| orchestration-workflow | [QRALPH-INSTALLATION-GUIDE.md](./docs/QRALPH-INSTALLATION-GUIDE.md) |
+| dev-workflow | [DEV-WORKFLOW-GUIDE.md](./docs/DEV-WORKFLOW-GUIDE.md) |
+| research-workflow | [RESEARCH-WORKFLOW-GUIDE.md](./docs/RESEARCH-WORKFLOW-GUIDE.md) |
+| writing-workflow | [WRITING-WORKFLOW-GUIDE.md](./docs/WRITING-WORKFLOW-GUIDE.md) |
+| strategy-workflow | [STRATEGY-WORKFLOW-GUIDE.md](./docs/STRATEGY-WORKFLOW-GUIDE.md) |
+| starter-pack | [STARTER-PACK-GUIDE.md](./docs/STARTER-PACK-GUIDE.md) |
+
+For contributors, see [DOCUMENTATION-TEMPLATE.md](./docs/DOCUMENTATION-TEMPLATE.md) for documentation standards.
+
+---
+
 ## Troubleshooting
 
 ### Update Marketplace
