@@ -258,23 +258,26 @@ def check_control_commands(project_path: Path) -> Optional[str]:
     """Check CONTROL.md for user intervention commands.
 
     Returns command if found, None otherwise.
+    Commands must appear at the start of a line (not in template text).
     """
     control_file = project_path / "CONTROL.md"
     if not control_file.exists():
         return None
 
     try:
-        content = control_file.read_text().upper()
+        content = control_file.read_text()
 
-        # Check for commands (case-insensitive)
-        if "PAUSE" in content:
-            return "PAUSE"
-        elif "SKIP" in content:
-            return "SKIP"
-        elif "ABORT" in content:
-            return "ABORT"
-        elif "STATUS" in content:
-            return "STATUS"
+        # Check for commands at start of line (case-insensitive)
+        # This prevents template text like "- PAUSE - description" from triggering
+        import re
+        for line in content.split('\n'):
+            line_stripped = line.strip().upper()
+            # Command must be the entire line content (not part of a description)
+            if line_stripped in ("PAUSE", "SKIP", "ABORT", "STATUS"):
+                return line_stripped
+            # Also match "!PAUSE" or "> PAUSE" style commands
+            if re.match(r'^[!>]?\s*(PAUSE|SKIP|ABORT|STATUS)\s*$', line_stripped):
+                return re.match(r'^[!>]?\s*(PAUSE|SKIP|ABORT|STATUS)', line_stripped).group(1)
 
     except Exception as e:
         print(f"Warning: Could not read CONTROL.md: {e}", file=sys.stderr)
@@ -327,11 +330,15 @@ def cmd_init(request: str, mode: str = "coding"):
     # Create initial files
     (project_path / "CONTROL.md").write_text(
         "# QRALPH Control\n\n"
-        "Write commands here:\n"
-        "- PAUSE - stop after current step\n"
-        "- SKIP - skip current operation\n"
-        "- ABORT - graceful shutdown\n"
-        "- STATUS - force status dump\n"
+        "To control execution, write one of these commands on its own line:\n\n"
+        "| Command | Effect |\n"
+        "|---------|--------|\n"
+        "| `PAUSE` | Stop after current step |\n"
+        "| `SKIP` | Skip current operation |\n"
+        "| `ABORT` | Graceful shutdown |\n"
+        "| `STATUS` | Force status dump |\n\n"
+        "---\n"
+        "(Write command below this line)\n\n"
     )
 
     (project_path / "decisions.log").write_text(
