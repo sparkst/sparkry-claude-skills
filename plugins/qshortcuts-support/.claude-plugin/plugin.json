@@ -1,0 +1,11 @@
+{
+  "name": "qshortcuts-support",
+  "version": "1.0.0",
+  "description": "Development support shortcuts: QUX, QDOC, QIDEA, QGIT",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["qshortcuts", "ux-testing", "documentation", "research", "git", "release-management"]
+}

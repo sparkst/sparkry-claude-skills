@@ -7,18 +7,5 @@
     "email": "skills@sparkry.ai"
   },
   "license": "MIT",
-  "keywords": ["tdd", "development", "testing", "code-review", "planning", "quality"],
-  "skills": [
-    "qnew",
-    "qplan",
-    "qcodet",
-    "qcode",
-    "qcheck",
-    "qcheckf",
-    "qcheckt"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/sparkry-ai/claude-plugins"
-  }
+  "keywords": ["tdd", "development", "testing", "code-review", "planning", "quality"]
 }
