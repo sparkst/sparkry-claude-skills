@@ -1,311 +1,269 @@
 # Sparkry Claude Skills Marketplace
 
-A comprehensive marketplace of enterprise-grade Claude plugins and skills for AI-powered workflows. This collection includes production-ready agents, skills, and tools designed for research, content creation, development, and strategic decision-making.
+Production-ready Claude Code plugins for TDD workflows, research orchestration, content creation, and strategic planning.
 
-## Overview
+## Quick Start
 
-The Sparkry Claude Skills Marketplace provides a curated collection of reusable Claude plugins that extend your AI capabilities. Each plugin includes:
+### Step 1: Add the Marketplace
 
-- **Specialized Agents**: Domain experts designed to handle specific tasks
-- **Reusable Skills**: Modular components for common operations
-- **Python Tools**: Utility scripts for data processing and integrations
-- **Complete Documentation**: Implementation guides and API references
-- **Production-Ready Code**: Tested and optimized for reliability
+```bash
+/plugin marketplace add sparkst/sparkry-claude-skills
+```
 
-## Available Plugins
+### Step 2: Install Plugins
 
-### 1. Research Workflow Plugin
-Comprehensive research orchestration for competitive analysis, market research, and strategic intelligence gathering.
+```bash
+# Install individual plugins
+/plugin install <plugin-name>@sparkry-claude-skills
 
-**Includes:**
-- Research Director (multi-agent coordinator)
-- Fact Checker & Source Evaluator agents
-- Web research, industry analysis, and synthesis skills
-- Parallel search execution
-- Date validation and source policy enforcement
+# Example: Install the orchestration workflow (QRALPH)
+/plugin install orchestration-workflow@sparkry-claude-skills
+```
 
-**Use Cases:** Competitive analysis, market research, trend analysis, due diligence
+### Step 3: Verify Installation
 
-**[View Details →](./plugins/research-workflow/README.md)**
+```bash
+/plugin list
+```
 
 ---
 
-### 2. Writing Workflow Plugin
-Multi-platform content creation with voice consistency, quality scoring, and automated publishing.
+## Available Plugins (11)
 
-**Includes:**
-- Content Director agent
-- Quality Scorer & Voice Validator agents
+### QShortcuts - Development Workflow
+
+| Plugin | Command | Skills Included |
+|--------|---------|-----------------|
+| **qshortcuts-core** | `/plugin install qshortcuts-core@sparkry-claude-skills` | QNEW, QPLAN, QCODET, QCODE, QCHECK, QCHECKF, QCHECKT |
+| **qshortcuts-support** | `/plugin install qshortcuts-support@sparkry-claude-skills` | QUX, QDOC, QIDEA, QGIT |
+| **qshortcuts-ai** | `/plugin install qshortcuts-ai@sparkry-claude-skills` | QARCH, QPROMPT, QTRANSFORM |
+| **qshortcuts-content** | `/plugin install qshortcuts-content@sparkry-claude-skills` | QWRITE, QPPT, QVISUAL, QINFOGRAPHIC |
+| **qshortcuts-learning** | `/plugin install qshortcuts-learning@sparkry-claude-skills` | QFEEDBACK, QLEARN, QCOMPACT, QSKILL |
+
+### Workflow Bundles
+
+| Plugin | Command | Description |
+|--------|---------|-------------|
+| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH multi-agent swarm (5 parallel agents, self-healing, checkpointing) |
+| **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
+| **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
+| **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, Google Docs publishing |
+| **strategy-workflow** | `/plugin install strategy-workflow@sparkry-claude-skills` | COS, PR-FAQ, buy-vs-build, PMF validation skills |
+| **starter-pack** | `/plugin install starter-pack@sparkry-claude-skills` | Essential agents: planner, sde-iii, pe-reviewer |
+
+---
+
+## Install All Plugins
+
+```bash
+/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills orchestration-workflow@sparkry-claude-skills starter-pack@sparkry-claude-skills
+```
+
+---
+
+## Featured: QRALPH Multi-Agent Orchestration
+
+QRALPH spawns 5 parallel specialist agents to review your requests before implementation. Includes self-healing, checkpointing, and UAT validation.
+
+```bash
+# Install
+/plugin install orchestration-workflow@sparkry-claude-skills
+
+# Use
+qralph( Add dark mode toggle to settings page )
+```
+
+**[Full QRALPH Installation Guide →](./docs/QRALPH-INSTALLATION-GUIDE.md)**
+
+---
+
+## Plugin Details
+
+### 1. Orchestration Workflow (QRALPH)
+
+Multi-agent swarm orchestration with parallel execution.
+
+**Features:**
+- 5 parallel specialist agents (security, architecture, UX, requirements, code quality)
+- Self-healing with model tiering (Haiku → Sonnet → Opus)
+- Automatic checkpointing and recovery
+- UAT scenario generation
+- Cost-optimized execution ($3-8/run)
+
+**Use Cases:** Feature development, code review, research, planning
+
+---
+
+### 2. Research Workflow
+
+Comprehensive research orchestration for competitive analysis and strategic intelligence.
+
+**Agents:**
+- Research Director (multi-agent coordinator)
+- Fact Checker & Source Evaluator
+- Industry Scout & Synthesis Writer
+- Dissent Moderator
+
+**Use Cases:** Competitive analysis, market research, due diligence
+
+---
+
+### 3. Writing Workflow
+
+Multi-platform content creation with voice consistency and quality scoring.
+
+**Skills:**
 - Multi-platform transformation (LinkedIn, Twitter, Email, Substack)
 - Google Docs publishing integration
-- Link validation and special content matching
+- Infographic generation
+- Quality scoring and voice validation
 
-**Use Cases:** Content marketing, thought leadership, blog publishing, social media strategy
-
-**[View Details →](./plugins/writing-workflow/README.md)**
+**Use Cases:** Content marketing, thought leadership, social media
 
 ---
 
-### 3. Strategy Workflow Plugin
-Strategic decision-making framework for buy-vs-build analysis, product strategy, and executive briefings.
+### 4. Strategy Workflow
 
-**Includes:**
-- Chief of Staff (COS) agent
+Strategic decision-making framework for executive planning.
+
+**Skills:**
 - PR-FAQ generator
 - Buy-vs-Build analyzer
-- Executive briefing synthesizer
-- Financial ROI calculator
+- PMF validation framework
+- Tenets documentation
+- Security review
 
-**Use Cases:** Strategic planning, product decisions, executive summaries, go-to-market planning
-
-**[View Details →](./plugins/strategy-workflow/README.md)**
-
----
-
-### 4. Dev Workflow Plugin
-Software development acceleration with code generation, testing, and quality assurance.
-
-**Includes:**
-- Development Coordinator agent
-- Test Writer & Code Quality Auditor agents
-- Schema validators and interface contracts
-- TypeScript type safety enforcement
-- Automated testing and linting
-
-**Use Cases:** Feature development, test-driven development, code reviews, refactoring
-
-**[View Details →](./plugins/dev-workflow/README.md)**
+**Use Cases:** Strategic planning, product decisions, executive briefings
 
 ---
 
-### 5. Starter Pack Plugin
-Getting started with Claude plugins - essential agents and tools for first-time users.
+### 5. Dev Workflow
 
-**Includes:**
-- Onboarding guide
-- Basic agent templates
-- Simple skill examples
-- Integration tutorials
+TDD-first development acceleration.
 
-**Use Cases:** Learning Claude plugins, prototyping, proof-of-concepts
+**Agents:**
+- PE Reviewer (code quality)
+- Test Writer (TDD)
+- Planner (requirements)
+- Release Manager
 
-**[View Details →](./plugins/starter-pack/README.md)**
+**Use Cases:** Feature development, code reviews, refactoring
 
 ---
 
-## Installation
+### 6. QShortcuts Core
 
-### Prerequisites
-- Claude API access (Claude 3 or later)
-- Python 3.8+ (for running tools)
-- Git
+Core TDD development shortcuts.
 
-### Quick Start
+| Shortcut | Purpose |
+|----------|---------|
+| QNEW | Start new feature with requirements |
+| QPLAN | Analyze codebase, create implementation plan |
+| QCODET | Write failing tests (TDD red phase) |
+| QCODE | Implement to pass tests (TDD green phase) |
+| QCHECK | Full quality review |
+| QCHECKF | Fast quality check |
+| QCHECKT | Test-only check |
 
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/sparkry/claude-skills-marketplace.git
-   cd claude-skills-marketplace
-   ```
+---
 
-2. **Choose a plugin:**
-   ```bash
-   cd plugins/research-workflow  # or any other plugin
-   ```
+### 7. QShortcuts Support
 
-3. **Review the manifest:**
-   ```bash
-   cat MANIFEST.md
-   ```
+Development support shortcuts.
 
-4. **Import into your Claude setup:**
-   - Copy the plugin directory to your `.claude/plugins/` folder
-   - Reference agent files in your system prompts
-   - Load skills as needed
+| Shortcut | Purpose |
+|----------|---------|
+| QUX | UX testing and accessibility check |
+| QDOC | Generate/update documentation |
+| QIDEA | Research and ideation (no code) |
+| QGIT | Git commit with conventional commits |
 
-5. **Configure integrations (if needed):**
-   - See individual plugin documentation for API keys
-   - Update configuration files with your credentials
-   - Run smoke tests to verify setup
+---
 
-### Example: Using Research Workflow
+### 8. QShortcuts AI
 
-```bash
-# Copy to your Claude plugins directory
-cp -r plugins/research-workflow ~/.claude/plugins/
+AI and architecture shortcuts.
 
-# In your Claude conversation:
-# "Use the research-workflow plugin to analyze competitors in the SaaS market"
-```
+| Shortcut | Purpose |
+|----------|---------|
+| QARCH | Design learning AI systems |
+| QPROMPT | Optimize prompts |
+| QTRANSFORM | Transform content formats |
 
-## Plugin Structure
+---
 
-Each plugin follows a consistent structure:
+### 9. QShortcuts Content
 
-```
-plugin-name/
-├── README.md                 # Plugin overview and usage
-├── MANIFEST.md              # Plugin metadata and component listing
-├── .claude-plugin/          # Plugin configuration
-│   └── plugin.json
-├── agents/                  # Agent definitions
-│   ├── agent-name.md
-│   └── ...
-├── skills/                  # Reusable skill components
-│   ├── domain/
-│   │   ├── skill-name/
-│   │   │   ├── SKILL.md
-│   │   │   ├── scripts/
-│   │   │   └── resources/
-│   │   └── ...
-├── scripts/                 # Python utility tools
-│   ├── tool-name.py
-│   └── ...
-└── docs/                    # Additional documentation
-    ├── INTEGRATION.md
-    ├── API.md
-    └── ...
-```
+Content creation shortcuts.
 
-## Features
+| Shortcut | Purpose |
+|----------|---------|
+| QWRITE | Multi-platform content creation |
+| QPPT | Generate presentation slides |
+| QVISUAL | Create visual content |
+| QINFOGRAPHIC | Generate infographics |
 
-✅ **Enterprise-Grade Quality**
-- Production-tested implementations
-- Comprehensive error handling
-- Security and privacy-first design
+---
 
-✅ **Modular & Composable**
-- Mix and match agents and skills
-- Reuse across multiple workflows
-- Minimal dependencies
+### 10. QShortcuts Learning
 
-✅ **Well-Documented**
-- Agent behavior specifications
-- Skill usage examples
-- Integration guides
+Meta-learning and improvement shortcuts.
 
-✅ **Active Maintenance**
-- Regular updates and improvements
-- Community feedback integration
-- Version compatibility tracking
+| Shortcut | Purpose |
+|----------|---------|
+| QFEEDBACK | Extract and integrate user feedback |
+| QLEARN | Retrieve relevant learnings |
+| QCOMPACT | Consolidate learnings |
+| QSKILL | Create new agent+skill complex |
 
-## Documentation
+---
 
-### For Plugin Users
-- [Installation Guide](./docs/INSTALLATION.md)
-- [Plugin Catalog](./docs/PLUGINS.md)
-- [Integration Examples](./docs/EXAMPLES.md)
-- [Troubleshooting](./docs/TROUBLESHOOTING.md)
+### 11. Starter Pack
 
-### For Plugin Developers
-- [Plugin Development Guide](./docs/PLUGIN-DEVELOPMENT.md)
-- [Agent Specification Template](./docs/AGENT-SPEC-TEMPLATE.md)
-- [Skill Development Guide](./docs/SKILL-DEVELOPMENT.md)
-- [Testing Standards](./docs/TESTING-STANDARDS.md)
+Essential agents for getting started.
 
-## Configuration
+**Agents:**
+- Planner - Requirements and task breakdown
+- SDE-III - Implementation complexity analysis
+- PE Reviewer - Code quality review
 
-### Environment Variables
+---
 
-Create a `.env` file in your project root:
+## Troubleshooting
+
+### Update Marketplace
 
 ```bash
-# Google Docs integration (for writing-workflow)
-GOOGLE_DOCS_API_KEY=your_api_key_here
-
-# Web research (for research-workflow)
-SERPAPI_KEY=your_serpapi_key
-
-# Email publishing (for writing-workflow)
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=your_email@gmail.com
-SMTP_PASSWORD=your_app_password
+/plugin marketplace update sparkry-claude-skills
 ```
 
-See individual plugin docs for complete configuration requirements.
+### Remove and Re-add Marketplace
 
-## Usage Examples
-
-### Research Competitive Landscape
 ```bash
-# In Claude with research-workflow loaded
-"Analyze the top 5 AI-powered project management tools, comparing features, pricing, and target markets. Use the research-workflow plugin."
+/plugin marketplace remove sparkry-claude-skills
+/plugin marketplace add sparkst/sparkry-claude-skills
 ```
 
-### Write Multi-Platform Content
+### Uninstall a Plugin
+
 ```bash
-# In Claude with writing-workflow loaded
-"Create a LinkedIn post, Twitter thread, and email newsletter about AI productivity tools. Maintain consistent voice across all platforms."
+/plugin uninstall <plugin-name>@sparkry-claude-skills
 ```
 
-### Strategic Analysis
-```bash
-# In Claude with strategy-workflow loaded
-"Should we build an internal tool or use Zapier? Generate a PR-FAQ and financial analysis."
-```
-
-## Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
-
-### Ways to Contribute
-- Report bugs and request features via GitHub Issues
-- Submit new skills and agents
-- Improve documentation
-- Share usage examples and case studies
-- Integrate new tools and APIs
+---
 
 ## Support
 
-- **Documentation**: See `/docs` and individual plugin READMEs
-- **Issues**: [GitHub Issues](https://github.com/sparkry/claude-skills-marketplace/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/sparkry/claude-skills-marketplace/discussions)
-- **Email**: support@sparkry.ai
-
-## License
-
-This project is licensed under the MIT License - see [LICENSE](./LICENSE) file for details.
-
-## Roadmap
-
-### Upcoming Plugins
-- [ ] Financial Analysis Workflow
-- [ ] Legal Document Review Workflow
-- [ ] E-commerce Optimization Workflow
-- [ ] Customer Support Automation Workflow
-- [ ] Data Analysis & Visualization Workflow
-
-### Planned Enhancements
-- [ ] Plugin marketplace web interface
-- [ ] One-click installation tool
-- [ ] Interactive plugin composition builder
-- [ ] Community rating and reviews system
-- [ ] Performance benchmarking dashboard
-
-## Changelog
-
-See [CHANGELOG.md](./CHANGELOG.md) for version history and updates.
-
-## Citation
-
-If you use Sparkry Claude Skills Marketplace in your research or production system, please cite:
-
-```bibtex
-@software{sparkry_claude_plugins,
-  author = {Sparkry},
-  title = {Claude Skills Marketplace},
-  year = {2025},
-  url = {https://github.com/sparkry/claude-skills-marketplace}
-}
-```
-
-## Acknowledgments
-
-Built with support from the Anthropic Claude API and community contributions.
+- **Documentation:** [sparkry.ai/docs](https://sparkry.ai/docs)
+- **Issues:** [GitHub Issues](https://github.com/sparkst/sparkry-claude-skills/issues)
+- **Email:** support@sparkry.ai
 
 ---
 
-**Made with ❤️ by Sparkry**
+## License
 
-[Website](https://sparkry.ai) • [Twitter](https://twitter.com/sparkry) • [LinkedIn](https://linkedin.com/company/sparkry)
+MIT License - see [LICENSE](./LICENSE) for details.
+
+---
+
+**Made with care by [Sparkry.ai](https://sparkry.ai)**
