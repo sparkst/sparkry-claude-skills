@@ -45,9 +45,9 @@ class Colors:
 
 def get_qralph_root() -> Path:
     """Get the .qralph directory path"""
-    # From ${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools -> repo root
-    # Go up 5 levels: tools -> qralph -> orchestration -> skills -> .claude -> repo root
-    repo_root = Path(__file__).parent.parent.parent.parent.parent.parent
+    # From ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools -> repo root
+    # Go up 4 levels: tools -> qralph -> skills -> plugin_root -> .claude -> repo root
+    repo_root = Path(__file__).parent.parent.parent.parent.parent
     return repo_root / ".qralph"
 
 

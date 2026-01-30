@@ -598,6 +598,6 @@ python3 qralph-healer.py clear
 
 For issues or feature requests, see:
 
-- Tool source: `${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-healer.py`
-- Documentation: `${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/references/`
+- Tool source: `${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-healer.py`
+- Documentation: `${CLAUDE_PLUGIN_ROOT}/skills/qralph/references/`
 - Project: `.qralph/projects/002-tdd-review-qralph/`

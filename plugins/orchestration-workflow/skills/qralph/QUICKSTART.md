@@ -214,7 +214,7 @@ QRALPH status
 **Watch mode** (updates every 5 seconds):
 
 ``` bash
-python3 ~/${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-status.py --watch
+python3 ~/${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-status.py --watch
 ```
 
 **Project files to review**:
@@ -251,7 +251,7 @@ python3 ~/${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-status.
 **"Circuit breaker tripped"**
 
 ``` bash
-python3 ~/${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-healer.py clear
+python3 ~/${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-healer.py clear
 ```
 
 **"Invalid phase transition"** Check current phase with `QRALPH status`—phases must proceed in order.

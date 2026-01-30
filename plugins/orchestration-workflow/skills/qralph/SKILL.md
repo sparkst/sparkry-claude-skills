@@ -94,7 +94,7 @@ Task(subagent_type="sde-iii", model="sonnet",
 
 ```bash
 # Run via Bash tool
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-orchestrator.py init "<request>"
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py init "<request>"
 ```
 
 Output: Project ID, directory path, initial state
@@ -102,7 +102,7 @@ Output: Project ID, directory path, initial state
 ### Phase 2: Select Agents
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-orchestrator.py select-agents "<request>"
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py select-agents "<request>"
 ```
 
 Output: JSON with 5 agent configs including prompts
@@ -141,7 +141,7 @@ Output structured markdown to: .qralph/agent-outputs/security-reviewer.md
 After all 5 agents complete:
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-orchestrator.py synthesize
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py synthesize
 ```
 
 This reads all agent outputs and creates a unified findings report.
@@ -168,7 +168,7 @@ After 5 failures: Create DEFERRED.md and continue
 ### Phase 7: UAT
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-orchestrator.py generate-uat
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py generate-uat
 ```
 
 Then execute UAT scenarios via Task agents.
@@ -176,7 +176,7 @@ Then execute UAT scenarios via Task agents.
 ### Phase 8: Finalize
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/orchestration/qralph/tools/qralph-orchestrator.py finalize
+python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py finalize
 ```
 
 Creates SUMMARY.md and sends notification.
