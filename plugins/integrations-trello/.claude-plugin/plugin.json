@@ -1,0 +1,11 @@
+{
+  "name": "integrations-trello",
+  "version": "1.0.0",
+  "description": "Trello integration for Claude Code - create cards, manage boards, and sync with QRALPH projects",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["trello", "integration", "project-management", "qralph", "cards", "automation"]
+}

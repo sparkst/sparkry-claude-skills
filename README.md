@@ -28,7 +28,7 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 ---
 
-## Available Plugins (11)
+## Available Plugins (12)
 
 ### QShortcuts - Development Workflow
 
@@ -50,13 +50,14 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, Google Docs publishing |
 | **strategy-workflow** | `/plugin install strategy-workflow@sparkry-claude-skills` | COS, PR-FAQ, buy-vs-build, PMF validation skills |
 | **starter-pack** | `/plugin install starter-pack@sparkry-claude-skills` | Essential agents: planner, sde-iii, pe-reviewer |
+| **integrations-trello** | `/plugin install integrations-trello@sparkry-claude-skills` | Trello card management with QRALPH project sync |
 
 ---
 
 ## Install All Plugins
 
 ```bash
-/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills orchestration-workflow@sparkry-claude-skills starter-pack@sparkry-claude-skills
+/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills orchestration-workflow@sparkry-claude-skills starter-pack@sparkry-claude-skills integrations-trello@sparkry-claude-skills
 ```
 
 ---
@@ -229,6 +230,26 @@ Essential agents for getting started.
 
 ---
 
+### 12. Integrations - Trello
+
+Trello integration for Claude Code with QRALPH project tracking.
+
+**Features:**
+- Create, update, and archive Trello cards
+- Automatic card creation for QRALPH projects
+- Card titles with `[Q:{initials}]` prefix for project identification
+- Board and list discovery commands
+- Run summary updates on card descriptions
+
+**Requires Setup:**
+- Trello API Key and OAuth Token
+- `.env.local` file with credentials
+- Optional: `.qralph/trello-config.json` for QRALPH integration
+
+**Use Cases:** Project tracking, task management, QRALPH visualization
+
+---
+
 ## Documentation
 
 Each plugin has a detailed user guide in the `docs/` folder:
@@ -246,6 +267,7 @@ Each plugin has a detailed user guide in the `docs/` folder:
 | writing-workflow | [WRITING-WORKFLOW-GUIDE.md](./docs/WRITING-WORKFLOW-GUIDE.md) |
 | strategy-workflow | [STRATEGY-WORKFLOW-GUIDE.md](./docs/STRATEGY-WORKFLOW-GUIDE.md) |
 | starter-pack | [STARTER-PACK-GUIDE.md](./docs/STARTER-PACK-GUIDE.md) |
+| integrations-trello | [INTEGRATIONS-TRELLO-GUIDE.md](./docs/INTEGRATIONS-TRELLO-GUIDE.md) |
 
 For contributors, see [DOCUMENTATION-TEMPLATE.md](./docs/DOCUMENTATION-TEMPLATE.md) for documentation standards.
 

@@ -1,7 +1,7 @@
 ---
 name: qralph
-description: Multi-agent swarm orchestration - spawns 5 parallel specialist agents (security, architecture, requirements, UX, code quality) to review requests before implementation. Includes self-healing, checkpointing, and UAT validation.
-version: 2.1.0
+description: Multi-agent swarm orchestration - spawns 5 parallel specialist agents (security, architecture, requirements, UX, code quality) to review requests before implementation. Includes self-healing, checkpointing, Trello integration, and UAT validation.
+version: 2.2.0
 ---
 
 # QRALPH Multi-Agent Swarm Skill
@@ -286,3 +286,56 @@ For tasks with multiple independent items (e.g., 12 articles to fix):
 3. **Fresh context per agent** = each agent has full 200K token window
 4. **Primary context monitors** = you collect results, synthesize, self-heal
 5. **Model tiering saves cost** = use haiku for simple tasks, opus only for synthesis
+
+## Trello Integration (Optional)
+
+QRALPH can automatically create and update Trello cards for project tracking.
+
+### Setup
+
+1. **Get Trello API credentials:**
+   - API Key: https://trello.com/app-key
+   - Token: https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=YOUR_API_KEY
+
+2. **Create `.env.local` in project root:**
+   ```bash
+   TRELLO_API_KEY=your_api_key
+   TRELLO_TOKEN=your_oauth_token
+   ```
+
+3. **Create `.qralph/trello-config.json`:**
+   ```json
+   {
+     "board_id": "your-board-id",
+     "list_id": "your-list-id",
+     "github_repo": "owner/repo",
+     "labels": {
+       "Automation": "label-id-1",
+       "Content": "label-id-2"
+     },
+     "cache_ttl_seconds": 60
+   }
+   ```
+
+### Automatic Behavior
+
+When Trello is configured:
+
+| Event | Trello Action |
+|-------|---------------|
+| `QRALPH "request"` | Creates card with `[Q:{initials}]` prefix |
+| Phase completion | Updates card description with run summary |
+| `QRALPH close 001` | Archives the card |
+| `QRALPH resume 001` | Checks if card was closed externally |
+
+### Card Title Format
+
+Cards are created with: `[Q:{initials}] {project-id}`
+
+Example: `[Q:CH] 012-user-authentication`
+
+Where `CH` = initials derived from GitHub repo (e.g., `cardinal-health` → `CH`)
+
+### QTRELLO Standalone Commands
+
+For direct Trello operations without QRALPH, see the **QTRELLO skill** in the integrations plugin.
