@@ -120,6 +120,16 @@
       "keywords": ["qshortcuts", "learning", "feedback", "skills", "meta"],
       "category": "shortcuts",
       "tags": ["qfeedback", "qlearn", "qcompact", "qskill", "learning"]
+    },
+    {
+      "name": "integrations-trello",
+      "source": "./plugins/integrations-trello",
+      "description": "Trello integration for Claude Code - create cards, manage boards, and sync with QRALPH projects",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["trello", "integration", "project-management", "qralph", "cards", "automation"],
+      "category": "integrations",
+      "tags": ["trello", "cards", "boards", "qralph", "project-tracking"]
     }
   ]
 }
