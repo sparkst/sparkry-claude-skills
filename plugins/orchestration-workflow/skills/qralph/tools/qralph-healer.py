@@ -30,12 +30,23 @@ Model Escalation:
 """
 
 import argparse
+import hashlib
 import json
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List
+
+# Import shared state module
+import importlib.util
+_state_path = Path(__file__).parent / "qralph-state.py"
+_state_spec = importlib.util.spec_from_file_location("qralph_state", _state_path)
+qralph_state = importlib.util.module_from_spec(_state_spec)
+_state_spec.loader.exec_module(qralph_state)
+
+safe_write = qralph_state.safe_write
+safe_write_json = qralph_state.safe_write_json
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -135,22 +146,13 @@ def get_state_file() -> Path:
 
 
 def load_state() -> Dict[str, Any]:
-    """Load current project state."""
-    state_file = get_state_file()
-    if not state_file.exists():
-        return {}
-
-    try:
-        return json.loads(state_file.read_text())
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
+    """Load current project state using shared state module."""
+    return qralph_state.load_state(get_state_file())
 
 
 def save_state(state: Dict[str, Any]):
-    """Save project state."""
-    QRALPH_DIR.mkdir(parents=True, exist_ok=True)
-    state_file = get_state_file()
-    state_file.write_text(json.dumps(state, indent=2))
+    """Save project state using shared state module (atomic write + checksum)."""
+    qralph_state.save_state(state, get_state_file())
 
 
 def get_healing_dir() -> Path:
@@ -199,6 +201,196 @@ def classify_error(error_message: str) -> Dict[str, Any]:
         "match": error_message[:100],
         "pattern_used": None,
     }
+
+
+def _normalize_error(error_message: str) -> str:
+    """Normalize error message for pattern matching (strip paths, line numbers, memory addresses)."""
+    normalized = error_message.strip()
+    # Strip absolute paths
+    normalized = re.sub(r'/[^\s:]+/', '<PATH>/', normalized)
+    # Strip line numbers
+    normalized = re.sub(r'line \d+', 'line <N>', normalized, flags=re.IGNORECASE)
+    # Strip memory addresses
+    normalized = re.sub(r'0x[0-9a-fA-F]+', '<ADDR>', normalized)
+    # Strip timestamps
+    normalized = re.sub(r'\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}', '<TIMESTAMP>', normalized)
+    return normalized
+
+
+def _error_signature(error_message: str) -> str:
+    """Compute a hash signature for a normalized error."""
+    normalized = _normalize_error(error_message)
+    return hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+
+def _load_healing_patterns(project_path: Path) -> dict:
+    """Load healing patterns DB for a project."""
+    patterns_file = project_path / "healing-attempts" / "healing-patterns.json"
+    if not patterns_file.exists():
+        return {"patterns": []}
+    return qralph_state.safe_read_json(patterns_file, {"patterns": []})
+
+
+def _save_healing_patterns(project_path: Path, patterns_db: dict):
+    """Save healing patterns DB for a project."""
+    patterns_dir = project_path / "healing-attempts"
+    patterns_dir.mkdir(parents=True, exist_ok=True)
+    safe_write_json(patterns_dir / "healing-patterns.json", patterns_db)
+
+
+def match_healing_pattern(error_message: str, project_path: Path) -> Optional[Dict[str, Any]]:
+    """
+    Look up a known healing pattern for this error.
+
+    Returns the pattern entry if found (with successful_fix if one exists),
+    or None if this is a novel error.
+    """
+    signature = _error_signature(error_message)
+    patterns_db = _load_healing_patterns(project_path)
+
+    for pattern in patterns_db.get("patterns", []):
+        if pattern.get("error_signature") == signature:
+            return pattern
+
+    return None
+
+
+def record_healing_outcome(error_message: str, fix_description: str, result: str,
+                           project_path: Path):
+    """
+    Record the outcome of a healing attempt in the patterns DB.
+
+    Args:
+        error_message: The original error
+        fix_description: What fix was applied
+        result: "success" or "failed"
+        project_path: Project directory
+    """
+    signature = _error_signature(error_message)
+    error_analysis = classify_error(error_message)
+    patterns_db = _load_healing_patterns(project_path)
+    now = datetime.now().isoformat()
+
+    # Find existing pattern entry
+    existing = None
+    for pattern in patterns_db.get("patterns", []):
+        if pattern.get("error_signature") == signature:
+            existing = pattern
+            break
+
+    fix_entry = {"description": fix_description, "result": result, "timestamp": now}
+
+    if existing:
+        existing["fixes_attempted"].append(fix_entry)
+        existing["last_seen"] = now
+        if result == "success":
+            existing["successful_fix"] = fix_description
+    else:
+        new_pattern = {
+            "error_signature": signature,
+            "error_type": error_analysis["error_type"],
+            "normalized_error": _normalize_error(error_message)[:200],
+            "fixes_attempted": [fix_entry],
+            "successful_fix": fix_description if result == "success" else None,
+            "first_seen": now,
+            "last_seen": now,
+        }
+        patterns_db.setdefault("patterns", []).append(new_pattern)
+
+    _save_healing_patterns(project_path, patterns_db)
+
+
+def build_healing_context(state: dict, error_message: str) -> dict:
+    """
+    Build rich context for healing prompts.
+
+    Injects phase, recent agent, remaining budget, and known patterns
+    into a context dict that can be used by the healing prompt.
+    """
+    project_path = Path(state.get("project_path", ""))
+    cb = state.get("circuit_breakers", {})
+
+    context = {
+        "phase": state.get("phase", "UNKNOWN"),
+        "mode": state.get("mode", "coding"),
+        "heal_attempts": state.get("heal_attempts", 0),
+        "agents": state.get("agents", []),
+        "remaining_token_budget": max(0, 500000 - cb.get("total_tokens", 0)),
+        "remaining_cost_budget": max(0.0, 40.0 - cb.get("total_cost_usd", 0.0)),
+        "error_counts": cb.get("error_counts", {}),
+    }
+
+    # Check for known pattern
+    if project_path.exists():
+        known = match_healing_pattern(error_message, project_path)
+        if known:
+            context["known_pattern"] = True
+            context["successful_fix"] = known.get("successful_fix")
+            failed = [f["description"] for f in known.get("fixes_attempted", [])
+                      if f["result"] == "failed"]
+            context["failed_fixes"] = failed
+        else:
+            context["known_pattern"] = False
+
+    return context
+
+
+def catastrophic_rollback(state: dict, project_path: Path) -> dict:
+    """
+    Emergency rollback on 3+ consecutive healing failures.
+
+    1. Saves corrupted state to healing-attempts/corrupted-state.json
+    2. Restores last valid checkpoint
+    3. Resets heal_attempts counter
+    4. Returns the restored state
+
+    Args:
+        state: Current (failing) state
+        project_path: Project directory
+
+    Returns:
+        Restored state dict, or original state if no checkpoint available.
+    """
+    healing_dir = project_path / "healing-attempts"
+    healing_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save corrupted state for forensics
+    corrupted_file = healing_dir / f"corrupted-state-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    safe_write_json(corrupted_file, state)
+
+    # Find last valid checkpoint
+    checkpoints_dir = project_path / "checkpoints"
+    if not checkpoints_dir.exists():
+        return state
+
+    checkpoints = sorted(checkpoints_dir.glob("*.json"))
+    if not checkpoints:
+        return state
+
+    # Try checkpoints from newest to oldest
+    for checkpoint_file in reversed(checkpoints):
+        try:
+            checkpoint_state = json.loads(checkpoint_file.read_text())
+            # Validate it
+            errors = qralph_state.validate_state(checkpoint_state)
+            if not errors:
+                # Reset counters
+                checkpoint_state["heal_attempts"] = 0
+                if "circuit_breakers" in checkpoint_state:
+                    checkpoint_state["circuit_breakers"]["error_counts"] = {}
+                save_state(checkpoint_state)
+
+                # Log
+                log_file = project_path / "decisions.log"
+                with open(log_file, "a") as f:
+                    f.write(f"[{datetime.now().strftime('%H:%M:%S')}] CATASTROPHIC ROLLBACK: "
+                            f"Restored from {checkpoint_file.name}, corrupted state saved to {corrupted_file.name}\n")
+
+                return checkpoint_state
+        except (json.JSONDecodeError, Exception):
+            continue
+
+    return state
 
 
 def count_similar_errors(error_message: str) -> int:
@@ -470,16 +662,63 @@ def cmd_attempt(error_message: str):
     # Classify error
     error_analysis = classify_error(error_message)
 
+    # Check for known healing pattern before escalating
+    known_pattern = match_healing_pattern(error_message, project_path)
+    skip_fixes = []
+    if known_pattern:
+        if known_pattern.get("successful_fix"):
+            # Known fix exists - use it directly with haiku
+            error_analysis["known_fix"] = known_pattern["successful_fix"]
+        # Collect failed fixes to avoid repeating them
+        skip_fixes = [f["description"] for f in known_pattern.get("fixes_attempted", [])
+                      if f["result"] == "failed"]
+
+    # Catastrophic rollback check: 3+ consecutive failures
+    if heal_attempts >= 3 and not known_pattern:
+        recent_all_failed = True
+        healing_dir_check = project_path / "healing-attempts"
+        if healing_dir_check.exists():
+            recent_attempts = sorted(healing_dir_check.glob("attempt-*.md"))[-3:]
+            for af in recent_attempts:
+                try:
+                    if "success" in af.read_text().lower():
+                        recent_all_failed = False
+                        break
+                except Exception:
+                    pass
+        if recent_all_failed and heal_attempts >= 3:
+            rollback_state = catastrophic_rollback(state, project_path)
+            if rollback_state != state:
+                output = {
+                    "status": "catastrophic_rollback",
+                    "message": "3+ consecutive failures triggered rollback to last checkpoint",
+                    "restored_phase": rollback_state.get("phase"),
+                    "heal_attempts_reset": True,
+                }
+                print(json.dumps(output, indent=2))
+                return output
+
     # Determine model tier
-    if heal_attempts <= 2:
+    if known_pattern and known_pattern.get("successful_fix"):
+        model = "haiku"  # Known fix, use cheapest model
+    elif heal_attempts <= 2:
         model = "haiku"
     elif heal_attempts <= 4:
         model = "sonnet"
     else:
         model = "opus"
 
+    # Build healing context
+    healing_context = build_healing_context(state, error_message)
+
     # Generate healing prompt
     heal_prompt = generate_healing_prompt(error_analysis, heal_attempts)
+    if skip_fixes:
+        heal_prompt += f"\n\n## Known Failed Fixes (DO NOT RETRY)\n\n"
+        for sf in skip_fixes:
+            heal_prompt += f"- {sf}\n"
+    if known_pattern and known_pattern.get("successful_fix"):
+        heal_prompt += f"\n\n## Known Successful Fix\n\nApply this fix: {known_pattern['successful_fix']}\n"
 
     # Save attempt record
     healing_dir = project_path / "healing-attempts"
@@ -520,7 +759,7 @@ Pending execution by {model} model.
 *Generated by qralph-healer.py v1.0*
 """
 
-    attempt_file.write_text(attempt_content)
+    safe_write(attempt_file, attempt_content)
 
     # Update circuit breakers
     if "circuit_breakers" not in state:
@@ -787,6 +1026,12 @@ Examples:
     # status
     subparsers.add_parser("status", help="Show healer status")
 
+    # record-outcome
+    outcome_parser = subparsers.add_parser("record-outcome", help="Record healing outcome")
+    outcome_parser.add_argument("error", help="Original error message")
+    outcome_parser.add_argument("fix", help="Description of fix applied")
+    outcome_parser.add_argument("result", choices=["success", "failed"], help="Outcome")
+
     args = parser.parse_args()
 
     if args.command == "analyze":
@@ -801,6 +1046,17 @@ Examples:
         cmd_clear()
     elif args.command == "status":
         cmd_status()
+    elif args.command == "record-outcome":
+        state = load_state()
+        if state:
+            project_path = Path(state.get("project_path", ""))
+            if project_path.exists():
+                record_healing_outcome(args.error, args.fix, args.result, project_path)
+                print(json.dumps({"status": "recorded", "result": args.result}))
+            else:
+                print(json.dumps({"error": "Project path not found"}))
+        else:
+            print(json.dumps({"error": "No active project"}))
     else:
         parser.print_help()
 

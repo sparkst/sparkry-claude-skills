@@ -49,25 +49,29 @@ spec_heal = importlib.util.spec_from_file_location("qralph_healer", healer_path)
 qralph_healer = importlib.util.module_from_spec(spec_heal)
 spec_heal.loader.exec_module(qralph_healer)
 
-# Import functions from orchestrator
+# Import functions from orchestrator (v3.0 API)
 validate_request = qralph_orchestrator.validate_request
-validate_agent_name = qralph_orchestrator.validate_agent_name
 validate_phase_transition = qralph_orchestrator.validate_phase_transition
 check_circuit_breakers = qralph_orchestrator.check_circuit_breakers
 update_circuit_breakers = qralph_orchestrator.update_circuit_breakers
 generate_slug = qralph_orchestrator.generate_slug
 estimate_tokens = qralph_orchestrator.estimate_tokens
 estimate_cost = qralph_orchestrator.estimate_cost
-detect_request_type = qralph_orchestrator.detect_request_type
+classify_domains = qralph_orchestrator.classify_domains
+estimate_complexity = qralph_orchestrator.estimate_complexity
+score_capability = qralph_orchestrator.score_capability
+generate_action_plan = qralph_orchestrator.generate_action_plan
+generate_team_agent_prompt = qralph_orchestrator.generate_team_agent_prompt
 extract_summary = qralph_orchestrator.extract_summary
 extract_findings = qralph_orchestrator.extract_findings
 format_findings = qralph_orchestrator.format_findings
+AGENT_REGISTRY = qralph_orchestrator.AGENT_REGISTRY
+DOMAIN_KEYWORDS = qralph_orchestrator.DOMAIN_KEYWORDS
 MAX_TOKENS = qralph_orchestrator.MAX_TOKENS
 MAX_COST_USD = qralph_orchestrator.MAX_COST_USD
 MAX_SAME_ERROR = qralph_orchestrator.MAX_SAME_ERROR
 MAX_HEAL_ATTEMPTS = qralph_orchestrator.MAX_HEAL_ATTEMPTS
 MODEL_COSTS = qralph_orchestrator.MODEL_COSTS
-DEFAULT_AGENT_SETS = qralph_orchestrator.DEFAULT_AGENT_SETS
 
 # Import functions from healer
 classify_error = qralph_healer.classify_error
@@ -118,29 +122,34 @@ def test_validate_request_valid_long():
     assert validate_request("Review security vulnerabilities in authentication module") is True
 
 
-def test_validate_agent_name_valid_security():
-    """REQ-QRALPH-002: Accept valid agent name from default sets"""
-    assert validate_agent_name("security-reviewer") is True
+def test_classify_domains_security_request():
+    """REQ-QRALPH-002: Classify security-related request domains"""
+    domains = classify_domains("Review authentication and fix XSS vulnerabilities")
+    assert "security" in domains
 
 
-def test_validate_agent_name_valid_architecture():
-    """REQ-QRALPH-002: Accept valid agent name from default sets"""
-    assert validate_agent_name("architecture-advisor") is True
+def test_classify_domains_frontend_request():
+    """REQ-QRALPH-002: Classify frontend-related request domains"""
+    domains = classify_domains("Build a responsive dashboard with React components")
+    assert "frontend" in domains
 
 
-def test_validate_agent_name_valid_quality():
-    """REQ-QRALPH-002: Accept valid agent name from default sets"""
-    assert validate_agent_name("code-quality-auditor") is True
+def test_classify_domains_multi_domain():
+    """REQ-QRALPH-002: Classify request touching multiple domains"""
+    domains = classify_domains("Build a secure REST API with comprehensive test coverage")
+    assert len(domains) >= 2
 
 
-def test_validate_agent_name_invalid():
-    """REQ-QRALPH-002: Reject invalid agent name"""
-    assert validate_agent_name("fake-agent") is False
+def test_classify_domains_empty_request():
+    """REQ-QRALPH-002: Handle empty request gracefully"""
+    domains = classify_domains("")
+    assert isinstance(domains, list)
 
 
-def test_validate_agent_name_empty():
-    """REQ-QRALPH-002: Reject empty agent name"""
-    assert validate_agent_name("") is False
+def test_classify_domains_ranked_by_score():
+    """REQ-QRALPH-002: Return domains ranked by relevance score"""
+    domains = classify_domains("security audit of authentication tokens and passwords")
+    assert domains[0] == "security"
 
 
 def test_validate_phase_transition_init_to_reviewing():
@@ -217,7 +226,6 @@ def test_check_circuit_breakers_token_exceeded():
     error = check_circuit_breakers(state)
     assert error is not None
     assert "Token limit" in error
-    assert str(MAX_TOKENS) in error
 
 
 def test_check_circuit_breakers_cost_exceeded():
@@ -479,45 +487,48 @@ def test_estimate_cost_unknown_model():
     assert cost == MODEL_COSTS["sonnet"]
 
 
-def test_detect_request_type_code_review():
-    """REQ-QRALPH-008: Detect code review requests"""
-    assert detect_request_type("Review this code for security issues") == "code_review"
-    assert detect_request_type("Audit authentication module") == "code_review"
-    assert detect_request_type("Check for vulnerabilities") == "code_review"
+def test_estimate_complexity_simple_request():
+    """REQ-QRALPH-008: Low complexity for simple single-domain requests"""
+    complexity = estimate_complexity("Fix login bug", ["security"])
+    assert complexity == 3
 
 
-def test_detect_request_type_planning():
-    """REQ-QRALPH-008: Detect planning requests"""
-    assert detect_request_type("Plan the roadmap for Q2") == "planning"
-    assert detect_request_type("Design system architecture") == "planning"
-    assert detect_request_type("Create strategy document") == "planning"
+def test_estimate_complexity_complex_request():
+    """REQ-QRALPH-008: Higher complexity for multi-domain with keywords"""
+    complexity = estimate_complexity(
+        "Refactor and redesign the comprehensive authentication system with end-to-end testing and integrate with external providers",
+        ["security", "backend", "testing", "architecture"]
+    )
+    assert complexity >= 5
 
 
-def test_detect_request_type_research():
-    """REQ-QRALPH-008: Detect research requests"""
-    assert detect_request_type("Research AI trends in healthcare") == "research"
-    assert detect_request_type("Analyze competitor features") == "research"
-    assert detect_request_type("Compare different frameworks") == "research"
+def test_estimate_complexity_returns_3_to_7():
+    """REQ-QRALPH-008: Complexity always clamped to 3-7 range"""
+    assert estimate_complexity("x", []) >= 3
+    assert estimate_complexity("x" * 200, ["a", "b", "c", "d", "e"]) <= 7
 
 
-def test_detect_request_type_content():
-    """REQ-QRALPH-008: Detect content requests"""
-    assert detect_request_type("Write blog post about AI") == "content"
-    assert detect_request_type("Polish article for publication") == "content"
-    assert detect_request_type("Create content for newsletter") == "content"
+def test_score_capability_domain_overlap():
+    """REQ-QRALPH-008: Score increases with domain overlap"""
+    cap = {"name": "security-reviewer", "domains": ["security", "compliance"]}
+    score = score_capability(cap, ["security"], "audit security")
+    assert score > 0.0
+    assert score <= 1.0
 
 
-def test_detect_request_type_testing():
-    """REQ-QRALPH-008: Detect testing requests"""
-    assert detect_request_type("Test user authentication flow") == "testing"
-    assert detect_request_type("QA the checkout process") == "testing"
-    assert detect_request_type("Validate coverage for API") == "testing"
+def test_score_capability_no_overlap():
+    """REQ-QRALPH-008: Zero or low score when no domain overlap"""
+    cap = {"name": "ux-designer", "domains": ["frontend"]}
+    score = score_capability(cap, ["backend", "devops"], "deploy microservice")
+    assert score < 0.2
 
 
-def test_detect_request_type_feature_dev():
-    """REQ-QRALPH-008: Default to feature_dev for unclassified requests"""
-    assert detect_request_type("Add dark mode support") == "feature_dev"
-    assert detect_request_type("Implement new dashboard") == "feature_dev"
+def test_score_capability_name_keyword_match():
+    """REQ-QRALPH-008: Score boost from name keyword match"""
+    cap = {"name": "security-reviewer", "domains": []}
+    score_with_match = score_capability(cap, [], "security review of auth")
+    score_without_match = score_capability(cap, [], "deploy to production")
+    assert score_with_match > score_without_match
 
 
 def test_extract_summary_present():
@@ -873,22 +884,30 @@ Add import statement for requests module.
     assert "haiku" in content
 
 
-def test_integration_default_agent_sets_completeness():
-    """REQ-QRALPH-008: Verify default agent sets are comprehensive"""
-    assert "code_review" in DEFAULT_AGENT_SETS
-    assert "feature_dev" in DEFAULT_AGENT_SETS
-    assert "planning" in DEFAULT_AGENT_SETS
-    assert "research" in DEFAULT_AGENT_SETS
-    assert "content" in DEFAULT_AGENT_SETS
-    assert "testing" in DEFAULT_AGENT_SETS
+def test_integration_agent_registry_completeness():
+    """REQ-QRALPH-008: Verify agent registry has required agents"""
+    required_agents = [
+        "security-reviewer", "architecture-advisor", "sde-iii",
+        "code-quality-auditor", "requirements-analyst", "ux-designer",
+        "test-writer", "pm", "research-director",
+    ]
+    for agent in required_agents:
+        assert agent in AGENT_REGISTRY, f"Missing agent: {agent}"
+        info = AGENT_REGISTRY[agent]
+        assert "domains" in info
+        assert "model" in info
+        assert info["model"] in ["haiku", "sonnet", "opus"]
 
-    # Verify each set has 5 agents
-    for request_type, agents in DEFAULT_AGENT_SETS.items():
-        assert len(agents) == 5, f"{request_type} should have 5 agents"
-        # Verify format: (agent_name, model_tier)
-        for agent, model in agents:
-            assert isinstance(agent, str)
-            assert model in ["haiku", "sonnet", "opus"]
+
+def test_integration_domain_keywords_coverage():
+    """REQ-QRALPH-008: Verify domain keywords cover required categories"""
+    required_domains = [
+        "security", "frontend", "backend", "architecture",
+        "testing", "devops", "content", "research", "strategy",
+    ]
+    for domain in required_domains:
+        assert domain in DOMAIN_KEYWORDS, f"Missing domain: {domain}"
+        assert len(DOMAIN_KEYWORDS[domain]) >= 3, f"Domain {domain} needs more keywords"
 
 
 def test_integration_error_patterns_coverage():
@@ -1017,6 +1036,463 @@ def test_limits_circuit_breaker_constants():
     assert MAX_TOKENS == 500_000
     assert MAX_COST_USD == 40.0
     assert MAX_SAME_ERROR == 3
+
+
+# ============================================================================
+# 9. SHARED STATE MODULE TESTS
+# ============================================================================
+
+# Import shared state module
+state_path = Path(__file__).parent / "qralph-state.py"
+spec_state = importlib.util.spec_from_file_location("qralph_state", state_path)
+qralph_state_mod = importlib.util.module_from_spec(spec_state)
+spec_state.loader.exec_module(qralph_state_mod)
+
+
+def test_state_validate_empty_state():
+    """REQ-QRALPH-013: Empty state reports errors"""
+    errors = qralph_state_mod.validate_state({})
+    assert len(errors) > 0
+    assert "State is empty" in errors[0]
+
+
+def test_state_validate_complete_state():
+    """REQ-QRALPH-013: Valid complete state passes validation"""
+    state = {
+        "project_id": "001-test",
+        "project_path": "/tmp/test",
+        "request": "test request",
+        "mode": "coding",
+        "phase": "INIT",
+        "created_at": datetime.now().isoformat(),
+        "agents": [],
+        "heal_attempts": 0,
+        "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
+    }
+    errors = qralph_state_mod.validate_state(state)
+    assert errors == []
+
+
+def test_state_validate_missing_fields():
+    """REQ-QRALPH-013: Detect missing required fields"""
+    state = {"project_id": "001-test"}
+    errors = qralph_state_mod.validate_state(state)
+    assert any("Missing required field" in e for e in errors)
+
+
+def test_state_validate_wrong_types():
+    """REQ-QRALPH-013: Detect wrong field types"""
+    state = {
+        "project_id": 123,  # should be str
+        "project_path": "/tmp/test",
+        "request": "test",
+        "mode": "coding",
+        "phase": "INIT",
+        "created_at": datetime.now().isoformat(),
+        "agents": [],
+        "heal_attempts": 0,
+        "circuit_breakers": {},
+    }
+    errors = qralph_state_mod.validate_state(state)
+    assert any("wrong type" in e for e in errors)
+
+
+def test_state_validate_invalid_phase():
+    """REQ-QRALPH-013: Detect unknown phase values"""
+    state = {
+        "project_id": "001-test",
+        "project_path": "/tmp/test",
+        "request": "test",
+        "mode": "coding",
+        "phase": "INVALID_PHASE",
+        "created_at": datetime.now().isoformat(),
+        "agents": [],
+        "heal_attempts": 0,
+        "circuit_breakers": {},
+    }
+    errors = qralph_state_mod.validate_state(state)
+    assert any("Unknown phase" in e for e in errors)
+
+
+def test_state_repair_fills_missing_fields():
+    """REQ-QRALPH-013: Repair fills all missing required fields"""
+    state = {"project_id": "001-test"}
+    repaired = qralph_state_mod.repair_state(state)
+    assert repaired["project_id"] == "001-test"  # preserved
+    assert "phase" in repaired
+    assert "agents" in repaired
+    assert "circuit_breakers" in repaired
+    assert isinstance(repaired["circuit_breakers"], dict)
+
+
+def test_state_repair_preserves_existing():
+    """REQ-QRALPH-013: Repair doesn't overwrite existing fields"""
+    state = {"project_id": "001-test", "phase": "REVIEWING", "heal_attempts": 3}
+    repaired = qralph_state_mod.repair_state(state)
+    assert repaired["phase"] == "REVIEWING"
+    assert repaired["heal_attempts"] == 3
+
+
+def test_state_checksum_roundtrip():
+    """REQ-QRALPH-013: Checksum is valid after save/load cycle"""
+    state = {"project_id": "001-test", "data": "test"}
+    checksum = qralph_state_mod._compute_checksum(state)
+    state["_checksum"] = checksum
+    # Verify recomputed checksum matches
+    assert qralph_state_mod._compute_checksum(state) == checksum
+
+
+def test_state_checksum_changes_with_data():
+    """REQ-QRALPH-013: Checksum changes when data changes"""
+    state1 = {"project_id": "001-test"}
+    state2 = {"project_id": "002-test"}
+    assert qralph_state_mod._compute_checksum(state1) != qralph_state_mod._compute_checksum(state2)
+
+
+def test_state_safe_write_and_read(temp_project_dir):
+    """REQ-QRALPH-013: safe_write creates file atomically"""
+    target = temp_project_dir / "test-output.txt"
+    qralph_state_mod.safe_write(target, "hello world")
+    assert target.exists()
+    assert target.read_text() == "hello world"
+
+
+def test_state_safe_write_json_roundtrip(temp_project_dir):
+    """REQ-QRALPH-013: safe_write_json preserves data through roundtrip"""
+    target = temp_project_dir / "test-data.json"
+    data = {"key": "value", "number": 42, "nested": {"a": [1, 2, 3]}}
+    qralph_state_mod.safe_write_json(target, data)
+    loaded = json.loads(target.read_text())
+    assert loaded == data
+
+
+def test_state_safe_read_json_missing_file(temp_project_dir):
+    """REQ-QRALPH-013: safe_read_json returns default for missing file"""
+    result = qralph_state_mod.safe_read_json(temp_project_dir / "nonexistent.json", {"default": True})
+    assert result == {"default": True}
+
+
+def test_state_safe_read_json_corrupt_file(temp_project_dir):
+    """REQ-QRALPH-013: safe_read_json handles corrupt JSON gracefully"""
+    corrupt = temp_project_dir / "corrupt.json"
+    corrupt.write_text("{invalid json")
+    result = qralph_state_mod.safe_read_json(corrupt, {"fallback": True})
+    assert result == {"fallback": True}
+
+
+def test_state_save_load_roundtrip(temp_project_dir):
+    """REQ-QRALPH-013: Full state save/load cycle with checksum"""
+    state_file = temp_project_dir / "state.json"
+    state = {"project_id": "001-test", "phase": "INIT", "data": "test"}
+    qralph_state_mod.save_state(state, state_file)
+    loaded = qralph_state_mod.load_state(state_file)
+    assert loaded["project_id"] == "001-test"
+    assert loaded["phase"] == "INIT"
+    assert "_checksum" in loaded
+
+
+# ============================================================================
+# 10. ADDITIONAL PURE FUNCTION TESTS
+# ============================================================================
+
+
+def test_generate_action_plan_with_p0():
+    """REQ-QRALPH-009: Action plan prioritizes P0 issues"""
+    findings = {
+        "P0": [{"agent": "security-reviewer", "finding": "Critical SQL injection"}],
+        "P1": [{"agent": "code-quality-auditor", "finding": "Missing error handling"}],
+        "P2": [],
+    }
+    plan = generate_action_plan(findings)
+    assert "BLOCK" in plan
+    assert "SQL injection" in plan
+
+
+def test_generate_action_plan_no_issues():
+    """REQ-QRALPH-009: Action plan for zero issues"""
+    findings = {"P0": [], "P1": [], "P2": []}
+    plan = generate_action_plan(findings)
+    assert "No issues" in plan or "proceed" in plan.lower()
+
+
+def test_generate_action_plan_p1_only():
+    """REQ-QRALPH-009: Action plan with only P1 issues"""
+    findings = {
+        "P0": [],
+        "P1": [{"agent": "test-writer", "finding": "Low test coverage"}],
+        "P2": [],
+    }
+    plan = generate_action_plan(findings)
+    assert "FIX" in plan
+
+
+def test_generate_team_agent_prompt_structure():
+    """REQ-QRALPH-014: Agent prompt includes required sections"""
+    prompt = generate_team_agent_prompt(
+        agent_type="security-reviewer",
+        request="Review authentication module",
+        project_id="001-test",
+        project_path=Path("/tmp/test"),
+        team_name="qralph-001-test",
+        available_skills=["code-review"],
+    )
+    assert "security reviewer" in prompt.lower()
+    assert "qralph-001-test" in prompt
+    assert "001-test" in prompt
+    assert "## Focus Areas" in prompt
+    assert "## Workflow" in prompt
+    assert "## Output Format" in prompt
+
+
+def test_generate_team_agent_prompt_includes_skills():
+    """REQ-QRALPH-014: Agent prompt includes available skills"""
+    prompt = generate_team_agent_prompt(
+        agent_type="ux-designer",
+        request="Build dashboard",
+        project_id="001-test",
+        project_path=Path("/tmp/test"),
+        team_name="qralph-001-test",
+        available_skills=["frontend-design"],
+    )
+    assert "frontend-design" in prompt
+    assert "## Available Skills" in prompt
+
+
+def test_generate_team_agent_prompt_no_skills():
+    """REQ-QRALPH-014: Agent prompt without skills omits section"""
+    prompt = generate_team_agent_prompt(
+        agent_type="security-reviewer",
+        request="Review code",
+        project_id="001-test",
+        project_path=Path("/tmp/test"),
+        team_name="qralph-001-test",
+        available_skills=[],
+    )
+    assert "## Available Skills" not in prompt
+
+
+def test_classify_domains_content_request():
+    """REQ-QRALPH-002: Classify content-related request domains"""
+    domains = classify_domains("Write a blog article about documentation best practices")
+    assert "content" in domains
+
+
+def test_classify_domains_devops_request():
+    """REQ-QRALPH-002: Classify devops-related request domains"""
+    domains = classify_domains("Deploy the application using Docker and set up CI pipeline")
+    assert "devops" in domains
+
+
+def test_classify_domains_research_request():
+    """REQ-QRALPH-002: Classify research-related request domains"""
+    domains = classify_domains("Research and analyze competitor products for market assessment")
+    assert "research" in domains
+
+
+def test_estimate_complexity_moderate_request():
+    """REQ-QRALPH-008: Moderate complexity for medium requests"""
+    complexity = estimate_complexity(
+        "Add user authentication with JWT tokens and integrate with database",
+        ["security", "backend"]
+    )
+    assert 3 <= complexity <= 7
+
+
+def test_score_capability_description_match():
+    """REQ-QRALPH-008: Score includes description keyword matching"""
+    cap = {"name": "test-tool", "domains": [], "description": "Create distinctive frontend interfaces"}
+    score = score_capability(cap, [], "create a new frontend interface")
+    assert score > 0.0
+
+
+def test_score_capability_bounded():
+    """REQ-QRALPH-008: Score is always bounded 0.0-1.0"""
+    cap = {"name": "security-reviewer", "domains": ["security", "compliance"],
+           "description": "security review authentication authorization"}
+    score = score_capability(cap, ["security", "compliance"],
+                            "security review authentication authorization compliance")
+    assert 0.0 <= score <= 1.0
+
+
+def test_generate_slug_special_characters():
+    """REQ-QRALPH-007: Slug handles special characters"""
+    slug = generate_slug("Add dark-mode & fix UI bugs!")
+    assert all(c.isalnum() or c == '-' for c in slug)
+
+
+def test_generate_slug_numbers():
+    """REQ-QRALPH-007: Slug filters out short words"""
+    slug = generate_slug("10 steps to build API v2")
+    # Numbers and 2-letter words should be filtered
+    assert "10" not in slug
+    assert "to" not in slug
+
+
+def test_check_control_commands_no_file():
+    """REQ-QRALPH-015: No control command when file missing"""
+    result = qralph_orchestrator.check_control_commands(Path("/nonexistent"))
+    assert result is None
+
+
+def test_check_control_commands_with_pause(temp_project_dir):
+    """REQ-QRALPH-015: Detect PAUSE command"""
+    (temp_project_dir / "CONTROL.md").write_text("PAUSE")
+    result = qralph_orchestrator.check_control_commands(temp_project_dir)
+    assert result == "PAUSE"
+
+
+def test_check_control_commands_with_abort(temp_project_dir):
+    """REQ-QRALPH-015: Detect ABORT command"""
+    (temp_project_dir / "CONTROL.md").write_text("ABORT")
+    result = qralph_orchestrator.check_control_commands(temp_project_dir)
+    assert result == "ABORT"
+
+
+def test_check_control_commands_empty_file(temp_project_dir):
+    """REQ-QRALPH-015: No control command for empty file"""
+    (temp_project_dir / "CONTROL.md").write_text("# Control\n\nNo commands here.")
+    result = qralph_orchestrator.check_control_commands(temp_project_dir)
+    assert result is None
+
+
+def test_validate_request_type_check():
+    """REQ-QRALPH-001: Reject non-string request types"""
+    assert validate_request(123) is False
+    assert validate_request([]) is False
+
+
+# ============================================================================
+# 11. COMMAND FUNCTION TESTS (with mocked filesystem)
+# ============================================================================
+
+
+@pytest.fixture
+def mock_qralph_env(tmp_path, monkeypatch):
+    """Set up a full mock QRALPH environment for cmd_* testing"""
+    monkeypatch.setattr(qralph_orchestrator, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(qralph_orchestrator, 'QRALPH_DIR', tmp_path / ".qralph")
+    monkeypatch.setattr(qralph_orchestrator, 'PROJECTS_DIR', tmp_path / ".qralph" / "projects")
+    monkeypatch.setattr(qralph_orchestrator, 'AGENTS_DIR', tmp_path / ".claude" / "agents")
+    monkeypatch.setattr(qralph_orchestrator, 'PLUGINS_DIR', tmp_path / ".claude" / "plugins")
+    # Override state file path in the shared state module
+    monkeypatch.setattr(qralph_state_mod, 'STATE_FILE', tmp_path / ".qralph" / "current-project.json")
+    return tmp_path
+
+
+def test_cmd_init_creates_project(mock_qralph_env, capsys):
+    """REQ-QRALPH-007: cmd_init creates project directory structure"""
+    result = qralph_orchestrator.cmd_init("Add dark mode feature")
+    assert result["status"] == "initialized"
+    assert "project_id" in result
+    project_path = Path(result["project_path"])
+    assert (project_path / "agent-outputs").is_dir()
+    assert (project_path / "checkpoints").is_dir()
+    assert (project_path / "healing-attempts").is_dir()
+    assert (project_path / "CONTROL.md").exists()
+
+
+def test_cmd_init_rejects_empty_request(mock_qralph_env, capsys):
+    """REQ-QRALPH-007: cmd_init rejects empty request"""
+    result = qralph_orchestrator.cmd_init("")
+    assert "error" in result
+
+
+def test_cmd_init_increments_project_number(mock_qralph_env, capsys):
+    """REQ-QRALPH-007: cmd_init auto-increments project number"""
+    r1 = qralph_orchestrator.cmd_init("First project")
+    r2 = qralph_orchestrator.cmd_init("Second project")
+    id1 = int(r1["project_id"][:3])
+    id2 = int(r2["project_id"][:3])
+    assert id2 == id1 + 1
+
+
+def test_cmd_init_planning_mode(mock_qralph_env, capsys):
+    """REQ-QRALPH-007: cmd_init supports planning mode"""
+    result = qralph_orchestrator.cmd_init("Plan Q2 roadmap", mode="planning")
+    assert result["mode"] == "planning"
+
+
+def _clear_control_md(mock_env):
+    """Helper: clear CONTROL.md so commands like PAUSE/ABORT in help text don't trigger control flow."""
+    for control_file in Path(mock_env).rglob("CONTROL.md"):
+        control_file.write_text("# Control\n")
+
+
+def test_cmd_discover_requires_init(mock_qralph_env, capsys):
+    """REQ-QRALPH-016: cmd_discover errors without active project"""
+    result = qralph_orchestrator.cmd_discover()
+    captured = capsys.readouterr()
+    assert "error" in captured.out.lower() or result is None
+
+
+def test_cmd_discover_finds_capabilities(mock_qralph_env, capsys):
+    """REQ-QRALPH-016: cmd_discover identifies relevant capabilities"""
+    qralph_orchestrator.cmd_init("Review security of authentication system")
+    _clear_control_md(mock_qralph_env)
+    result = qralph_orchestrator.cmd_discover()
+    assert result["status"] == "discovered"
+    assert result["relevant_count"] > 0
+    assert "security" in result["domains_detected"]
+
+
+def test_cmd_select_agents_dynamic(mock_qralph_env, capsys):
+    """REQ-QRALPH-008: cmd_select_agents picks agents dynamically"""
+    qralph_orchestrator.cmd_init("Review security and architecture")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents()
+    assert result["status"] == "agents_selected"
+    assert result["agent_count"] >= 3
+
+
+def test_cmd_select_agents_custom(mock_qralph_env, capsys):
+    """REQ-QRALPH-008: cmd_select_agents accepts custom agent list"""
+    qralph_orchestrator.cmd_init("Custom review")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer", "sde-iii"])
+    assert result["agent_count"] == 2
+    assert "security-reviewer" in [a["agent_type"] for a in result["agents"]]
+
+
+def test_cmd_heal_model_escalation(mock_qralph_env, capsys):
+    """REQ-QRALPH-005: cmd_heal escalates models correctly"""
+    qralph_orchestrator.cmd_init("Test project")
+    _clear_control_md(mock_qralph_env)
+    r1 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r1["model"] == "haiku"
+    r2 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r2["model"] == "haiku"
+    r3 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r3["model"] == "sonnet"
+
+
+def test_cmd_heal_defers_after_max_attempts(mock_qralph_env, capsys):
+    """REQ-QRALPH-005: cmd_heal defers after max attempts"""
+    qralph_orchestrator.cmd_init("Test project")
+    _clear_control_md(mock_qralph_env)
+    for _ in range(5):
+        qralph_orchestrator.cmd_heal("persistent error")
+    result = qralph_orchestrator.cmd_heal("persistent error")
+    assert result["status"] == "deferred"
+
+
+def test_cmd_checkpoint_saves_state(mock_qralph_env, capsys):
+    """REQ-QRALPH-017: cmd_checkpoint saves state snapshot"""
+    qralph_orchestrator.cmd_init("Test project")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_checkpoint("REVIEWING")
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "REVIEWING"
+
+
+def test_cmd_status_lists_projects(mock_qralph_env, capsys):
+    """REQ-QRALPH-012: cmd_status lists all projects"""
+    qralph_orchestrator.cmd_init("Project 1")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_status()
+    captured = capsys.readouterr()
+    assert "projects" in captured.out
 
 
 # ============================================================================

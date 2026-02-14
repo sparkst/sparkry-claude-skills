@@ -1,10 +1,10 @@
-# Orchestration Workflow (QRALPH)
+# Orchestration Workflow (QRALPH v4.0)
 
-Multi-agent swarm orchestration for Claude Code with parallel execution, self-healing, and checkpointing.
+Multi-agent swarm orchestration for Claude Code with session persistence, self-healing, process monitoring, long-term memory, and work mode.
 
 ## What is QRALPH?
 
-QRALPH spawns 5 parallel specialist agents to review your request from different perspectives (security, architecture, requirements, UX, code quality) before implementation.
+QRALPH creates a Claude Code native team to analyze requests from multiple specialist perspectives (security, architecture, requirements, UX, code quality) before implementation. It dynamically discovers installed plugins and selects the best 3-7 agents for your request.
 
 ## Installation
 
@@ -15,6 +15,7 @@ QRALPH spawns 5 parallel specialist agents to review your request from different
 
 ## Usage
 
+### Coding Mode (3-7 agents)
 ```bash
 # Feature development
 QRALPH "Add a logout button to the navbar"
@@ -24,8 +25,21 @@ QRALPH "Review auth flow" --agents security,architecture,pm
 
 # Planning mode (no code changes)
 QRALPH "Compare auth providers" --mode planning
+```
 
-# Resume after interruption
+### Work Mode (1-3 agents, new in v4.0)
+```bash
+# Lightweight tasks: writing, research, business
+QWORK "Write a proposal for the client"
+QWORK "Research market trends in pharma AI"
+
+# Equivalent to:
+QRALPH "Write a proposal" --mode work
+```
+
+### Session Management
+```bash
+# Resume after interruption (STATE.md preserves context)
 QRALPH resume 001
 
 # Check status
@@ -34,18 +48,19 @@ QRALPH status
 
 ## How It Works
 
+### Coding Mode
 ```
      Your Request
           │
           ▼
    ┌─────────────┐
-   │   QRALPH    │
-   │ Orchestrator│
+   │   QRALPH    │──→ Discover plugins & skills
+   │ Orchestrator│──→ Select 3-7 best agents
    └──────┬──────┘
           │
   ┌───┬───┼───┬───┐
   ▼   ▼   ▼   ▼   ▼
- Sec Arc Req  UX  Code    ← 5 PARALLEL AGENTS
+ Sec Arc Req  UX  Code    ← PARALLEL AGENTS (native teams)
   │   │   │   │   │
   └───┴───┼───┴───┘
           ▼
@@ -55,13 +70,61 @@ QRALPH status
    └─────────────┘──→ UAT Generation
 ```
 
-## Key Features
+### Work Mode
+```
+INIT → DISCOVERING → PLANNING → USER_REVIEW → EXECUTING → COMPLETE
+                                     ^              │
+                                     |______________|  (iterate)
+                                                    │
+                                              ESCALATE → full team
+```
 
-- **Parallel Execution**: 5 agents run simultaneously with fresh context windows
-- **Self-Healing**: Auto-retry with model escalation (haiku → sonnet → opus)
-- **Circuit Breakers**: $40 max, 500K tokens max, 3x error limits
-- **Checkpointing**: Resume from any interruption
-- **User Control**: Write PAUSE/SKIP/ABORT to CONTROL.md
+## v4.0 Features
+
+### Session Persistence
+- **STATE.md** persists across Claude Code sessions
+- Tracks execution progress, uncommitted work, session log
+- Crash recovery reconstructs state from checkpoints + git
+
+### Process Monitor
+- PID registry tracks spawned processes (node, vitest, claude)
+- Automatic orphan sweep on session start/end
+- Grace periods per process type, circuit breaker on 3+ orphans
+
+### Long-term Memory
+- SQLite + FTS5 full-text search across projects
+- Auto-captures healing successes/failures, circuit breaker trips
+- `QREMEMBER "lesson learned"` for manual capture
+- Queries past experience before retrying known errors
+
+### Enhanced Self-Healing
+- Pattern matching: normalizes errors, hashes signatures, looks up known fixes
+- Catastrophic rollback: 3+ consecutive failures restores last valid checkpoint
+- Failed fix avoidance: never retries what already failed
+- Model escalation: haiku → sonnet → opus → manual
+
+### Watchdog
+- Agent health checks (stuck, empty, missing outputs)
+- Phase precondition validation before transitions
+- Configurable timeouts per model tier
+
+### Work Mode
+- 1-3 agents for lightweight business tasks
+- Plan-first workflow with user review loop
+- Skill discovery (writing, research, etc.)
+- Auto-escalation to full coding mode when complexity grows
+
+## Control Commands
+
+Write to `CONTROL.md` in your project directory:
+
+| Command | Action |
+|---------|--------|
+| PAUSE | Stop after current step |
+| SKIP | Skip current operation |
+| ABORT | Graceful shutdown with checkpoint |
+| STATUS | Force status dump |
+| ESCALATE | Switch to full coding mode (work mode) |
 
 ## Model Tiering
 
@@ -73,7 +136,15 @@ QRALPH status
 
 ## Cost
 
-Typical run: $3-8 (optimized via model tiering)
+Typical coding run: $3-8 (optimized via model tiering)
+Typical work run: $1-3 (fewer agents)
+
+## Test Suite
+
+300 tests across 7 test files:
+```bash
+python3 -m pytest tools/ -q
+```
 
 ## License
 

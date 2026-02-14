@@ -1,4 +1,4 @@
-# QRALPH Self-Healing Protocol
+# QRALPH Self-Healing Protocol v4.0
 
 ## Trigger Conditions
 
@@ -8,8 +8,20 @@ Self-healing activates when:
 - Lint error
 - Build failure
 - Agent-flagged issue with `auto_fix: true`
+- Teammate reports error via SendMessage
 
 ## Healing Strategy
+
+### Pattern Matching (v4.0)
+
+Before escalating models, the healer checks for known patterns:
+
+1. **Normalize error**: Strip paths, line numbers, timestamps, memory addresses
+2. **Hash signature**: SHA-256 of normalized error (first 16 chars)
+3. **Lookup**: Check `healing-patterns.json` for matching signature
+4. **If known fix exists**: Apply it directly with haiku (cheapest model)
+5. **If only failed fixes exist**: Skip them, try new approaches
+6. **If novel error**: Proceed with model escalation
 
 ### Escalating Model Tiers
 
@@ -19,111 +31,86 @@ Self-healing activates when:
 | 3-4 | Sonnet | Context-aware fix (type errors, logic) | 10K |
 | 5 | Opus | Deep analysis (architecture, complex bugs) | 20K |
 
+### Catastrophic Rollback (v4.0)
+
+On 3+ consecutive healing failures:
+1. Save corrupted state to `healing-attempts/corrupted-state-<timestamp>.json`
+2. Find last valid checkpoint (validated via `validate_state`)
+3. Restore checkpoint, reset `heal_attempts` to 0, clear `error_counts`
+4. Log `CATASTROPHIC ROLLBACK` to `decisions.log`
+
+### Long-term Memory Integration (v4.0)
+
+Before healing:
+1. Query SQLite memory store for known resolutions
+2. If `successful_workaround` found, apply directly
+3. If `failed_approach` found, skip it
+4. After healing, record outcome for future reference
+
 ### Algorithm
 
 ```python
-for attempt in range(1, 6):
-    # Select model based on attempt
-    if attempt <= 2:
-        model = "haiku"
-        strategy = "simple_fix"
-    elif attempt <= 4:
-        model = "sonnet"
-        strategy = "context_aware_fix"
-    else:
-        model = "opus"
-        strategy = "deep_analysis_fix"
+def heal(error_message):
+    # Check known patterns first
+    known = match_healing_pattern(error_message, project_path)
+    if known and known.get("successful_fix"):
+        apply_fix(known["successful_fix"], model="haiku")
+        return
 
-    # Generate and apply fix
-    fix = generate_fix(problem, strategy, model)
-    apply_fix(fix)
+    # Check long-term memory
+    memory_result = memory_store.check(error_message)
+    if memory_result.get("tried_before"):
+        skip_fixes = [r["description"] for r in memory_result["results"]]
 
-    # Test the fix
-    if tests_pass():
-        log_success(attempt, fix)
-        git_commit(f"QRALPH: Auto-fix {problem.id}")
-        break
-    else:
-        rollback(fix)
-        log_failure(attempt, fix, test_output)
-else:
-    # All 5 attempts exhausted
-    create_deferred_item(problem, all_attempts)
-    mark_blocked(problem)
+    # Escalating model tiers
+    for attempt in range(1, 6):
+        context = build_healing_context(state, error_message)
+        fix = generate_fix(error_message, context, model)
+        apply_fix(fix)
+
+        if tests_pass():
+            record_healing_outcome(error_message, fix, "success")
+            break
+        else:
+            record_healing_outcome(error_message, fix, "failed")
+            rollback(fix)
+
+        # Catastrophic rollback after 3 consecutive failures
+        if attempt >= 3:
+            catastrophic_rollback(state, project_path)
 ```
 
-## Auto-Fix Categories
+## Team Integration
 
-### Always Auto-Apply (Whitelist)
-
-| Category | Examples |
-|----------|----------|
-| Import errors | Missing imports, typos in import paths |
-| Formatting | Trailing whitespace, missing semicolons |
-| Lint fixes | `eslint --fix` eligible issues |
-| Type casts | Simple type assertions |
-| Unused variables | Remove or underscore prefix |
-
-### Never Auto-Apply (Blacklist)
-
-| Category | Reason |
-|----------|--------|
-| Security vulnerabilities | Requires human judgment |
-| Database schema changes | Production impact |
-| API contract changes | Breaking changes |
-| Business logic | Requires domain knowledge |
-| Exported interface changes | Downstream impact |
+1. **Teammate-assisted healing**: If a specific agent flagged the issue, they can propose the fix via SendMessage
+2. **Specialist spawning**: For complex fixes, spawn a new teammate with the right `subagent_type` (e.g., `debugger`)
+3. **Collaborative diagnosis**: Team lead can broadcast the error to all active teammates for input
 
 ## Logging
 
 ### Healing Attempt Log
 
-Location: `projects/NNN/.qralph/healing-attempts/`
+Location: `.qralph/projects/NNN/healing-attempts/`
 
-```markdown
-# Healing Attempt 2/5
+### Healing Patterns DB (v4.0)
 
-**Problem**: Type error in UserService.ts:42
-**Strategy**: context_aware_fix
-**Model**: sonnet
+Location: `.qralph/projects/NNN/healing-attempts/healing-patterns.json`
 
-## Attempted Fix
-```diff
-- const user = fetchUser(id)
-+ const user: User = await fetchUser(id)
-```
-
-## Result
-- Tests: PASSED
-- Applied: Yes
-- Commit: abc123
-```
-
-### DEFERRED.md Entry
-
-When healing fails:
-
-```markdown
-## DEFER-001: Type Mismatch in AuthModule
-
-**Problem**: `AuthToken` type incompatible with `SessionToken`
-**Attempts**: 5
-**Last Error**: "Property 'refresh' missing in type 'AuthToken'"
-
-### Attempts Summary
-1. Haiku: Added type cast (failed - downstream error)
-2. Haiku: Added missing property (failed - interface mismatch)
-3. Sonnet: Created adapter (failed - circular dependency)
-4. Sonnet: Unified types (failed - breaking change)
-5. Opus: Recommended architecture change
-
-### Permanent Fix Options
-1. Merge AuthToken and SessionToken (3 SP, breaking)
-2. Create TokenAdapter interface (2 SP, non-breaking)
-3. Use discriminated union (1 SP, refactor)
-
-**Recommended**: Option 2 - TokenAdapter
-**Owner**: [Unassigned]
+```json
+{
+  "patterns": [{
+    "error_signature": "a1b2c3d4e5f6g7h8",
+    "error_type": "import_error",
+    "normalized_error": "No module named <PATH>foo",
+    "fixes_attempted": [
+      {"description": "pip install foo", "result": "failed"},
+      {"description": "pip install foo-lib", "result": "success"}
+    ],
+    "successful_fix": "pip install foo-lib",
+    "first_seen": "2025-01-15T10:00:00",
+    "last_seen": "2025-01-16T14:30:00"
+  }]
+}
 ```
 
 ## Circuit Breakers
@@ -134,6 +121,7 @@ When healing fails:
 | Total healing tokens > 50K | Pause, ask to continue |
 | File modified > 5 times | Flag for review |
 | Healing creates new errors | Rollback all, flag |
+| 3+ orphan processes | Write PAUSE to CONTROL.md |
 
 ## Rollback Protocol
 
@@ -143,7 +131,8 @@ When healing fails:
 4. Increment attempt counter
 5. Try next strategy
 
-If all rollbacks fail:
-1. Hard reset to pre-healing state
-2. Create comprehensive DEFERRED entry
-3. Continue with other unrelated work
+Catastrophic rollback (3+ failures):
+1. Save corrupted state for forensics
+2. Restore last valid checkpoint
+3. Reset all counters
+4. Log to decisions.log

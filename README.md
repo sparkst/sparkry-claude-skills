@@ -44,7 +44,7 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 | Plugin | Command | Description |
 |--------|---------|-------------|
-| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH multi-agent swarm (5 parallel agents, self-healing, checkpointing) |
+| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH v4.0 multi-agent swarm (3-7 agents, session persistence, memory, work mode) |
 | **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
 | **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, Google Docs publishing |
@@ -62,16 +62,22 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 ---
 
-## Featured: QRALPH Multi-Agent Orchestration
+## Featured: QRALPH v4.0 Multi-Agent Orchestration
 
-QRALPH spawns 5 parallel specialist agents to review your requests before implementation. Includes self-healing, checkpointing, and UAT validation.
+QRALPH spawns 3-7 parallel specialist agents to review your requests before implementation. v4.0 adds session persistence, long-term memory, process monitoring, and lightweight work mode.
 
 ```bash
 # Install
 /plugin install orchestration-workflow@sparkry-claude-skills
 
-# Use
-qralph( Add dark mode toggle to settings page )
+# Coding mode (3-7 agents)
+QRALPH "Add dark mode toggle to settings page"
+
+# Work mode (1-3 agents)
+QWORK "Write a proposal for the client"
+
+# Resume after interruption
+QRALPH resume 001
 ```
 
 **[Full QRALPH Installation Guide →](./docs/QRALPH-INSTALLATION-GUIDE.md)**
@@ -80,18 +86,21 @@ qralph( Add dark mode toggle to settings page )
 
 ## Plugin Details
 
-### 1. Orchestration Workflow (QRALPH)
+### 1. Orchestration Workflow (QRALPH v4.0)
 
-Multi-agent swarm orchestration with parallel execution.
+Multi-agent swarm orchestration with session persistence, self-healing, and work mode.
 
 **Features:**
-- 5 parallel specialist agents (security, architecture, UX, requirements, code quality)
-- Self-healing with model tiering (Haiku → Sonnet → Opus)
-- Automatic checkpointing and recovery
-- UAT scenario generation
-- Cost-optimized execution ($3-8/run)
+- 3-7 parallel specialist agents (dynamic selection from 24+ agent types)
+- Work mode: 1-3 lightweight agents for writing, research, business tasks
+- Session persistence via STATE.md (survives Claude Code restarts)
+- Process monitor with PID registry and automatic orphan sweep
+- SQLite + FTS5 long-term memory store (cross-project learning)
+- Enhanced self-healing with pattern matching and catastrophic rollback
+- Watchdog system with agent health checks and configurable timeouts
+- Cost-optimized execution ($3-8/coding run, $1-3/work run)
 
-**Use Cases:** Feature development, code review, research, planning
+**Use Cases:** Feature development, code review, security audits, research, writing, strategic planning
 
 ---
 

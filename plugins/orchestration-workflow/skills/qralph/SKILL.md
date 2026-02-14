@@ -1,341 +1,264 @@
----
-name: qralph
-description: Multi-agent swarm orchestration - spawns 5 parallel specialist agents (security, architecture, requirements, UX, code quality) to review requests before implementation. Includes self-healing, checkpointing, Trello integration, and UAT validation.
-version: 2.2.0
----
+# QRALPH v4.0 - Team Orchestration Skill
 
-# QRALPH Multi-Agent Swarm Skill
+> Team-based orchestrator using Claude Code native teams with dynamic plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
 
-## Role
-You are "QRALPH Orchestrator", an autonomous multi-agent system that executes any request through a 5-agent parallel review swarm with self-healing, checkpointing, git commits, and UAT validation.
+## Trigger
 
-## Quick Reference
+Invoke with `/qralph <request>` or use the `QRALPH` shortcut.
+For lightweight tasks: `QWORK "<request>"` (work mode with 1-3 agents).
+
+## Tools
+
+All orchestrator tools live at `.qralph/tools/`:
+
+```
+.qralph/tools/
+├── qralph-orchestrator.py   # Main orchestrator (state, discovery, agents, work mode)
+├── qralph-healer.py         # Self-healing with pattern matching & catastrophic rollback
+├── qralph-watchdog.py       # Health checks, agent monitoring, preconditions
+├── qralph-status.py         # Status monitor (terminal UI)
+├── qralph-state.py          # Shared state module (atomic writes, checksums, locking)
+├── session-state.py         # Session persistence (STATE.md lifecycle)
+├── process-monitor.py       # PID registry and orphan cleanup
+└── test_*.py                # Test suites (300+ tests)
+```
+
+Long-term memory:
+```
+.claude/skills/learning/memory-store/
+├── scripts/memory-store.py       # SQLite + FTS5 memory store
+├── scripts/test_memory_store.py  # Memory store tests
+└── SKILL.md                      # QREMEMBER skill definition
+```
+
+## Overview
+
+QRALPH creates a Claude Code native team to analyze requests and produce consolidated findings. It dynamically discovers installed plugins and skills, selects the best agents, and coordinates them through shared task lists and messaging.
+
+## Architecture: Native Teams (v3.0+)
+
+```
+┌────────────────────────────────────────────────────────┐
+│  TEAM LEAD (You)                                       │
+│  1. Analyze request                                    │
+│  2. Discover relevant plugins & skills                 │
+│  3. Select agents dynamically                          │
+│  4. TeamCreate + TaskCreate + spawn teammates          │
+│  5. Monitor via TaskList + receive messages             │
+│  6. Synthesize findings                                │
+│  7. Shutdown team + cleanup                            │
+└────────────────┬───────────────────────────────────────┘
+                 │
+    ┌────────────┼────────────┐
+    ▼            ▼            ▼
+┌────────┐ ┌────────┐ ┌────────┐
+│Agent 1 │ │Agent 2 │ │Agent N │  TEAM: shared TaskList
+│        │ │        │ │        │  + SendMessage + skills
+└────────┘ └────────┘ └────────┘
+```
+
+## Project Structure
+
+Projects are created in: `.qralph/projects/`
+
+```
+.qralph/projects/NNN-project-slug/
+├── STATE.md                 # Session state (persists across sessions)
+├── PLAN.md                  # Work plan (work mode only)
+├── PLAN-FEEDBACK.md         # User feedback on plan (work mode)
+├── CONTROL.md               # User intervention commands
+├── SYNTHESIS.md             # Consolidated findings (P0/P1/P2)
+├── UAT.md                   # User acceptance test scenarios
+├── SUMMARY.md               # Final summary
+├── decisions.log            # Audit trail
+├── discovered-plugins.json  # Plugin discovery results
+├── team-config.json         # Team composition snapshot
+├── agent-outputs/           # Individual agent reports
+├── healing-attempts/        # Self-healing audit trail + patterns DB
+│   └── healing-patterns.json
+└── checkpoints/             # Resumable state snapshots
+```
+
+## Modes
+
+### `coding` (default)
+Dynamic agent selection (3-7 agents) for code analysis, implementation, and review.
+
+### `planning`
+Non-coding mode for research, design, and strategy.
+
+### `work` (new in v4.0)
+Lightweight mode (1-3 agents) for business tasks, writing, research.
+
+**Work mode state machine:**
+```
+INIT -> DISCOVERING -> PLANNING -> USER_REVIEW -> EXECUTING -> COMPLETE
+                                       ^              |
+                                       |______________|  (iterate)
+                                                      |
+                                                ESCALATE -> REVIEWING (full team)
+```
+
+**Escalation triggers:**
+- Domains > 3
+- P0 findings emerge
+- 3+ healing failures
+- User writes ESCALATE in CONTROL.md
+
+## Workflow
+
+### Coding Mode
 
 ```bash
-QRALPH "<request>"                    # Auto-select 5 agents
-QRALPH "<request>" --agents security,architecture,pm
-QRALPH "<request>" --mode planning    # Non-coding mode
-QRALPH resume 001                     # Resume from checkpoint
-QRALPH status                         # Show all projects
+QRALPH "<request>" [--mode coding]
 ```
 
-## CRITICAL: Parallel Execution Architecture
+1. `init` - creates project, STATE.md
+2. `discover` - scans plugins/skills/agents
+3. `select-agents` - picks best 3-7 agents
+4. TeamCreate + TaskCreate + spawn teammates
+5. Monitor via TaskList + receive messages
+6. `synthesize` - consolidates into SYNTHESIS.md
+7. `generate-uat` - UAT scenarios
+8. `finalize` - SUMMARY.md + team shutdown
 
-**YOU (Claude) must spawn parallel agents using the Task tool.** The Python orchestrator manages state only.
-
-### The Execution Pattern
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    QRALPH PARALLEL EXECUTION                     │
-│                                                                  │
-│  PRIMARY CONTEXT (You)                                          │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │ 1. Initialize project (orchestrator init)                │   │
-│  │ 2. Select agents (orchestrator select-agents)            │   │
-│  │ 3. SPAWN 5 PARALLEL AGENTS via Task tool  <-- CRITICAL   │   │
-│  │ 4. Collect results when all complete                     │   │
-│  │ 5. Synthesize findings                                   │   │
-│  │ 6. Execute/Self-heal/UAT                                 │   │
-│  │ 7. Finalize                                              │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                           │                                      │
-│              ┌────────────┴────────────┐                        │
-│              │    SINGLE MESSAGE       │                        │
-│              │    5 Task tool calls    │                        │
-│              └────────────┬────────────┘                        │
-│                           │                                      │
-│     ┌─────────┬─────────┬─┴───────┬─────────┬─────────┐        │
-│     ▼         ▼         ▼         ▼         ▼         │        │
-│  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐         │        │
-│  │Agent│  │Agent│  │Agent│  │Agent│  │Agent│  PARALLEL│        │
-│  │  1  │  │  2  │  │  3  │  │  4  │  │  5  │  (fresh │        │
-│  └──┬──┘  └──┬──┘  └──┬──┘  └──┬──┘  └──┬──┘  context)│        │
-│     │        │        │        │        │             │        │
-│     └────────┴────────┴────┬───┴────────┘             │        │
-│                            │                          │        │
-│                     Results collected                 │        │
-│                     by primary context                │        │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### How to Spawn Parallel Agents
-
-**ALWAYS use a SINGLE message with MULTIPLE Task tool calls.**
-
-In ONE response, include 5 Task tool invocations:
-
-```
-Task(subagent_type="security-reviewer", model="sonnet",
-     description="Security review", prompt="...")
-Task(subagent_type="architecture-advisor", model="sonnet",
-     description="Architecture review", prompt="...")
-Task(subagent_type="requirements-analyst", model="sonnet",
-     description="Requirements review", prompt="...")
-Task(subagent_type="code-quality-auditor", model="haiku",
-     description="Code quality review", prompt="...")
-Task(subagent_type="sde-iii", model="sonnet",
-     description="Implementation review", prompt="...")
-```
-
-**WHY**: Multiple Task calls in a single message run IN PARALLEL as independent processes with fresh context windows. Sequential calls (one per message) run serially and waste time.
-
-### Model Selection
-
-| Tier | Model | Use For |
-|------|-------|---------|
-| Validation | `haiku` | Simple checks, formatting, linting |
-| Analysis | `sonnet` | Code review, architecture, security |
-| Synthesis | `opus` | Final synthesis, complex reasoning |
-
-## Execution Flow (Step by Step)
-
-### Phase 1: Initialize
+### Work Mode
 
 ```bash
-# Run via Bash tool
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py init "<request>"
+QWORK "<request>"
+# or: QRALPH "<request>" --mode work
 ```
 
-Output: Project ID, directory path, initial state
+1. `init --mode work` - creates project
+2. `discover` - scans for relevant skills
+3. `work-plan` - generates PLAN.md
+4. User reviews plan
+5. `work-approve` - proceeds to execution (or `work-iterate` to revise)
+6. `select-agents` - picks 1-3 agents
+7. Execute + `finalize`
 
-### Phase 2: Select Agents
+## Session Persistence (v4.0)
+
+### STATE.md
+
+Created on project init, updated on every phase transition and session boundary:
+
+```markdown
+## Meta
+- Project: NNN-slug
+- Request: ...
+- Mode: coding|work
+
+## Execution Plan
+- [x] INIT
+- [x] DISCOVERING
+- [ ] REVIEWING (current)
+- [ ] EXECUTING
+- [ ] UAT
+- [ ] COMPLETE
+
+## Current Step Detail
+...
+
+## Uncommitted Work
+(git diff --stat output)
+
+## Session Log
+| # | Started | Ended | Phase | Notes |
+|---|---------|-------|-------|-------|
+| 1 | ... | ... | REVIEWING | Completed discovery |
+
+## Next Session Instructions
+Read STATE.md, continue from REVIEWING phase...
+```
+
+### Session Commands
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py select-agents "<request>"
+session-state.py create-state <project-id>     # Create STATE.md
+session-state.py session-start                  # Read state, output context
+session-state.py session-end <project-id>       # Update state, capture uncommitted
+session-state.py recover <project-id>           # Crash recovery
+session-state.py inject-claude-md [path]        # Append state pointer to CLAUDE.md
 ```
 
-Output: JSON with 5 agent configs including prompts
+## Process Monitor (v4.0)
 
-### Phase 3: Parallel Review (CRITICAL)
-
-**In a SINGLE message**, spawn all 5 agents using the Task tool:
-
-1. Parse the agent configs from Phase 2
-2. For EACH agent, call Task with:
-   - `subagent_type`: The agent type from registry
-   - `model`: Based on model tier (haiku/sonnet/opus)
-   - `description`: Short description (3-5 words)
-   - `prompt`: The full review prompt from orchestrator
-
-**Example prompt for security-reviewer:**
-```
-You are reviewing project 001-dark-mode for security issues.
-
-REQUEST: Add dark mode toggle to settings page
-
-FILES TO REVIEW:
-- src/components/Settings.tsx
-- src/hooks/useTheme.ts
-
-Provide findings as:
-- P0: Critical (blocks deployment)
-- P1: Important (should fix before merge)
-- P2: Suggestions (nice to have)
-
-Output structured markdown to: .qralph/agent-outputs/security-reviewer.md
-```
-
-### Phase 4: Collect & Synthesize
-
-After all 5 agents complete:
+Prevents orphaned processes (node, vitest, claude) from accumulating after crashes.
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py synthesize
+process-monitor.py register --pid <PID> --type <node|vitest|claude> --purpose <desc>
+process-monitor.py sweep [--dry-run] [--force]
+process-monitor.py cleanup --project-id <id>
+process-monitor.py status
 ```
 
-This reads all agent outputs and creates a unified findings report.
+**Safety**: Only kills processes in the PID registry. Unregistered processes get warnings, never killed.
 
-### Phase 5: Execute (if coding mode)
+## Long-term Memory (v4.0)
 
-For each P0/P1 finding:
-1. Create a fix task
-2. Spawn implementation agent via Task tool
-3. Verify fix with tests
-
-### Phase 6: Self-Heal
-
-If any step fails:
-
-| Attempt | Model | Strategy |
-|---------|-------|----------|
-| 1-2 | Haiku | Simple retry with error context |
-| 3-4 | Sonnet | Analyze error, try alternative |
-| 5 | Opus | Deep analysis, suggest manual fix |
-
-After 5 failures: Create DEFERRED.md and continue
-
-### Phase 7: UAT
+SQLite + FTS5 full-text search for learning from past errors and successes.
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py generate-uat
+memory-store.py init
+memory-store.py store --description "..." --domain "..." --category "..."
+memory-store.py query "search terms" [--domain X] [--limit N]
+memory-store.py check "has this been tried before?"
+memory-store.py stats
 ```
 
-Then execute UAT scenarios via Task agents.
+**Auto-capture hooks**: Healing success/failure, circuit breaker trips, P0 findings.
 
-### Phase 8: Finalize
+**QREMEMBER shortcut**:
+```
+QREMEMBER "FTS4 is too slow, use FTS5 instead"
+QREMEMBER --failure "Tried embedding API but adds 2s latency"
+```
+
+## Watchdog (v4.0)
+
+Health checks and phase precondition validation.
 
 ```bash
-python3 ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/qralph-orchestrator.py finalize
+qralph-watchdog.py check                         # All health checks
+qralph-watchdog.py check-agents                  # Agent output status
+qralph-watchdog.py check-state                   # State integrity
+qralph-watchdog.py check-preconditions <phase>   # Pre-transition validation
 ```
 
-Creates SUMMARY.md and sends notification.
+**Agent criticality**: security-reviewer, architecture-advisor, sde-iii are critical (never auto-skip).
 
-## Core Configuration
+## Self-Healing (Enhanced in v4.0)
 
-| Property | Value |
-|----------|-------|
-| **Agent Count** | Always 5 |
-| **Model Tiering** | Haiku (validation) → Sonnet (analysis) → Opus (synthesis) |
-| **Self-Healing** | Auto-apply if tests pass, max 5 attempts |
-| **Recovery** | Checkpoint every phase + git commit |
-| **Questions** | Only at start, then fully autonomous |
-| **Cost** | $3-8/run (optimized via model tiering) |
+- **Pattern matching**: Normalizes errors, hashes signatures, looks up known fixes before escalating
+- **Failed fix avoidance**: Never retries a fix that already failed for the same error
+- **Catastrophic rollback**: 3+ consecutive failures triggers restore from last valid checkpoint
+- **Memory integration**: Queries long-term memory for known resolutions
+- **Model escalation**: haiku (1-2) -> sonnet (3-4) -> opus (5) -> manual (6+)
 
-## Non-Coding Mode
+## Commands Reference
 
-When `--mode planning` or request is research/design:
-- Skips implementation and UAT
-- Produces deliverables based on request type:
-  - Design → ADR + sequence diagrams + interface contracts
-  - Planning → Requirements + task breakdown with SPs
-  - Research → Options matrix + recommendations
+| Command | Description |
+|---------|-------------|
+| `QRALPH "<request>"` | Create new project (coding mode) |
+| `QWORK "<request>"` | Create new project (work mode) |
+| `QRALPH --resume` | Resume current project |
+| `QRALPH --status` | Show current project status |
+| `QRALPH --list` | List recent projects |
+| `QRALPH --complete` | Mark current project complete |
 
-## Circuit Breakers
+## Control Commands (CONTROL.md)
 
-| Trigger | Action |
+| Command | Action |
 |---------|--------|
-| 500K tokens | Pause, ask to continue |
-| Same error 3x | Halt, surface systemic issue |
-| 5 heal failures | Create DEFERRED, move on |
-| $40 total | Hard stop |
+| PAUSE | Stop after current step |
+| SKIP | Skip current operation |
+| ABORT | Graceful shutdown with checkpoint |
+| STATUS | Force status dump |
+| ESCALATE | Switch to full coding mode (work mode only) |
 
-## Intervention Commands
+## Current Project Tracking
 
-Write to `.qralph/CONTROL.md`:
-- `PAUSE` - Stop after current step
-- `SKIP` - Skip current operation
-- `ABORT` - Graceful shutdown, save state
-- `STATUS` - Force status dump
+**File**: `.qralph/current-project.json`
 
-## Usage Examples
-
-### Feature Development
-```
-QRALPH "Add dark mode toggle to settings page"
-→ Creates 001-dark-mode-toggle/
-→ Spawns 5 parallel agents (architecture, security, ux, requirements, sde-iii)
-→ Collects findings, implements fixes
-→ Self-heals 1 import error
-→ UAT: 3 scenarios pass
-→ SUMMARY.md: 4 files changed, 2 tests added
-```
-
-### Research (Non-Coding)
-```
-QRALPH "Compare auth providers for B2B SaaS" --mode planning
-→ Creates 002-auth-providers/
-→ Spawns 5 parallel agents (research, security, finance, strategic, integration)
-→ Produces: options-matrix.md, recommendation.md
-```
-
-### Resume After Crash
-```
-QRALPH resume 001
-→ Loads checkpoint: REVIEWING (60%)
-→ Continues with remaining agents
-→ Completes normally
-```
-
-## Batching for Large Tasks
-
-For tasks with multiple independent items (e.g., 12 articles to fix):
-
-```
-┌─────────────────────────────────────────────────────┐
-│  DON'T: Sequential in primary context               │
-│  ┌─────┐ → ┌─────┐ → ┌─────┐ → ... (slow)          │
-│  │Art 1│   │Art 2│   │Art 3│                        │
-│  └─────┘   └─────┘   └─────┘                        │
-├─────────────────────────────────────────────────────┤
-│  DO: Parallel batches via Task tool                 │
-│                                                     │
-│  Batch 1 (single message, 4 Task calls):           │
-│  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐               │
-│  │Art 1│  │Art 2│  │Art 3│  │Art 4│  PARALLEL     │
-│  └─────┘  └─────┘  └─────┘  └─────┘               │
-│                                                     │
-│  Batch 2 (single message, 4 Task calls):           │
-│  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐               │
-│  │Art 5│  │Art 6│  │Art 7│  │Art 8│  PARALLEL     │
-│  └─────┘  └─────┘  └─────┘  └─────┘               │
-│                                                     │
-│  Batch 3 (single message, 4 Task calls):           │
-│  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐               │
-│  │Art 9│  │Art10│  │Art11│  │Art12│  PARALLEL     │
-│  └─────┘  └─────┘  └─────┘  └─────┘               │
-└─────────────────────────────────────────────────────┘
-```
-
-**Rule**: Max 4-5 parallel agents per batch to avoid overwhelming system.
-
-## Key Reminders
-
-1. **Task tool = parallel execution** (when multiple calls in one message)
-2. **Python orchestrator = state management only** (cannot spawn agents)
-3. **Fresh context per agent** = each agent has full 200K token window
-4. **Primary context monitors** = you collect results, synthesize, self-heal
-5. **Model tiering saves cost** = use haiku for simple tasks, opus only for synthesis
-
-## Trello Integration (Optional)
-
-QRALPH can automatically create and update Trello cards for project tracking.
-
-### Setup
-
-1. **Get Trello API credentials:**
-   - API Key: https://trello.com/app-key
-   - Token: https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&key=YOUR_API_KEY
-
-2. **Create `.env.local` in project root:**
-   ```bash
-   TRELLO_API_KEY=your_api_key
-   TRELLO_TOKEN=your_oauth_token
-   ```
-
-3. **Create `.qralph/trello-config.json`:**
-   ```json
-   {
-     "board_id": "your-board-id",
-     "list_id": "your-list-id",
-     "github_repo": "owner/repo",
-     "labels": {
-       "Automation": "label-id-1",
-       "Content": "label-id-2"
-     },
-     "cache_ttl_seconds": 60
-   }
-   ```
-
-### Automatic Behavior
-
-When Trello is configured:
-
-| Event | Trello Action |
-|-------|---------------|
-| `QRALPH "request"` | Creates card with `[Q:{initials}]` prefix |
-| Phase completion | Updates card description with run summary |
-| `QRALPH close 001` | Archives the card |
-| `QRALPH resume 001` | Checks if card was closed externally |
-
-### Card Title Format
-
-Cards are created with: `[Q:{initials}] {project-id}`
-
-Example: `[Q:CH] 012-user-authentication`
-
-Where `CH` = initials derived from GitHub repo (e.g., `cardinal-health` → `CH`)
-
-### QTRELLO Standalone Commands
-
-For direct Trello operations without QRALPH, see the **QTRELLO skill** in the integrations plugin.
+Points to the active QRALPH project with full state including phase, agents, circuit breakers, and session metadata.

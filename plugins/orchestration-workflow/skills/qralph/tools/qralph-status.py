@@ -14,6 +14,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -45,10 +46,8 @@ class Colors:
 
 def get_qralph_root() -> Path:
     """Get the .qralph directory path"""
-    # From ${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools -> repo root
-    # Go up 4 levels: tools -> qralph -> skills -> plugin_root -> .claude -> repo root
-    repo_root = Path(__file__).parent.parent.parent.parent.parent
-    return repo_root / ".qralph"
+    # Canonical location: .qralph/tools/ -> .qralph/
+    return Path(__file__).parent.parent
 
 
 def load_current_project() -> Optional[Dict]:
@@ -298,8 +297,9 @@ def display_detailed_view(project_id: str):
 
 
 def clear_screen():
-    """Clear terminal screen (safe - uses static argument only)"""
-    os.system('cls' if os.name == 'nt' else 'clear')
+    """Clear terminal screen using subprocess (no shell injection risk)."""
+    cmd = "cls" if os.name == "nt" else "clear"
+    subprocess.run([cmd], check=False)
 
 
 def main():
