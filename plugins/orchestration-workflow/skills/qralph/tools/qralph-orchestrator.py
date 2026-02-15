@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-QRALPH Orchestrator v3.0 - Team-based state management with plugin discovery.
+QRALPH Orchestrator v4.0 - Team-based state management with plugin discovery.
 
 This orchestrator MANAGES STATE and DISCOVERS PLUGINS. Claude creates native
 teams via TeamCreate, spawns teammates, and coordinates via TaskList/SendMessage.
@@ -146,14 +146,17 @@ SKILL_REGISTRY = {
 
 
 def get_state_file() -> Path:
+    """Return the path to the global QRALPH state file."""
     return QRALPH_DIR / "current-project.json"
 
 
 def load_state() -> dict:
+    """Load the current QRALPH project state with locking and checksum validation."""
     return qralph_state.load_state(get_state_file())
 
 
 def save_state(state: dict):
+    """Persist project state atomically with locking and checksum injection."""
     qralph_state.save_state(state, get_state_file())
 
 
@@ -167,12 +170,14 @@ def sanitize_request(request: str) -> str:
 
 
 def validate_request(request: str) -> bool:
+    """Check that request is a non-empty string with at least 3 characters."""
     if not request or not isinstance(request, str):
         return False
     return len(request.strip()) >= 3
 
 
 def validate_phase_transition(current_phase: str, next_phase: str, mode: str = "coding") -> bool:
+    """Validate that a phase transition is allowed for the given mode."""
     coding_transitions = {
         "INIT": ["DISCOVERING", "REVIEWING"],
         "DISCOVERING": ["REVIEWING"],
@@ -196,6 +201,7 @@ def validate_phase_transition(current_phase: str, next_phase: str, mode: str = "
 
 
 def generate_slug(request: str) -> str:
+    """Generate a URL-safe project slug from the first 3 content words of a request."""
     words = re.findall(r'\b[a-zA-Z]{3,}\b', request.lower())
     stop_words = {'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into'}
     slug_words = [w for w in words if w not in stop_words][:3]
@@ -203,15 +209,18 @@ def generate_slug(request: str) -> str:
 
 
 def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 characters per token."""
     return len(text) // 4
 
 
 def estimate_cost(tokens: int, model: str) -> float:
+    """Estimate USD cost for a given token count and model tier."""
     cost_per_million = MODEL_COSTS.get(model, MODEL_COSTS["sonnet"])
     return (tokens / 1_000_000) * cost_per_million
 
 
 def check_circuit_breakers(state: dict) -> Optional[str]:
+    """Return an error message if any circuit breaker is tripped, else None."""
     breakers = state.get("circuit_breakers", {})
     total_tokens = breakers.get("total_tokens", 0)
     if total_tokens > MAX_TOKENS:
@@ -230,6 +239,7 @@ def check_circuit_breakers(state: dict) -> Optional[str]:
 
 
 def update_circuit_breakers(state: dict, tokens: int = 0, model: str = "sonnet", error: str = None):
+    """Accumulate token/cost usage and error counts in the circuit breaker state."""
     if "circuit_breakers" not in state:
         state["circuit_breakers"] = {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}}
     breakers = state["circuit_breakers"]
@@ -241,6 +251,7 @@ def update_circuit_breakers(state: dict, tokens: int = 0, model: str = "sonnet",
 
 
 def check_control_commands(project_path: Path) -> Optional[str]:
+    """Read CONTROL.md and return the first recognized command, or None."""
     control_file = project_path / "CONTROL.md"
     if not control_file.exists():
         return None
@@ -576,6 +587,7 @@ def cmd_discover():
 # ─── PROJECT INITIALIZATION ─────────────────────────────────────────────────
 
 def cmd_init(request: str, mode: str = "coding"):
+    """Initialize a new QRALPH project: create directory, state, and STATE.md."""
     request = sanitize_request(request)
     if not validate_request(request):
         error = {"error": "Invalid request: must be non-empty string with at least 3 characters"}
@@ -924,6 +936,7 @@ Write your findings using this structure:
 # ─── SYNTHESIS ───────────────────────────────────────────────────────────────
 
 def cmd_synthesize():
+    """Consolidate agent outputs into SYNTHESIS.md with P0/P1/P2 findings."""
     state = load_state()
     if not state:
         print(json.dumps({"error": "No active project. Run init first."}))
@@ -1029,11 +1042,13 @@ def cmd_synthesize():
 
 
 def extract_summary(content: str) -> str:
+    """Extract the ## Summary section from an agent output markdown file."""
     match = re.search(r'## Summary\s*\n(.*?)(?=\n##|\Z)', content, re.DOTALL)
     return match.group(1).strip() if match else "(No summary found)"
 
 
 def extract_findings(content: str, priority: str) -> list:
+    """Extract bullet-point findings under a ### priority heading (P0/P1/P2)."""
     pattern = rf'### {priority}[^\n]*\n(.*?)(?=\n###|\n##|\Z)'
     match = re.search(pattern, content, re.DOTALL)
     if match:
@@ -1044,12 +1059,14 @@ def extract_findings(content: str, priority: str) -> list:
 
 
 def format_findings(findings: list) -> str:
+    """Format a list of {agent, finding} dicts into markdown bullet points."""
     if not findings:
         return "- None identified"
     return "\n".join(f"- **[{f['agent']}]** {f['finding']}" for f in findings)
 
 
 def generate_action_plan(findings: dict) -> str:
+    """Generate a numbered action plan from prioritized findings."""
     actions = []
     if findings["P0"]:
         actions.append("1. **BLOCK** - Address P0 issues before proceeding:")
@@ -1067,6 +1084,7 @@ def generate_action_plan(findings: dict) -> str:
 # ─── HEALING ─────────────────────────────────────────────────────────────────
 
 def cmd_heal(error_details: str):
+    """Attempt self-healing: classify error, escalate model tier, apply fix."""
     state = load_state()
     if not state:
         print(json.dumps({"error": "No active project. Run init first."}))
@@ -1148,6 +1166,7 @@ Issue deferred for manual review.
 # ─── CHECKPOINT / UAT / FINALIZE ─────────────────────────────────────────────
 
 def cmd_checkpoint(phase: str):
+    """Save a timestamped checkpoint snapshot for the given phase."""
     state = load_state()
     if not state:
         print(json.dumps({"error": "No active project."}))
@@ -1171,6 +1190,7 @@ def cmd_checkpoint(phase: str):
 
 
 def cmd_generate_uat():
+    """Generate UAT.md with acceptance test scenarios from synthesis findings."""
     state = load_state()
     if not state:
         print(json.dumps({"error": "No active project."}))
@@ -1233,6 +1253,7 @@ def cmd_generate_uat():
 
 
 def cmd_finalize():
+    """Complete the project: generate SUMMARY.md, mark COMPLETE, notify."""
     state = load_state()
     if not state:
         print(json.dumps({"error": "No active project."}))
@@ -1483,6 +1504,7 @@ def cmd_escalate():
 # ─── RESUME / STATUS ────────────────────────────────────────────────────────
 
 def cmd_resume(project_id: str):
+    """Resume a project from its last checkpoint and restore team config."""
     matches = list(PROJECTS_DIR.glob(f"{project_id}*"))
     if not matches:
         print(json.dumps({"error": f"No project found matching: {project_id}"}))
@@ -1524,6 +1546,7 @@ def cmd_resume(project_id: str):
 
 
 def cmd_status(project_id: Optional[str] = None):
+    """Show status of a specific project or list all projects."""
     if project_id:
         matches = list(PROJECTS_DIR.glob(f"{project_id}*"))
         if matches:
@@ -1557,6 +1580,7 @@ def cmd_status(project_id: Optional[str] = None):
 
 
 def get_next_step(phase: str) -> str:
+    """Return human-readable instructions for the next action after a phase."""
     steps = {
         "INIT": "Run discover to scan plugins/skills, then select-agents",
         "DISCOVERING": "Run select-agents to pick team composition",
@@ -1571,6 +1595,7 @@ def get_next_step(phase: str) -> str:
 # ─── CONTROL COMMANDS ────────────────────────────────────────────────────────
 
 def handle_control_command(command: str, state: dict, project_path: Path) -> dict:
+    """Execute a CONTROL.md command (PAUSE, SKIP, ABORT, STATUS, ESCALATE)."""
     output = {"status": "control_command", "command": command}
 
     if command == "PAUSE":
@@ -1612,6 +1637,7 @@ def handle_control_command(command: str, state: dict, project_path: Path) -> dic
 
 
 def write_status_file(state: dict, project_path: Path):
+    """Write a human-readable STATUS.md with phase, team, and breaker info."""
     breakers = state.get("circuit_breakers", {})
     status_content = f"""# QRALPH Status: {state.get('project_id', 'unknown')}
 
@@ -1643,6 +1669,7 @@ def write_status_file(state: dict, project_path: Path):
 
 
 def log_decision(project_path: Path, message: str):
+    """Append a timestamped entry to the project's decisions.log audit trail."""
     log_file = project_path / "decisions.log"
     try:
         with open(log_file, "a") as f:
@@ -1652,6 +1679,7 @@ def log_decision(project_path: Path, message: str):
 
 
 def notify(message: str):
+    """Send a desktop notification via the notify.py tool if available."""
     if NOTIFY_TOOL.exists():
         try:
             subprocess.run(
@@ -1665,7 +1693,8 @@ def notify(message: str):
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="QRALPH Orchestrator v3.0 - Team-Based")
+    """CLI entry point: parse args and dispatch to the appropriate command."""
+    parser = argparse.ArgumentParser(description="QRALPH Orchestrator v4.0 - Team-Based")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # init
