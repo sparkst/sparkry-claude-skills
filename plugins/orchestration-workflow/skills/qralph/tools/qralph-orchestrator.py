@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
-QRALPH Orchestrator v4.0 - Team-based state management with plugin discovery.
+QRALPH Orchestrator v4.1 - Hierarchical team orchestration with sub-team architecture.
 
 This orchestrator MANAGES STATE and DISCOVERS PLUGINS. Claude creates native
 teams via TeamCreate, spawns teammates, and coordinates via TaskList/SendMessage.
+v4.1 adds hierarchical sub-teams, quality gates, and validation phases.
 
 Commands:
-    python3 qralph-orchestrator.py init "<request>" [--mode planning]
+    python3 qralph-orchestrator.py init "<request>" [--mode planning] [--auto|--human]
     python3 qralph-orchestrator.py discover
-    python3 qralph-orchestrator.py select-agents [--agents a,b,c]
+    python3 qralph-orchestrator.py select-agents [--agents a,b,c] [--subteam]
     python3 qralph-orchestrator.py synthesize
     python3 qralph-orchestrator.py checkpoint <phase>
     python3 qralph-orchestrator.py generate-uat
     python3 qralph-orchestrator.py finalize
     python3 qralph-orchestrator.py resume <project-id>
     python3 qralph-orchestrator.py status [<project-id>]
-    python3 qralph-orchestrator.py heal <error-details>
+    python3 qralph-orchestrator.py heal "<error-details>"
+    python3 qralph-orchestrator.py work-plan
+    python3 qralph-orchestrator.py work-approve
+    python3 qralph-orchestrator.py work-iterate "<feedback>"
+    python3 qralph-orchestrator.py escalate
+    python3 qralph-orchestrator.py remediate
+    python3 qralph-orchestrator.py remediate-done "REM-001,REM-002" [--notes "..."]
+    python3 qralph-orchestrator.py remediate-verify
+    python3 qralph-orchestrator.py subteam-status --phase <phase>
+    python3 qralph-orchestrator.py quality-gate --phase <phase>
 """
 
 import argparse
@@ -39,6 +51,9 @@ safe_write = qralph_state.safe_write
 safe_write_json = qralph_state.safe_write_json
 safe_read_json = qralph_state.safe_read_json
 
+# Version
+VERSION = "4.1.0"
+
 # Constants
 SCRIPT_DIR = Path(__file__).parent
 SKILL_DIR = SCRIPT_DIR.parent
@@ -48,6 +63,10 @@ PROJECTS_DIR = QRALPH_DIR / "projects"
 AGENTS_DIR = PROJECT_ROOT / ".claude" / "agents"
 PLUGINS_DIR = PROJECT_ROOT / ".claude" / "plugins"
 NOTIFY_TOOL = Path.home() / ".claude" / "tools" / "notify.py"
+VERSION_FILE = QRALPH_DIR / "VERSION"
+
+# Safe project ID pattern (matches session-state.py)
+SAFE_PROJECT_ID = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,99}$')
 
 # Circuit Breaker Limits
 MAX_TOKENS = 500_000
@@ -160,12 +179,34 @@ def save_state(state: dict):
     qralph_state.save_state(state, get_state_file())
 
 
+def save_state_and_checkpoint(state: dict):
+    """Save state to both current-project.json AND checkpoints/state.json.
+
+    Use this instead of bare save_state() when advancing phases, to prevent
+    checkpoint divergence where current-project.json and checkpoints/state.json
+    get out of sync.
+    """
+    save_state(state)
+    project_path = Path(state.get("project_path", ""))
+    if project_path.exists():
+        checkpoint_file = project_path / "checkpoints" / "state.json"
+        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        safe_write_json(checkpoint_file, state)
+
+
 def sanitize_request(request: str) -> str:
-    """Sanitize request string: strip null bytes and path traversal sequences."""
+    """Sanitize request string: strip null bytes, path traversal, and markdown injection."""
     if not request or not isinstance(request, str):
         return ""
     sanitized = request.replace('\x00', '')
-    sanitized = re.sub(r'\.\.[/\\]', '', sanitized)
+    # Loop until stable to prevent bypass via nested sequences like "....//"
+    prev = None
+    while prev != sanitized:
+        prev = sanitized
+        sanitized = re.sub(r'\.\.[/\\]', '', sanitized)
+    # Escape markdown heading/link injection characters at line starts
+    sanitized = re.sub(r'^(#{1,6}\s)', r'\\\1', sanitized, flags=re.MULTILINE)
+    sanitized = sanitized.replace('[', '\\[').replace(']', '\\]')
     return sanitized[:2000].strip()
 
 
@@ -176,13 +217,21 @@ def validate_request(request: str) -> bool:
     return len(request.strip()) >= 3
 
 
+def _error_result(message: str) -> dict:
+    """Create and print a consistent error result dict."""
+    result = {"error": message}
+    print(json.dumps(result))
+    return result
+
+
 def validate_phase_transition(current_phase: str, next_phase: str, mode: str = "coding") -> bool:
     """Validate that a phase transition is allowed for the given mode."""
     coding_transitions = {
         "INIT": ["DISCOVERING", "REVIEWING"],
         "DISCOVERING": ["REVIEWING"],
-        "REVIEWING": ["EXECUTING", "COMPLETE"],
-        "EXECUTING": ["UAT"],
+        "REVIEWING": ["EXECUTING", "VALIDATING", "COMPLETE"],
+        "EXECUTING": ["UAT", "VALIDATING", "COMPLETE"],
+        "VALIDATING": ["COMPLETE", "EXECUTING"],
         "UAT": ["COMPLETE"],
         "COMPLETE": [],
     }
@@ -220,7 +269,14 @@ def estimate_cost(tokens: int, model: str) -> float:
 
 
 def check_circuit_breakers(state: dict) -> Optional[str]:
-    """Return an error message if any circuit breaker is tripped, else None."""
+    """Return an error message if any circuit breaker is tripped, else None.
+
+    Note: Callers must hold exclusive_state_lock() to avoid TOCTOU races
+    between checking breakers and updating state.
+    """
+    if not qralph_state.is_exclusive_lock_held():
+        print("Warning: check_circuit_breakers called without exclusive_state_lock()",
+              file=sys.stderr)
     breakers = state.get("circuit_breakers", {})
     total_tokens = breakers.get("total_tokens", 0)
     if total_tokens > MAX_TOKENS:
@@ -248,19 +304,27 @@ def update_circuit_breakers(state: dict, tokens: int = 0, model: str = "sonnet",
     if error:
         error_key = error[:100]
         breakers["error_counts"][error_key] = breakers["error_counts"].get(error_key, 0) + 1
+        # Cap error_counts to prevent unbounded memory growth
+        if len(breakers["error_counts"]) > 100:
+            least_frequent = min(breakers["error_counts"], key=breakers["error_counts"].get)
+            del breakers["error_counts"][least_frequent]
 
 
 def check_control_commands(project_path: Path) -> Optional[str]:
-    """Read CONTROL.md and return the first recognized command, or None."""
+    """Read CONTROL.md and return the first recognized command, or None.
+
+    Only lines that contain ONLY a recognized command (ignoring whitespace)
+    are treated as active commands.  Template/help text is ignored.
+    """
     control_file = project_path / "CONTROL.md"
     if not control_file.exists():
         return None
     try:
-        content = control_file.read_text().upper()
-        for cmd in ["PAUSE", "SKIP", "ABORT", "STATUS", "ESCALATE"]:
-            if cmd in content:
-                return cmd
-    except Exception:
+        for line in control_file.read_text().splitlines():
+            stripped = line.strip().upper()
+            if stripped in ("PAUSE", "SKIP", "ABORT", "STATUS", "ESCALATE"):
+                return stripped
+    except (OSError, UnicodeDecodeError):
         pass
     return None
 
@@ -465,10 +529,15 @@ def score_capability(capability: Dict[str, Any], domains: List[str], request: st
 
 def cmd_discover():
     """Discover available plugins, skills, and agents."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_discover_locked()
+
+
+def _cmd_discover_locked():
+    """Inner discover logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project. Run init first."}))
-        return
+        return _error_result("No active project. Run init first.")
 
     project_path = Path(state["project_path"])
     request = state["request"]
@@ -586,14 +655,27 @@ def cmd_discover():
 
 # ─── PROJECT INITIALIZATION ─────────────────────────────────────────────────
 
-def cmd_init(request: str, mode: str = "coding"):
+def check_version_update(state: dict) -> Optional[str]:
+    """Compare VERSION against state's last_seen_version. Return announcement if changed."""
+    last_seen = state.get("last_seen_version", "")
+    if last_seen != VERSION:
+        state["last_seen_version"] = VERSION
+        return f"QRALPH updated to v{VERSION} — see CHANGELOG.md for changes."
+    return None
+
+
+def cmd_init(request: str, mode: str = "coding", execution_mode: str = "human"):
     """Initialize a new QRALPH project: create directory, state, and STATE.md."""
     request = sanitize_request(request)
     if not validate_request(request):
-        error = {"error": "Invalid request: must be non-empty string with at least 3 characters"}
-        print(json.dumps(error))
-        return error
+        return _error_result("Invalid request: must be non-empty string with at least 3 characters")
 
+    with qralph_state.exclusive_state_lock():
+        return _cmd_init_locked(request, mode, execution_mode)
+
+
+def _cmd_init_locked(request: str, mode: str = "coding", execution_mode: str = "human"):
+    """Inner init logic, called under exclusive lock."""
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Get next project number
@@ -608,16 +690,18 @@ def cmd_init(request: str, mode: str = "coding"):
     (project_path / "agent-outputs").mkdir(parents=True)
     (project_path / "checkpoints").mkdir(parents=True)
     (project_path / "healing-attempts").mkdir(parents=True)
+    (project_path / "phase-outputs").mkdir(parents=True)
 
     # Create initial files
     try:
         safe_write(project_path / "CONTROL.md",
             "# QRALPH Control\n\n"
-            "Write commands here:\n"
-            "- PAUSE - stop after current step\n"
-            "- SKIP - skip current operation\n"
-            "- ABORT - graceful shutdown\n"
-            "- STATUS - force status dump\n"
+            "To issue a command, write it alone on a line (e.g. just `PAUSE`).\n\n"
+            "Available commands:\n"
+            "- `PAUSE` — stop after current step\n"
+            "- `SKIP` — skip current operation\n"
+            "- `ABORT` — graceful shutdown\n"
+            "- `STATUS` — force status dump\n"
         )
 
         safe_write(project_path / "decisions.log",
@@ -647,9 +731,16 @@ def cmd_init(request: str, mode: str = "coding"):
             "total_cost_usd": 0.0,
             "error_counts": {},
         },
+        "execution_mode": execution_mode,
+        "sub_teams": {},
+        "last_seen_version": VERSION,
     }
     save_state(state)
     safe_write_json(project_path / "checkpoints" / "state.json", state)
+
+    # Check for version update announcement
+    version_update = None
+    # On init, we just set last_seen_version, so no announcement needed
 
     output = {
         "status": "initialized",
@@ -657,6 +748,7 @@ def cmd_init(request: str, mode: str = "coding"):
         "project_path": str(project_path),
         "team_name": state["team_name"],
         "mode": mode,
+        "execution_mode": execution_mode,
         "next_step": "Run discover to scan available plugins and skills, then select-agents",
     }
     print(json.dumps(output, indent=2))
@@ -665,12 +757,17 @@ def cmd_init(request: str, mode: str = "coding"):
 
 # ─── AGENT SELECTION ─────────────────────────────────────────────────────────
 
-def cmd_select_agents(custom_agents: Optional[list] = None):
+def cmd_select_agents(custom_agents: Optional[list] = None, use_subteam: bool = False):
     """Select best agents based on discovery results and request analysis."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_select_agents_locked(custom_agents, use_subteam)
+
+
+def _cmd_select_agents_locked(custom_agents: Optional[list] = None, use_subteam: bool = False):
+    """Inner select-agents logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project. Run init first."}))
-        return
+        return _error_result("No active project. Run init first.")
 
     project_path = Path(state["project_path"])
 
@@ -680,8 +777,7 @@ def cmd_select_agents(custom_agents: Optional[list] = None):
         return handle_control_command(control_cmd, state, project_path)
     breaker_error = check_circuit_breakers(state)
     if breaker_error:
-        print(json.dumps({"error": breaker_error}))
-        return
+        return _error_result(breaker_error)
 
     request = state["request"]
     domains = state.get("domains") or classify_domains(request)
@@ -799,7 +895,7 @@ def cmd_select_agents(custom_agents: Optional[list] = None):
     state["teammates"] = [a["name"] for a in agent_configs]
     state["skills_for_agents"] = skills_for_agents
     state["phase"] = "REVIEWING"
-    save_state(state)
+    save_state_and_checkpoint(state)
 
     # Save team config
     team_config = {
@@ -817,6 +913,24 @@ def cmd_select_agents(custom_agents: Optional[list] = None):
         f"skills: {skills_for_agents or 'none'}"
     )
 
+    if use_subteam:
+        instruction = (
+            "1. Run: python3 .qralph/tools/qralph-subteam.py create-subteam --phase REVIEWING\n"
+            "2. Follow sub-team creation instructions from output\n"
+            "3. Monitor: python3 .qralph/tools/qralph-subteam.py check-subteam --phase REVIEWING\n"
+            "4. Quality gate: python3 .qralph/tools/qralph-subteam.py quality-gate --phase REVIEWING\n"
+            "5. Collect: python3 .qralph/tools/qralph-subteam.py collect-results --phase REVIEWING\n"
+            "6. Then run synthesize"
+        )
+    else:
+        instruction = (
+            "1. TeamCreate(team_name='" + state["team_name"] + "')\n"
+            "2. TaskCreate for each agent's review task\n"
+            "3. Spawn teammates via Task(subagent_type=..., team_name=..., name=...)\n"
+            "4. Monitor via TaskList + receive SendMessage from teammates\n"
+            "5. When all complete, run synthesize"
+        )
+
     output = {
         "status": "agents_selected",
         "project_id": state["project_id"],
@@ -824,13 +938,8 @@ def cmd_select_agents(custom_agents: Optional[list] = None):
         "agent_count": len(agent_configs),
         "agents": agent_configs,
         "skills_for_agents": skills_for_agents,
-        "instruction": (
-            "1. TeamCreate(team_name='" + state["team_name"] + "')\n"
-            "2. TaskCreate for each agent's review task\n"
-            "3. Spawn teammates via Task(subagent_type=..., team_name=..., name=...)\n"
-            "4. Monitor via TaskList + receive SendMessage from teammates\n"
-            "5. When all complete, run synthesize"
-        ),
+        "use_subteam": use_subteam,
+        "instruction": instruction,
     }
     print(json.dumps(output, indent=2))
     return output
@@ -937,10 +1046,15 @@ Write your findings using this structure:
 
 def cmd_synthesize():
     """Consolidate agent outputs into SYNTHESIS.md with P0/P1/P2 findings."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_synthesize_locked()
+
+
+def _cmd_synthesize_locked():
+    """Inner synthesize logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project. Run init first."}))
-        return
+        return _error_result("No active project. Run init first.")
 
     project_path = Path(state["project_path"])
 
@@ -949,15 +1063,22 @@ def cmd_synthesize():
         return handle_control_command(control_cmd, state, project_path)
     breaker_error = check_circuit_breakers(state)
     if breaker_error:
-        print(json.dumps({"error": breaker_error}))
-        return
+        return _error_result(breaker_error)
 
     outputs_dir = project_path / "agent-outputs"
+
+    # Check for sub-team result file (v4.1 hierarchical teams)
+    reviewing_result_file = project_path / "phase-outputs" / "REVIEWING-result.json"
+    subteam_metadata = None
+    if reviewing_result_file.exists():
+        subteam_metadata = safe_read_json(reviewing_result_file, {})
 
     all_findings = {"P0": [], "P1": [], "P2": []}
     agent_summaries = []
 
-    for agent in state.get("agents", []):
+    agents = state.get("agents", [])
+    for i, agent in enumerate(agents, 1):
+        print(f"Synthesizing agent {i}/{len(agents)}: {agent}...", file=sys.stderr)
         output_file = outputs_dir / f"{agent}.md"
         if output_file.exists():
             content = output_file.read_text()
@@ -1007,20 +1128,18 @@ def cmd_synthesize():
 
 ---
 *Synthesized at: {datetime.now().isoformat()}*
-*QRALPH v3.0 - Team Orchestration*
+*QRALPH v{VERSION} - Hierarchical Team Orchestration*
 """
 
     safe_write(project_path / "SYNTHESIS.md", synthesis)
 
-    next_phase = "EXECUTING" if state["mode"] == "coding" else "COMPLETE"
+    next_phase = "EXECUTING"
     if not validate_phase_transition(state["phase"], next_phase, state.get("mode", "coding")):
-        error = {"error": f"Invalid phase transition: {state['phase']} -> {next_phase}"}
-        print(json.dumps(error))
-        return error
+        return _error_result(f"Invalid phase transition: {state['phase']} -> {next_phase}")
 
     state["findings"] = all_findings
     state["phase"] = next_phase
-    save_state(state)
+    save_state_and_checkpoint(state)
 
     log_decision(project_path,
         f"Synthesis complete: {len(all_findings['P0'])} P0, "
@@ -1035,7 +1154,7 @@ def cmd_synthesize():
         "p1_count": len(all_findings["P1"]),
         "p2_count": len(all_findings["P2"]),
         "next_phase": state["phase"],
-        "team_shutdown_needed": state["phase"] == "COMPLETE",
+        "team_shutdown_needed": False,
     }
     print(json.dumps(output, indent=2))
     return output
@@ -1054,7 +1173,8 @@ def extract_findings(content: str, priority: str) -> list:
     if match:
         findings_text = match.group(1)
         findings = re.findall(r'^[-*]\s*(.+)$', findings_text, re.MULTILINE)
-        return [f.strip() for f in findings if f.strip() and not f.startswith('(')]
+        skip = {"none identified", "none", "n/a", "no issues", "no findings"}
+        return [f.strip() for f in findings if f.strip() and not f.startswith('(') and f.strip().lower() not in skip]
     return []
 
 
@@ -1085,10 +1205,15 @@ def generate_action_plan(findings: dict) -> str:
 
 def cmd_heal(error_details: str):
     """Attempt self-healing: classify error, escalate model tier, apply fix."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_heal_locked(error_details)
+
+
+def _cmd_heal_locked(error_details: str):
+    """Inner heal logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project. Run init first."}))
-        return
+        return _error_result("No active project. Run init first.")
 
     project_path = Path(state["project_path"])
 
@@ -1167,10 +1292,18 @@ Issue deferred for manual review.
 
 def cmd_checkpoint(phase: str):
     """Save a timestamped checkpoint snapshot for the given phase."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_checkpoint_locked(phase)
+
+
+def _cmd_checkpoint_locked(phase: str):
+    """Inner checkpoint logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
+
+    if phase not in qralph_state.VALID_PHASES:
+        return _error_result(f"Invalid phase: {phase}. Must be one of {sorted(qralph_state.VALID_PHASES)}")
 
     project_path = Path(state["project_path"])
     state["phase"] = phase
@@ -1179,6 +1312,8 @@ def cmd_checkpoint(phase: str):
 
     checkpoint_file = project_path / "checkpoints" / f"{phase.lower()}-{datetime.now().strftime('%H%M%S')}.json"
     safe_write_json(checkpoint_file, state)
+    # Also update state.json so cmd_resume picks up the latest phase
+    safe_write_json(project_path / "checkpoints" / "state.json", state)
 
     log_decision(project_path, f"Checkpoint saved: {phase}")
 
@@ -1191,10 +1326,15 @@ def cmd_checkpoint(phase: str):
 
 def cmd_generate_uat():
     """Generate UAT.md with acceptance test scenarios from synthesis findings."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_generate_uat_locked()
+
+
+def _cmd_generate_uat_locked():
+    """Inner UAT generation logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
 
     project_path = Path(state["project_path"])
 
@@ -1238,12 +1378,10 @@ def cmd_generate_uat():
     safe_write(project_path / "UAT.md", uat_content)
 
     if not validate_phase_transition(state["phase"], "UAT", state.get("mode", "coding")):
-        error = {"error": f"Invalid phase transition: {state['phase']} -> UAT"}
-        print(json.dumps(error))
-        return error
+        return _error_result(f"Invalid phase transition: {state['phase']} -> UAT")
 
     state["phase"] = "UAT"
-    save_state(state)
+    save_state_and_checkpoint(state)
     log_decision(project_path, "UAT generated")
 
     print(json.dumps({
@@ -1254,10 +1392,15 @@ def cmd_generate_uat():
 
 def cmd_finalize():
     """Complete the project: generate SUMMARY.md, mark COMPLETE, notify."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_finalize_locked()
+
+
+def _cmd_finalize_locked():
+    """Inner finalize logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
 
     project_path = Path(state["project_path"])
 
@@ -1276,9 +1419,9 @@ def cmd_finalize():
 - **Self-Heal Attempts**: {state.get('heal_attempts', 0)}
 
 ## Results
-- P0 Issues: {len(state.get('findings', {}).get('P0', []))}
-- P1 Issues: {len(state.get('findings', {}).get('P1', []))}
-- P2 Issues: {len(state.get('findings', {}).get('P2', []))}
+- P0 Issues: {len(state.get('findings', {}).get('P0', []) if isinstance(state.get('findings'), dict) else [])}
+- P1 Issues: {len(state.get('findings', {}).get('P1', []) if isinstance(state.get('findings'), dict) else [])}
+- P2 Issues: {len(state.get('findings', {}).get('P2', []) if isinstance(state.get('findings'), dict) else [])}
 
 ## Team Lifecycle
 1. Team created: {state.get('team_name', 'N/A')}
@@ -1292,19 +1435,17 @@ def cmd_finalize():
 3. TeamDelete() to clean up
 
 ---
-*QRALPH v3.0 - Team Orchestration*
+*QRALPH v{VERSION} - Hierarchical Team Orchestration*
 """
 
     safe_write(project_path / "SUMMARY.md", summary)
 
     if not validate_phase_transition(state["phase"], "COMPLETE", state.get("mode", "coding")):
-        error = {"error": f"Invalid phase transition: {state['phase']} -> COMPLETE"}
-        print(json.dumps(error))
-        return error
+        return _error_result(f"Invalid phase transition: {state['phase']} -> COMPLETE")
 
     state["phase"] = "COMPLETE"
     state["completed_at"] = datetime.now().isoformat()
-    save_state(state)
+    save_state_and_checkpoint(state)
     log_decision(project_path, "Project finalized")
     notify(f"QRALPH complete: {state['project_id']}")
 
@@ -1324,14 +1465,18 @@ def cmd_finalize():
 
 def cmd_work_plan():
     """Generate a plan for work-mode project. Creates PLAN.md with steps, skills, estimates."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_work_plan_locked()
+
+
+def _cmd_work_plan_locked():
+    """Inner work-plan logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
 
     if state.get("mode") != "work":
-        print(json.dumps({"error": "work-plan only available in work mode"}))
-        return
+        return _error_result("work-plan only available in work mode")
 
     project_path = Path(state["project_path"])
     request = state["request"]
@@ -1376,13 +1521,11 @@ def cmd_work_plan():
     safe_write(project_path / "PLAN.md", plan_content)
 
     if not validate_phase_transition(state["phase"], "PLANNING", state.get("mode", "coding")):
-        error = {"error": f"Invalid phase transition: {state['phase']} -> PLANNING"}
-        print(json.dumps(error))
-        return error
+        return _error_result(f"Invalid phase transition: {state['phase']} -> PLANNING")
 
     state["phase"] = "PLANNING"
     state["domains"] = domains
-    save_state(state)
+    save_state_and_checkpoint(state)
     log_decision(project_path, "Work plan generated")
 
     output = {
@@ -1400,25 +1543,29 @@ def cmd_work_plan():
 
 def cmd_work_approve():
     """Approve work plan and move to execution. Transitions PLANNING -> USER_REVIEW -> EXECUTING."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_work_approve_locked()
+
+
+def _cmd_work_approve_locked():
+    """Inner work-approve logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
 
     if state.get("mode") != "work":
-        print(json.dumps({"error": "work-approve only available in work mode"}))
-        return
+        return _error_result("work-approve only available in work mode")
 
     project_path = Path(state["project_path"])
 
     if state["phase"] == "PLANNING":
         state["phase"] = "USER_REVIEW"
-        save_state(state)
+        save_state_and_checkpoint(state)
         log_decision(project_path, "Plan submitted for user review")
 
     if state["phase"] == "USER_REVIEW":
         state["phase"] = "EXECUTING"
-        save_state(state)
+        save_state_and_checkpoint(state)
         log_decision(project_path, "Plan approved, moving to execution")
 
     output = {
@@ -1433,16 +1580,23 @@ def cmd_work_approve():
 
 def cmd_work_iterate(feedback: str):
     """Iterate on work plan based on user feedback."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_work_iterate_locked(feedback)
+
+
+def _cmd_work_iterate_locked(feedback: str):
+    """Inner work-iterate logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
 
     if state.get("mode") != "work":
-        print(json.dumps({"error": "work-iterate only available in work mode"}))
-        return
+        return _error_result("work-iterate only available in work mode")
 
     project_path = Path(state["project_path"])
+
+    # Sanitize feedback before writing to file (prevents markdown/command injection)
+    feedback = sanitize_request(feedback)
 
     # Save feedback
     feedback_file = project_path / "PLAN-FEEDBACK.md"
@@ -1458,7 +1612,7 @@ def cmd_work_iterate(feedback: str):
     # Return to PLANNING phase
     if validate_phase_transition(state["phase"], "PLANNING", "work"):
         state["phase"] = "PLANNING"
-        save_state(state)
+        save_state_and_checkpoint(state)
         log_decision(project_path, f"Plan iteration requested: {feedback[:80]}")
 
     output = {
@@ -1473,10 +1627,15 @@ def cmd_work_iterate(feedback: str):
 
 def cmd_escalate():
     """Escalate work-mode project to full coding mode with 3-7 agent team."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_escalate_locked()
+
+
+def _cmd_escalate_locked():
+    """Inner escalate logic, called under exclusive lock."""
     state = load_state()
     if not state:
-        print(json.dumps({"error": "No active project."}))
-        return
+        return _error_result("No active project.")
 
     project_path = Path(state["project_path"])
 
@@ -1486,7 +1645,7 @@ def cmd_escalate():
     # Transition to ESCALATE then REVIEWING
     if state["phase"] in ("EXECUTING", "PLANNING", "USER_REVIEW"):
         state["phase"] = "REVIEWING"
-    save_state(state)
+    save_state_and_checkpoint(state)
     log_decision(project_path, f"Escalated from {old_mode} mode to coding mode")
 
     output = {
@@ -1501,32 +1660,233 @@ def cmd_escalate():
     return output
 
 
+# ─── REMEDIATION COMMANDS ───────────────────────────────────────────────────
+
+def cmd_remediate():
+    """Create remediation tasks from synthesis findings. Requires EXECUTING phase."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_remediate_locked()
+
+
+def _cmd_remediate_locked():
+    """Inner remediate logic, called under exclusive lock."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+
+    if state["phase"] != "EXECUTING":
+        return _error_result(f"Remediate requires EXECUTING phase, currently: {state['phase']}")
+
+    # Idempotency guard: if remediation tasks already exist, return them
+    existing_tasks = state.get("remediation_tasks", [])
+    if existing_tasks:
+        open_tasks = [t for t in existing_tasks if t["status"] == "open"]
+        fixed_tasks = [t for t in existing_tasks if t["status"] == "fixed"]
+        output = {
+            "status": "remediation_exists",
+            "project_id": state["project_id"],
+            "total_tasks": len(existing_tasks),
+            "open_tasks": len(open_tasks),
+            "fixed_tasks": len(fixed_tasks),
+            "message": "Remediation tasks already exist. Use remediate-done to mark tasks fixed.",
+        }
+        print(json.dumps(output, indent=2))
+        return output
+
+    project_path = Path(state["project_path"])
+    findings = state.get("findings", {})
+
+    # Normalize findings: support both dict {"P0": [...]} and flat list [{"priority": "P0", ...}]
+    tasks = []
+    task_id = 1
+    if isinstance(findings, list):
+        for item in findings:
+            priority = item.get("priority", "P2")
+            title = item.get("title", item.get("finding", str(item)))
+            tasks.append({
+                "id": f"REM-{task_id:03d}",
+                "priority": priority,
+                "finding": title,
+                "status": "open",
+            })
+            task_id += 1
+    else:
+        for priority in ("P0", "P1", "P2"):
+            for finding in findings.get(priority, []):
+                tasks.append({
+                    "id": f"REM-{task_id:03d}",
+                    "priority": priority,
+                    "finding": finding,
+                    "status": "open",
+                })
+                task_id += 1
+
+    state["remediation_tasks"] = tasks
+    save_state(state)
+    safe_write_json(project_path / "checkpoints" / "state.json", state)
+
+    # Write REMEDIATION.md
+    lines = ["# Remediation Plan\n"]
+    for priority in ("P0", "P1", "P2"):
+        priority_tasks = [t for t in tasks if t["priority"] == priority]
+        if priority_tasks:
+            lines.append(f"\n## {priority} ({len(priority_tasks)} tasks)\n")
+            for t in priority_tasks:
+                lines.append(f"- [ ] **{t['id']}**: {t['finding']}")
+    lines.append(f"\n---\n*Generated at: {datetime.now().isoformat()}*")
+    safe_write(project_path / "REMEDIATION.md", "\n".join(lines))
+
+    log_decision(project_path, f"Remediation plan created: {len(tasks)} tasks")
+
+    output = {
+        "status": "remediation_created",
+        "project_id": state["project_id"],
+        "total_tasks": len(tasks),
+        "p0_tasks": len([t for t in tasks if t["priority"] == "P0"]),
+        "p1_tasks": len([t for t in tasks if t["priority"] == "P1"]),
+        "p2_tasks": len([t for t in tasks if t["priority"] == "P2"]),
+        "remediation_file": str(project_path / "REMEDIATION.md"),
+    }
+    print(json.dumps(output, indent=2))
+    return output
+
+
+def cmd_remediate_done(task_ids: str, notes: str = ""):
+    """Mark specific remediation tasks as fixed."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_remediate_done_locked(task_ids, notes)
+
+
+def _cmd_remediate_done_locked(task_ids: str, notes: str = ""):
+    """Inner remediate-done logic, called under exclusive lock."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+
+    ids = [tid.strip() for tid in task_ids.split(",")]
+    tasks = state.get("remediation_tasks", [])
+    marked = []
+
+    for task in tasks:
+        if task["id"] in ids:
+            task["status"] = "fixed"
+            if notes:
+                task["notes"] = notes
+            marked.append(task["id"])
+
+    state["remediation_tasks"] = tasks
+    save_state(state)
+
+    project_path = Path(state["project_path"])
+    safe_write_json(project_path / "checkpoints" / "state.json", state)
+    log_decision(project_path, f"Remediation tasks marked fixed: {', '.join(marked)}")
+
+    open_tasks = [t for t in tasks if t["status"] == "open"]
+    output = {
+        "status": "tasks_updated",
+        "marked_fixed": marked,
+        "remaining_open": len(open_tasks),
+        "remaining_p0": len([t for t in open_tasks if t["priority"] == "P0"]),
+    }
+    print(json.dumps(output, indent=2))
+    return output
+
+
+def cmd_remediate_verify():
+    """Verify remediation is complete. Blocks on open P0 tasks."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_remediate_verify_locked()
+
+
+def _cmd_remediate_verify_locked():
+    """Inner remediate-verify logic, called under exclusive lock."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+
+    tasks = state.get("remediation_tasks", [])
+    open_p0 = [t for t in tasks if t["priority"] == "P0" and t["status"] == "open"]
+    open_all = [t for t in tasks if t["status"] == "open"]
+
+    project_path = Path(state["project_path"])
+
+    if open_p0:
+        log_decision(project_path, f"Remediation verify blocked: {len(open_p0)} P0 tasks open")
+        output = {
+            "status": "blocked",
+            "reason": f"{len(open_p0)} P0 tasks still open",
+            "open_p0_tasks": [t["id"] for t in open_p0],
+            "total_open": len(open_all),
+        }
+        print(json.dumps(output, indent=2))
+        return output
+
+    # All P0s resolved — transition to COMPLETE
+    if not validate_phase_transition(state["phase"], "COMPLETE", state.get("mode", "coding")):
+        return _error_result(f"Invalid phase transition: {state['phase']} -> COMPLETE")
+
+    state["phase"] = "COMPLETE"
+    save_state(state)
+    safe_write_json(project_path / "checkpoints" / "state.json", state)
+    log_decision(project_path, f"Remediation verified: all P0 fixed, {len(open_all)} lower-priority open")
+
+    output = {
+        "status": "verified",
+        "project_id": state["project_id"],
+        "phase": "COMPLETE",
+        "open_lower_priority": len(open_all),
+        "team_shutdown_needed": True,
+    }
+    print(json.dumps(output, indent=2))
+    return output
+
+
 # ─── RESUME / STATUS ────────────────────────────────────────────────────────
 
 def cmd_resume(project_id: str):
     """Resume a project from its last checkpoint and restore team config."""
+    if not SAFE_PROJECT_ID.match(project_id):
+        return _error_result(f"Invalid project_id: {project_id}")
+    with qralph_state.exclusive_state_lock():
+        return _cmd_resume_locked(project_id)
+
+
+def _cmd_resume_locked(project_id: str):
+    """Inner resume logic, called under exclusive lock."""
     matches = list(PROJECTS_DIR.glob(f"{project_id}*"))
     if not matches:
-        print(json.dumps({"error": f"No project found matching: {project_id}"}))
-        return
+        return _error_result(f"No project found matching: {project_id}")
 
     project_path = matches[0]
     checkpoint_dir = project_path / "checkpoints"
     state_file = checkpoint_dir / "state.json"
 
     if state_file.exists():
-        state = safe_read_json(state_file, {})
+        state = qralph_state.load_state(state_file)
     else:
         checkpoints = sorted(checkpoint_dir.glob("*.json"))
         if checkpoints:
-            state = safe_read_json(checkpoints[-1], {})
+            state = qralph_state.load_state(checkpoints[-1])
         else:
-            print(json.dumps({"error": "No checkpoint found"}))
-            return
+            return _error_result("No checkpoint found")
 
     if not state:
-        print(json.dumps({"error": "Failed to load state (corrupt or empty)"}))
-        return
+        return _error_result("Failed to load state (corrupt or empty)")
+
+    # Guard: don't overwrite current-project.json if project is already COMPLETE
+    if state.get("phase") == "COMPLETE":
+        output = {
+            "status": "already_complete",
+            "project_id": state.get("project_id", project_id),
+            "phase": "COMPLETE",
+            "completed_at": state.get("completed_at", "unknown"),
+            "message": "Project is already complete. Review SUMMARY.md for results.",
+        }
+        print(json.dumps(output, indent=2))
+        return output
+
+    # Version check
+    version_update = check_version_update(state)
 
     save_state(state)
     log_decision(project_path, f"Resumed from phase: {state['phase']}")
@@ -1535,19 +1895,41 @@ def cmd_resume(project_id: str):
     team_config_file = project_path / "team-config.json"
     team_config = safe_read_json(team_config_file, {})
 
-    print(json.dumps({
+    # Check for running sub-teams that need recovery
+    sub_teams = state.get("sub_teams", {})
+    running_subteams = {k: v for k, v in sub_teams.items()
+                        if isinstance(v, dict) and v.get("status") == "running"}
+
+    output = {
         "status": "resumed",
         "project_id": state["project_id"],
         "phase": state["phase"],
         "team_name": state.get("team_name"),
         "team_config": team_config,
         "next_step": get_next_step(state["phase"]),
-    }))
+        "execution_mode": state.get("execution_mode", "human"),
+    }
+
+    if version_update:
+        output["version_update"] = version_update
+
+    if running_subteams:
+        output["recovery_needed"] = True
+        output["running_subteams"] = list(running_subteams.keys())
+        output["recovery_instruction"] = (
+            f"Sub-teams were interrupted: {', '.join(running_subteams.keys())}. "
+            "Run resume-subteam --phase <phase> to recover."
+        )
+
+    print(json.dumps(output, indent=2))
+    return output
 
 
 def cmd_status(project_id: Optional[str] = None):
     """Show status of a specific project or list all projects."""
     if project_id:
+        if not SAFE_PROJECT_ID.match(project_id):
+            return _error_result(f"Invalid project_id: {project_id}")
         matches = list(PROJECTS_DIR.glob(f"{project_id}*"))
         if matches:
             project_path = matches[0]
@@ -1558,7 +1940,7 @@ def cmd_status(project_id: Optional[str] = None):
             else:
                 print(json.dumps({"project": project_path.name, "status": "no state file"}))
         else:
-            print(json.dumps({"error": f"Project not found: {project_id}"}))
+            _error_result(f"Project not found: {project_id}")
     else:
         projects = []
         if PROJECTS_DIR.exists():
@@ -1585,9 +1967,13 @@ def get_next_step(phase: str) -> str:
         "INIT": "Run discover to scan plugins/skills, then select-agents",
         "DISCOVERING": "Run select-agents to pick team composition",
         "REVIEWING": "TeamCreate, spawn teammates, then run synthesize when complete",
-        "EXECUTING": "Implement fixes, then run generate-uat",
+        "EXECUTING": "Run remediate to create tasks, fix findings, then remediate-verify",
+        "VALIDATING": "Fresh validation sub-team running UAT against requirements",
         "UAT": "Execute UAT scenarios, then run finalize",
         "COMPLETE": "Shutdown team and review SUMMARY.md",
+        "PLANNING": "Review PLAN.md, then run work-approve to proceed",
+        "USER_REVIEW": "User reviews the plan, then run work-approve to execute",
+        "ESCALATE": "Escalating to full coding mode with 3-7 agent team",
     }
     return steps.get(phase, "Unknown phase")
 
@@ -1672,8 +2058,19 @@ def log_decision(project_path: Path, message: str):
     """Append a timestamped entry to the project's decisions.log audit trail."""
     log_file = project_path / "decisions.log"
     try:
-        with open(log_file, "a") as f:
-            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {message}\n")
+        if os.path.islink(str(log_file)):
+            print(f"Warning: Refusing to write to symlink: {log_file}", file=sys.stderr)
+            return
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            qralph_state._lock_file(f, exclusive=True)
+            try:
+                sanitized_msg = re.sub(r'[\x00-\x1f\x7f]', ' ', message)
+                f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {sanitized_msg}\n")
+                f.flush()
+            finally:
+                qralph_state._unlock_file(f)
     except Exception as e:
         print(f"Warning: Failed to log decision: {e}", file=sys.stderr)
 
@@ -1685,22 +2082,78 @@ def notify(message: str):
             subprocess.run(
                 ["python3", str(NOTIFY_TOOL), "--event", "complete", "--message", message],
                 capture_output=True,
+                timeout=10,
             )
-        except Exception:
+        except (subprocess.TimeoutExpired, Exception):
             pass
+
+
+# ─── SUBTEAM COMMANDS (v4.1) ─────────────────────────────────────────────────
+
+def cmd_subteam_status(phase: str):
+    """Check sub-team status with circuit breaker and control command checks."""
+    state, project_path = load_state(), None
+    if state:
+        project_path = Path(state.get("project_path", ""))
+
+    if not state or not project_path or not project_path.exists():
+        return _error_result("No active project.")
+
+    # Control + circuit breaker checks
+    with qralph_state.exclusive_state_lock():
+        control_cmd = check_control_commands(project_path)
+        if control_cmd:
+            return handle_control_command(control_cmd, state, project_path)
+        breaker_error = check_circuit_breakers(state)
+        if breaker_error:
+            return _error_result(breaker_error)
+
+    # Delegate to subteam tool
+    _subteam_path = SCRIPT_DIR / "qralph-subteam.py"
+    _subteam_spec = importlib.util.spec_from_file_location("qralph_subteam", _subteam_path)
+    subteam_mod = importlib.util.module_from_spec(_subteam_spec)
+    _subteam_spec.loader.exec_module(subteam_mod)
+    return subteam_mod.cmd_check_subteam(phase)
+
+
+def cmd_quality_gate_wrapper(phase: str):
+    """Run quality gate with logging."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+
+    project_path = Path(state.get("project_path", ""))
+
+    _subteam_path = SCRIPT_DIR / "qralph-subteam.py"
+    _subteam_spec = importlib.util.spec_from_file_location("qralph_subteam", _subteam_path)
+    subteam_mod = importlib.util.module_from_spec(_subteam_spec)
+    _subteam_spec.loader.exec_module(subteam_mod)
+    result = subteam_mod.cmd_quality_gate(phase)
+
+    if project_path.exists():
+        passed = result.get("passed", False) if isinstance(result, dict) else False
+        log_decision(project_path, f"Quality gate {phase}: {'PASSED' if passed else 'FAILED'} "
+                     f"(confidence: {result.get('confidence', 0) if isinstance(result, dict) else 0})")
+    return result
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main():
     """CLI entry point: parse args and dispatch to the appropriate command."""
-    parser = argparse.ArgumentParser(description="QRALPH Orchestrator v4.0 - Team-Based")
+    parser = argparse.ArgumentParser(description="QRALPH Orchestrator v4.1 - Hierarchical Teams")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # init
     init_parser = subparsers.add_parser("init", help="Initialize new project")
     init_parser.add_argument("request", help="The request to execute")
     init_parser.add_argument("--mode", choices=["coding", "planning", "work"], default="coding")
+    exec_group = init_parser.add_mutually_exclusive_group()
+    exec_group.add_argument("--auto", action="store_const", const="auto", dest="execution_mode",
+                            help="Auto-continue after review (no pause)")
+    exec_group.add_argument("--human", action="store_const", const="human", dest="execution_mode",
+                            help="Pause for human approval after review (default)")
+    init_parser.set_defaults(execution_mode="human")
 
     # discover
     subparsers.add_parser("discover", help="Discover available plugins and skills")
@@ -1708,6 +2161,8 @@ def main():
     # select-agents
     select_parser = subparsers.add_parser("select-agents", help="Select best agents for team")
     select_parser.add_argument("--agents", help="Comma-separated agent list (override)")
+    select_parser.add_argument("--subteam", action="store_true",
+                               help="Use hierarchical sub-team architecture (v4.1)")
 
     # synthesize
     subparsers.add_parser("synthesize", help="Synthesize agent findings")
@@ -1741,15 +2196,28 @@ def main():
     iterate_parser.add_argument("feedback", help="User feedback on plan")
     subparsers.add_parser("escalate", help="Escalate to full coding mode")
 
+    # remediation commands
+    subparsers.add_parser("remediate", help="Create remediation tasks from findings")
+    rem_done_parser = subparsers.add_parser("remediate-done", help="Mark remediation tasks as fixed")
+    rem_done_parser.add_argument("task_ids", help="Comma-separated task IDs (e.g. REM-001,REM-002)")
+    rem_done_parser.add_argument("--notes", default="", help="Optional notes about the fix")
+    subparsers.add_parser("remediate-verify", help="Verify remediation and transition to COMPLETE")
+
+    # v4.1 sub-team commands
+    st_status_parser = subparsers.add_parser("subteam-status", help="Check sub-team status")
+    st_status_parser.add_argument("--phase", required=True, help="Phase to check")
+    qg_parser = subparsers.add_parser("quality-gate", help="Run quality gate on phase")
+    qg_parser.add_argument("--phase", required=True, help="Phase to validate")
+
     args = parser.parse_args()
 
     if args.command == "init":
-        cmd_init(args.request, args.mode)
+        cmd_init(args.request, args.mode, args.execution_mode)
     elif args.command == "discover":
         cmd_discover()
     elif args.command == "select-agents":
         agents = args.agents.split(",") if args.agents else None
-        cmd_select_agents(agents)
+        cmd_select_agents(agents, use_subteam=args.subteam)
     elif args.command == "synthesize":
         cmd_synthesize()
     elif args.command == "checkpoint":
@@ -1772,9 +2240,21 @@ def main():
         cmd_work_iterate(args.feedback)
     elif args.command == "escalate":
         cmd_escalate()
+    elif args.command == "remediate":
+        cmd_remediate()
+    elif args.command == "remediate-done":
+        cmd_remediate_done(args.task_ids, args.notes)
+    elif args.command == "remediate-verify":
+        cmd_remediate_verify()
+    elif args.command == "subteam-status":
+        cmd_subteam_status(args.phase)
+    elif args.command == "quality-gate":
+        cmd_quality_gate_wrapper(args.phase)
     else:
         parser.print_help()
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 6):
+        sys.exit("QRALPH requires Python 3.6+")
     main()

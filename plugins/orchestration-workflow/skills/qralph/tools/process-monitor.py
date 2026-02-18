@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
 QRALPH Process Monitor - Manages spawned processes during orchestration.
 
@@ -20,7 +22,9 @@ Safety:
 import argparse
 import json
 import os
+import re
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -37,6 +41,8 @@ _state_spec.loader.exec_module(qralph_state)
 safe_write = qralph_state.safe_write
 safe_write_json = qralph_state.safe_write_json
 safe_read_json = qralph_state.safe_read_json
+_lock_file = qralph_state._lock_file
+_unlock_file = qralph_state._unlock_file
 
 # Constants
 PROJECT_ROOT = Path.cwd()
@@ -48,6 +54,7 @@ DEFAULT_GRACE_PERIODS = {
     "node": 1800,
     "vitest": 1800,
     "claude": 3600,
+    "team-agent": 1800,
     "default": 900,
 }
 
@@ -108,18 +115,61 @@ def _log_action(message: str, log_file: Optional[Path] = None):
     """Append a timestamped message to the kill log."""
     log_file = log_file or KILL_LOG_FILE
     timestamp = _now_iso()
-    entry = f"[{timestamp}] {message}\n"
+    sanitized_msg = re.sub(r'[\x00-\x1f\x7f]', ' ', message)
+    entry = f"[{timestamp}] {sanitized_msg}\n"
     log_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(log_file, "a") as f:
-        f.write(entry)
+    if os.path.islink(str(log_file)):
+        print(f"Warning: Refusing to write to symlink: {log_file}", file=sys.stderr)
+        return
+    fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        with os.fdopen(fd, "a") as f:
+            _lock_file(f, exclusive=True)
+            try:
+                f.write(entry)
+                f.flush()
+            finally:
+                _unlock_file(f)
+    except Exception as e:
+        print(f"Warning: Failed to log action: {e}", file=sys.stderr)
 
 
-def _kill_process(pid: int, log_file: Optional[Path] = None) -> bool:
+def _verify_process_identity(pid: int, expected_type: str) -> bool:
+    """Verify process command matches expected type before killing (PID reuse safety).
+
+    On Windows, ``ps -p`` is unavailable and there is no reliable stdlib way to
+    inspect a process command line.  Returns False (safe default) so callers
+    skip the kill.  Windows users must manage stale processes manually.
+    """
+    if os.name == "nt":
+        return False  # ps unavailable on Windows; refuse kill when identity unverifiable
+    type_patterns = {
+        "node": ["node", "npm"],
+        "vitest": ["vitest", "node"],
+        "claude": ["claude", "node"],
+    }
+    patterns = type_patterns.get(expected_type, [expected_type])
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, timeout=5
+        )
+        comm = result.stdout.strip().lower()
+        return any(p in comm for p in patterns)
+    except Exception:
+        return False  # On failure, refuse kill (safe default: don't kill unverified PIDs)
+
+
+def _kill_process(pid: int, log_file: Optional[Path] = None,
+                  expected_type: Optional[str] = None) -> bool:
     """
     Kill a process: SIGTERM first, wait 5s, then SIGKILL if needed.
 
     Returns True if the process was successfully terminated.
     """
+    if expected_type and not _verify_process_identity(pid, expected_type):
+        _log_action(f"SKIP PID {pid}: process identity mismatch (expected {expected_type})", log_file)
+        return False
     try:
         os.kill(pid, signal.SIGTERM)
         _log_action(f"KILL SIGTERM sent to PID {pid}", log_file)
@@ -153,21 +203,52 @@ def _write_pause_to_control(project_id: str):
         safe_write(control_file, "PAUSE\n# Circuit breaker tripped: 3+ orphan processes detected\n")
 
 
+def _verify_pid_ownership(pid: int) -> bool:
+    """Verify caller is parent of the registered PID (Unix only).
+
+    Returns True if verification passes or cannot be performed (process
+    not found, platform unsupported). Only returns False when the process
+    exists but has a different parent.
+    """
+    if os.name == "nt":
+        return True  # Skip on Windows
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "ppid="],
+            capture_output=True, text=True, timeout=5
+        )
+        output = result.stdout.strip()
+        if not output:
+            return True  # Process not found; allow registration (sweep handles dead PIDs)
+        ppid = int(output)
+        return ppid == os.getpid()
+    except (ValueError, subprocess.TimeoutExpired, OSError):
+        return True  # On failure, allow registration (safe default for CLI tool)
+
+
 def cmd_register(pid: int, proc_type: str, purpose: str,
                  registry_file: Optional[Path] = None,
                  log_file: Optional[Path] = None):
     """Register a spawned process in the registry."""
-    registry = _load_registry(registry_file)
+    if not _verify_pid_ownership(pid):
+        _log_action(f"REGISTER REJECTED PID {pid}: caller is not parent", log_file)
+        result = {"error": f"PID {pid} not owned by caller (ppid mismatch)"}
+        print(json.dumps(result, indent=2))
+        return result
 
-    entry = {
-        "pid": pid,
-        "type": proc_type,
-        "spawned_at": _now_iso(),
-        "purpose": purpose,
-    }
+    lock_path = (registry_file or REGISTRY_FILE).with_suffix('.lock')
+    with qralph_state.exclusive_state_lock(lock_path):
+        registry = _load_registry(registry_file)
 
-    registry["spawned_processes"].append(entry)
-    _save_registry(registry, registry_file)
+        entry = {
+            "pid": pid,
+            "type": proc_type,
+            "spawned_at": _now_iso(),
+            "purpose": purpose,
+        }
+
+        registry["spawned_processes"].append(entry)
+        _save_registry(registry, registry_file)
     _log_action(f"REGISTER PID {pid} type={proc_type} purpose={purpose}", log_file)
 
     result = {"status": "registered", "pid": pid, "type": proc_type, "purpose": purpose}
@@ -188,6 +269,15 @@ def cmd_sweep(dry_run: bool = False, force: bool = False,
     4. If orphan (parent dead + past grace): SIGTERM, wait 5s, SIGKILL if needed
     5. Unregistered processes: warn only, never kill
     """
+    lock_path = (registry_file or REGISTRY_FILE).with_suffix('.lock')
+    with qralph_state.exclusive_state_lock(lock_path):
+        return _cmd_sweep_locked(dry_run, force, registry_file, log_file)
+
+
+def _cmd_sweep_locked(dry_run: bool = False, force: bool = False,
+                      registry_file: Optional[Path] = None,
+                      log_file: Optional[Path] = None) -> dict:
+    """Inner sweep logic, called under exclusive lock."""
     registry = _load_registry(registry_file)
     parent_pid = registry.get("parent_pid")
     grace_periods = registry.get("grace_periods", DEFAULT_GRACE_PERIODS)
@@ -237,11 +327,18 @@ def cmd_sweep(dry_run: bool = False, force: bool = False,
                 _log_action(f"WARN DRY-RUN would kill PID {pid} (orphan, age={round(age)}s, grace={grace}s)", log_file)
                 remaining_processes.append(proc)
             else:
-                killed = _kill_process(pid, log_file)
+                # Re-verify process identity before killing to guard against PID reuse
+                if not _verify_process_identity(pid, proc_type):
+                    _log_action(f"SKIP PID {pid}: identity changed (possible PID reuse), not killing", log_file)
+                    remaining_processes.append(proc)
+                    continue
+                killed = _kill_process(pid, log_file, expected_type=proc_type)
                 results["killed"].append({
                     "pid": pid, "type": proc_type, "purpose": purpose,
                     "age_seconds": round(age), "killed": killed,
                 })
+                if not killed:
+                    remaining_processes.append(proc)  # Keep in registry if kill failed
         else:
             results["alive"].append({
                 "pid": pid, "type": proc_type, "purpose": purpose,
@@ -278,6 +375,15 @@ def cmd_cleanup(project_id: str,
                 registry_file: Optional[Path] = None,
                 log_file: Optional[Path] = None) -> dict:
     """Clean up all processes associated with a project."""
+    lock_path = (registry_file or REGISTRY_FILE).with_suffix('.lock')
+    with qralph_state.exclusive_state_lock(lock_path):
+        return _cmd_cleanup_locked(project_id, registry_file, log_file)
+
+
+def _cmd_cleanup_locked(project_id: str,
+                        registry_file: Optional[Path] = None,
+                        log_file: Optional[Path] = None) -> dict:
+    """Inner cleanup logic, called under exclusive lock."""
     registry = _load_registry(registry_file)
 
     if registry.get("project_id") != project_id:
@@ -292,7 +398,7 @@ def cmd_cleanup(project_id: str,
     for proc in registry.get("spawned_processes", []):
         pid = proc["pid"]
         if _is_pid_alive(pid):
-            success = _kill_process(pid, log_file)
+            success = _kill_process(pid, log_file, expected_type=proc.get("type"))
             killed.append({"pid": pid, "type": proc.get("type"), "killed": success})
         else:
             _log_action(f"CLEANUP PID {pid} already dead", log_file)
@@ -384,4 +490,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 6):
+        sys.exit("QRALPH requires Python 3.6+")
     main()

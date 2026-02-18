@@ -44,7 +44,7 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 | Plugin | Command | Description |
 |--------|---------|-------------|
-| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH v4.0 multi-agent swarm (3-7 agents, session persistence, memory, work mode) |
+| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH v4.1 hierarchical sub-teams with quality gates, fresh-context validation, session persistence |
 | **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
 | **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, Google Docs publishing |
@@ -62,9 +62,9 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 ---
 
-## Featured: QRALPH v4.0 Multi-Agent Orchestration
+## Featured: QRALPH v4.1 Hierarchical Sub-Team Orchestration
 
-QRALPH spawns 3-7 parallel specialist agents to review your requests before implementation. v4.0 adds session persistence, long-term memory, process monitoring, and lightweight work mode.
+QRALPH spawns 3-7 parallel specialist agents to review your requests before implementation. v4.1 adds hierarchical sub-teams, quality gates, fresh-context validation, and execution modes (`--auto`/`--human`). Built on v4.0's session persistence, long-term memory, process monitoring, and work mode.
 
 ```bash
 # Install
@@ -86,11 +86,15 @@ QRALPH resume 001
 
 ## Plugin Details
 
-### 1. Orchestration Workflow (QRALPH v4.0)
+### 1. Orchestration Workflow (QRALPH v4.1)
 
-Multi-agent swarm orchestration with session persistence, self-healing, and work mode.
+Hierarchical sub-team orchestration with quality gates, fresh-context validation, session persistence, and self-healing.
 
 **Features:**
+- Hierarchical sub-teams: each phase (REVIEWING, EXECUTING, VALIDATING) runs in its own sub-team
+- Quality gate with 95% confidence check before progression
+- VALIDATING phase: fresh-context verification with no implementation knowledge
+- Execution modes: `--human` (pause for approval) / `--auto` (fully autonomous)
 - 3-7 parallel specialist agents (dynamic selection from 24+ agent types)
 - Work mode: 1-3 lightweight agents for writing, research, business tasks
 - Session persistence via STATE.md (survives Claude Code restarts)
@@ -98,6 +102,7 @@ Multi-agent swarm orchestration with session persistence, self-healing, and work
 - SQLite + FTS5 long-term memory store (cross-project learning)
 - Enhanced self-healing with pattern matching and catastrophic rollback
 - Watchdog system with agent health checks and configurable timeouts
+- Sub-team recovery: resume crashed sub-teams from last checkpoint
 - Cost-optimized execution ($3-8/coding run, $1-3/work run)
 
 **Use Cases:** Feature development, code review, security audits, research, writing, strategic planning

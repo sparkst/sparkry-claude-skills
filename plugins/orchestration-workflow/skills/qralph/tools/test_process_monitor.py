@@ -225,6 +225,7 @@ def test_sweep_kills_orphan(mock_env):
         call_count["kill"] += 1
 
     with patch.object(process_monitor, "_is_pid_alive", side_effect=mock_alive), \
+         patch.object(process_monitor, "_verify_process_identity", return_value=True), \
          patch("os.kill", side_effect=mock_kill):
         result = process_monitor.cmd_sweep(
             registry_file=mock_env["registry_file"],
@@ -381,6 +382,7 @@ def test_audit_log_kill_format(mock_env):
         call_count["n"] += 1
 
     with patch.object(process_monitor, "_is_pid_alive", side_effect=mock_alive), \
+         patch.object(process_monitor, "_verify_process_identity", return_value=True), \
          patch("os.kill", side_effect=mock_kill):
         process_monitor.cmd_sweep(
             registry_file=mock_env["registry_file"],
@@ -583,6 +585,66 @@ def test_full_register_sweep_cleanup_cycle(mock_env):
     log_content = mock_env["log_file"].read_text()
     assert "REGISTER" in log_content
     assert "CLEANUP" in log_content
+
+
+def test_sweep_double_kill_prevention(mock_env):
+    """F-012: Second sweep after killing processes should not try to kill already-dead PIDs."""
+    # Register a process
+    process_monitor.cmd_register(
+        pid=60001, proc_type="node", purpose="test-server",
+        registry_file=mock_env["registry_file"],
+        log_file=mock_env["log_file"],
+    )
+
+    kill_calls = []
+
+    def mock_alive_first_sweep(pid):
+        # Parent dead, registered process alive for first sweep
+        if pid == mock_env.get("parent_pid", 1):
+            return False
+        return pid == 60001 and len(kill_calls) == 0
+
+    def mock_alive_second_sweep(pid):
+        # Parent dead, registered process now dead (killed in first sweep)
+        if pid == mock_env.get("parent_pid", 1):
+            return False
+        return False
+
+    def mock_verify_identity(pid, expected_type):
+        return True
+
+    def mock_kill_process(pid, log_file=None, expected_type=None):
+        kill_calls.append(pid)
+        return True
+
+    # First sweep: kills the orphan
+    registry = _read_registry(mock_env)
+    registry["parent_pid"] = 1  # dead parent
+    registry["spawned_processes"][0]["spawned_at"] = "2020-01-01T00:00:00+00:00"  # past grace
+    _write_registry(mock_env, registry)
+
+    with patch.object(process_monitor, "_is_pid_alive", side_effect=mock_alive_first_sweep), \
+         patch.object(process_monitor, "_verify_process_identity", side_effect=mock_verify_identity), \
+         patch.object(process_monitor, "_kill_process", side_effect=mock_kill_process):
+        first_result = process_monitor.cmd_sweep(
+            registry_file=mock_env["registry_file"],
+            log_file=mock_env["log_file"],
+        )
+
+    assert len(first_result["killed"]) == 1
+    assert kill_calls == [60001]
+
+    # Second sweep: process is dead, should appear in "dead" not "killed"
+    kill_calls.clear()
+    with patch.object(process_monitor, "_is_pid_alive", side_effect=mock_alive_second_sweep):
+        second_result = process_monitor.cmd_sweep(
+            registry_file=mock_env["registry_file"],
+            log_file=mock_env["log_file"],
+        )
+
+    # No kills on second sweep - process was removed from registry after first kill
+    assert len(second_result["killed"]) == 0
+    assert kill_calls == []
 
 
 if __name__ == "__main__":

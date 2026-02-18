@@ -1,11 +1,15 @@
-# QRALPH v4.0 - Team Orchestration Skill
+# QRALPH v4.1 - Hierarchical Team Orchestration Skill
 
-> Team-based orchestrator using Claude Code native teams with dynamic plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
+> Sr. SDM orchestrator with hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. Builds on v4.0's native teams, plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
 
 ## Trigger
 
 Invoke with `/qralph <request>` or use the `QRALPH` shortcut.
 For lightweight tasks: `QWORK "<request>"` (work mode with 1-3 agents).
+
+## Version Check
+
+On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1 — see CHANGELOG.md for changes." Update `last_seen_version`.
 
 ## Tools
 
@@ -13,14 +17,15 @@ All orchestrator tools live at `.qralph/tools/`:
 
 ```
 .qralph/tools/
-├── qralph-orchestrator.py   # Main orchestrator (state, discovery, agents, work mode)
+├── qralph-orchestrator.py   # Main orchestrator (state, discovery, agents, work mode, sub-teams)
+├── qralph-subteam.py        # Sub-team lifecycle (create, check, collect, resume, teardown, quality-gate)
 ├── qralph-healer.py         # Self-healing with pattern matching & catastrophic rollback
-├── qralph-watchdog.py       # Health checks, agent monitoring, preconditions
+├── qralph-watchdog.py       # Health checks, agent monitoring, preconditions, sub-team health
 ├── qralph-status.py         # Status monitor (terminal UI)
 ├── qralph-state.py          # Shared state module (atomic writes, checksums, locking)
-├── session-state.py         # Session persistence (STATE.md lifecycle)
+├── session-state.py         # Session persistence (STATE.md lifecycle, sub-team recovery)
 ├── process-monitor.py       # PID registry and orphan cleanup
-└── test_*.py                # Test suites (300+ tests)
+└── test_*.py                # Test suites (420+ tests)
 ```
 
 Long-term memory:
@@ -35,26 +40,72 @@ Long-term memory:
 
 QRALPH creates a Claude Code native team to analyze requests and produce consolidated findings. It dynamically discovers installed plugins and skills, selects the best agents, and coordinates them through shared task lists and messaging.
 
-## Architecture: Native Teams (v3.0+)
+## Architecture: Hierarchical Sub-Teams (v4.1)
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  TEAM LEAD (You)                                       │
-│  1. Analyze request                                    │
-│  2. Discover relevant plugins & skills                 │
-│  3. Select agents dynamically                          │
-│  4. TeamCreate + TaskCreate + spawn teammates          │
-│  5. Monitor via TaskList + receive messages             │
-│  6. Synthesize findings                                │
-│  7. Shutdown team + cleanup                            │
-└────────────────┬───────────────────────────────────────┘
-                 │
-    ┌────────────┼────────────┐
-    ▼            ▼            ▼
-┌────────┐ ┌────────┐ ┌────────┐
-│Agent 1 │ │Agent 2 │ │Agent N │  TEAM: shared TaskList
-│        │ │        │ │        │  + SendMessage + skills
-└────────┘ └────────┘ └────────┘
+QRALPH v4.1 (main session — "Sr. SDM")
+  │
+  │  Persists: STATE.md, current-project.json, checkpoints/, phase-outputs/
+  │  Manages: phases, healing, circuit breakers, audit trail, version
+  │
+  ├── INIT + DISCOVERING (direct, no sub-team)
+  │
+  ├── REVIEWING (sub-team)
+  │     ├── Sub-team lead (Sonnet) spawns N review agents
+  │     ├── Agents write agent-outputs/*.md to disk
+  │     ├── Lead writes phase-outputs/REVIEWING-result.json
+  │     ├── QRALPH runs 95% confidence quality gate
+  │     └── If --human: pause for user approval. If --auto: continue.
+  │
+  ├── EXECUTING (sub-team per context window)
+  │     ├── Sub-team 1: implement + run automated tests
+  │     ├── Sub-team 2: continue from where sub-team 1 left off (if needed)
+  │     └── Repeats until all automated tests pass
+  │
+  ├── VALIDATING (fresh sub-team)
+  │     ├── Fresh context — no knowledge of implementation details
+  │     ├── Given: requirements + built artifacts + mini-UAT scenarios
+  │     └── If fails: back to EXECUTING with failure details
+  │
+  └── COMPLETE (direct, no sub-team)
+```
+
+### Sub-Team Lifecycle
+
+```bash
+# Create sub-team for a phase
+python3 .qralph/tools/qralph-subteam.py create-subteam --phase REVIEWING
+
+# Monitor progress
+python3 .qralph/tools/qralph-subteam.py check-subteam --phase REVIEWING
+
+# Run 95% confidence quality gate
+python3 .qralph/tools/qralph-subteam.py quality-gate --phase REVIEWING
+
+# Collect results into QRALPH state
+python3 .qralph/tools/qralph-subteam.py collect-results --phase REVIEWING
+
+# Resume after compaction/crash
+python3 .qralph/tools/qralph-subteam.py resume-subteam --phase REVIEWING
+
+# Clean up
+python3 .qralph/tools/qralph-subteam.py teardown-subteam --phase REVIEWING
+```
+
+### Quality Gate (95% Confidence)
+
+The quality gate checks 5 criteria:
+1. All critical agents completed (security-reviewer, architecture-advisor, sde-iii)
+2. Every domain from the request covered by at least one finding
+3. No unresolved contradictions between agents
+4. Execution plan has testable acceptance criteria
+5. PE risk assessment present (complexity, coverage, maintainability)
+
+### Execution Modes
+
+```bash
+QRALPH "<request>" --human   # Default: pause after REVIEWING for approval
+QRALPH "<request>" --auto    # Auto-continue after quality gate passes
 ```
 
 ## Project Structure
@@ -74,6 +125,10 @@ Projects are created in: `.qralph/projects/`
 ├── discovered-plugins.json  # Plugin discovery results
 ├── team-config.json         # Team composition snapshot
 ├── agent-outputs/           # Individual agent reports
+├── phase-outputs/           # Sub-team result files (v4.1)
+│   ├── REVIEWING-result.json
+│   ├── EXECUTING-result.json
+│   └── VALIDATING-result.json
 ├── healing-attempts/        # Self-healing audit trail + patterns DB
 │   └── healing-patterns.json
 └── checkpoints/             # Resumable state snapshots

@@ -391,5 +391,92 @@ def test_format_checklist_reviewing():
     assert "[ ] EXECUTING" in result
 
 
+# ============================================================================
+# LOOP BUG FIXES (Phase 1H)
+# ============================================================================
+
+
+def test_recover_preserves_complete_phase(mock_env):
+    """Bug 1F: Recovery should not override COMPLETE phase based on SYNTHESIS.md existence."""
+    project_path, state = _create_test_project(mock_env)
+
+    # Set state to COMPLETE with SUMMARY.md
+    state["phase"] = "COMPLETE"
+    state["completed_at"] = datetime.now().isoformat()
+    checkpoint_dir = project_path / "checkpoints"
+    checkpoint_file = checkpoint_dir / "state.json"
+    checkpoint_file.write_text(json.dumps(state, indent=2))
+
+    # Create SYNTHESIS.md (which would normally cause phase to be inferred as EXECUTING)
+    (project_path / "SYNTHESIS.md").write_text("# Synthesis\nDone.")
+    # Create SUMMARY.md (definitive proof of COMPLETE)
+    (project_path / "SUMMARY.md").write_text("# Summary\nProject complete.")
+
+    session_state.cmd_recover("001-test-project")
+
+    # Verify phase is still COMPLETE, not overridden to EXECUTING
+    current_file = mock_env / ".qralph" / "current-project.json"
+    recovered = json.loads(current_file.read_text())
+    assert recovered["phase"] == "COMPLETE"
+
+
+def test_recover_infers_executing_without_summary(mock_env):
+    """Bug 1F: Recovery infers EXECUTING from SYNTHESIS.md when phase is non-terminal."""
+    project_path, state = _create_test_project(mock_env)
+
+    # Set state to REVIEWING (non-terminal)
+    state["phase"] = "REVIEWING"
+    checkpoint_dir = project_path / "checkpoints"
+    checkpoint_file = checkpoint_dir / "state.json"
+    checkpoint_file.write_text(json.dumps(state, indent=2))
+
+    # Create SYNTHESIS.md without SUMMARY.md
+    (project_path / "SYNTHESIS.md").write_text("# Synthesis\nIn progress.")
+
+    session_state.cmd_recover("001-test-project")
+
+    current_file = mock_env / ".qralph" / "current-project.json"
+    recovered = json.loads(current_file.read_text())
+    assert recovered["phase"] == "EXECUTING"
+
+
+def test_recover_from_corrupt_checkpoint_with_fallback(mock_env):
+    """F-012: Recovery from corrupt checkpoint falls back to minimal state reconstruction."""
+    project_id = "001-corrupt-test"
+    project_dir = mock_env / ".qralph" / "projects" / project_id
+    project_dir.mkdir(parents=True)
+    (project_dir / "agent-outputs").mkdir()
+    checkpoint_dir = project_dir / "checkpoints"
+    checkpoint_dir.mkdir()
+
+    # Write a corrupt checkpoint (invalid JSON)
+    (checkpoint_dir / "state.json").write_text("{invalid json content!!!")
+
+    # Write a valid older checkpoint
+    valid_state = {
+        "project_id": project_id,
+        "project_path": str(project_dir),
+        "request": "test request",
+        "mode": "coding",
+        "phase": "REVIEWING",
+        "created_at": datetime.now().isoformat(),
+        "agents": ["security-reviewer"],
+        "heal_attempts": 0,
+        "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
+    }
+    # Also put a corrupt one as the latest (sorted last)
+    (checkpoint_dir / "reviewing-120000.json").write_text(json.dumps(valid_state))
+    (checkpoint_dir / "reviewing-130000.json").write_text("totally corrupt {{{")
+
+    # Run recovery
+    with patch.object(session_state, '_get_git_diff_stat', return_value=""), \
+         patch.object(session_state, '_get_git_log_oneline', return_value=""):
+        result = session_state.cmd_recover(project_id)
+
+    # Should recover from the valid checkpoint (reviewing-120000.json) after corrupt one fails
+    assert result is not None
+    assert result["status"] == "recovered"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

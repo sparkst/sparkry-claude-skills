@@ -1,11 +1,11 @@
 {
   "name": "orchestration-workflow",
-  "version": "3.0.0",
-  "description": "Team-based orchestration with native Claude Code teams, dynamic plugin discovery, parallel agent coordination, self-healing, and checkpointing (QRALPH)",
+  "version": "4.1.0",
+  "description": "Hierarchical sub-team orchestration with quality gates, fresh-context validation, session persistence, self-healing, and process monitoring (QRALPH)",
   "author": {
     "name": "Sparkry.ai",
     "email": "skills@sparkry.ai"
   },
   "license": "MIT",
-  "keywords": ["orchestration", "multi-agent", "team", "qralph", "self-healing", "plugin-discovery"]
+  "keywords": ["orchestration", "multi-agent", "team", "qralph", "self-healing", "plugin-discovery", "sub-teams", "quality-gates", "validation"]
 }

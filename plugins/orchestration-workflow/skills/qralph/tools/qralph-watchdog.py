@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
 QRALPH Watchdog - Health checks, agent monitoring, and phase precondition validation.
 
@@ -31,12 +33,12 @@ PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"
 CURRENT_PROJECT_FILE = QRALPH_DIR / "current-project.json"
 
-# Configurable agent timeouts (seconds)
+# Configurable agent timeouts (seconds) - override via env vars
 AGENT_TIMEOUTS = {
-    "haiku": 120,
-    "sonnet": 300,
-    "opus": 600,
-    "default": 300,
+    "haiku": int(os.environ.get("QRALPH_TIMEOUT_HAIKU", "120")),
+    "sonnet": int(os.environ.get("QRALPH_TIMEOUT_SONNET", "300")),
+    "opus": int(os.environ.get("QRALPH_TIMEOUT_OPUS", "600")),
+    "default": int(os.environ.get("QRALPH_TIMEOUT_DEFAULT", "300")),
 }
 
 # Agent criticality levels
@@ -50,7 +52,8 @@ ESCALATION_STEPS = ["timeout", "retry_once", "skip_if_non_critical", "defer", "a
 PHASE_PRECONDITIONS = {
     "DISCOVERING": ["project_path_exists", "request_non_empty"],
     "REVIEWING": ["discovery_results_exist", "at_least_one_capability"],
-    "EXECUTING": ["synthesis_exists"],
+    "EXECUTING": ["synthesis_exists", "reviewing_result_exists"],
+    "VALIDATING": ["execution_artifacts_exist", "automated_tests_passing"],
     "UAT": ["execution_artifacts_exist"],
     "COMPLETE": ["uat_exists"],
 }
@@ -169,7 +172,7 @@ def check_state_integrity(state: dict, project_path: Path) -> List[Dict[str, Any
     # Check phase validity
     phase = state.get("phase", "")
     valid_phases = {"INIT", "DISCOVERING", "REVIEWING", "EXECUTING", "UAT", "COMPLETE",
-                    "PLANNING", "USER_REVIEW", "ESCALATE"}
+                    "PLANNING", "USER_REVIEW", "ESCALATE", "VALIDATING"}
     if phase and phase not in valid_phases:
         issues.append({
             "level": "error",
@@ -293,6 +296,71 @@ def check_phase_preconditions(phase: str, state: dict, project_path: Path) -> Li
                     "message": "UAT.md not found",
                 })
 
+        elif precond == "reviewing_result_exists":
+            result_file = project_path / "phase-outputs" / "REVIEWING-result.json"
+            if not result_file.exists():
+                # Not a hard failure — may be using flat teams (v4.0 compat)
+                pass
+
+        elif precond == "automated_tests_passing":
+            # Check for EXECUTING result with no work_remaining
+            exec_result = project_path / "phase-outputs" / "EXECUTING-result.json"
+            if exec_result.exists():
+                result_data = safe_read_json(exec_result, {})
+                work_remaining = result_data.get("work_remaining")
+                if work_remaining:
+                    issues.append({
+                        "precondition": precond,
+                        "met": False,
+                        "message": f"Work remaining: {work_remaining}",
+                    })
+
+    return issues
+
+
+def check_subteam_health(state: dict, project_path: Path) -> List[Dict[str, Any]]:
+    """Check health of sub-teams: result file validity, stale outputs, team existence."""
+    issues = []
+    sub_teams = state.get("sub_teams", {})
+
+    for phase, sub_team in sub_teams.items():
+        if not isinstance(sub_team, dict):
+            continue
+
+        status = sub_team.get("status", "")
+
+        # Check result file path is valid
+        result_file = project_path / "phase-outputs" / f"{phase}-result.json"
+        if status in ("complete", "failed"):
+            if not result_file.exists():
+                issues.append({
+                    "level": "warning",
+                    "phase": phase,
+                    "message": f"Sub-team {phase} marked {status} but result file missing",
+                })
+            elif result_file.stat().st_size == 0:
+                issues.append({
+                    "level": "error",
+                    "phase": phase,
+                    "message": f"Sub-team {phase} result file is empty",
+                })
+
+        # Check for stale running sub-teams
+        if status == "running":
+            created_at = sub_team.get("created_at", "")
+            if created_at:
+                try:
+                    created = datetime.fromisoformat(created_at)
+                    age = (datetime.now() - created).total_seconds()
+                    if age > 3600:  # 1 hour timeout
+                        issues.append({
+                            "level": "warning",
+                            "phase": phase,
+                            "message": f"Sub-team {phase} running for {age:.0f}s (>1h)",
+                        })
+                except (ValueError, TypeError):
+                    pass
+
     return issues
 
 
@@ -320,8 +388,9 @@ def cmd_check():
 
     agent_issues = check_agent_health(state, project_path)
     state_issues = check_state_integrity(state, project_path)
+    subteam_issues = check_subteam_health(state, project_path)
 
-    all_issues = agent_issues + state_issues
+    all_issues = agent_issues + state_issues + subteam_issues
     critical_count = sum(1 for i in all_issues if i.get("level") == "critical")
     error_count = sum(1 for i in all_issues if i.get("level") == "error")
 
@@ -468,4 +537,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 6):
+        sys.exit("QRALPH requires Python 3.6+")
     main()

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
 QRALPH Shared State Module - Single source of truth for state management.
 
@@ -13,9 +15,14 @@ import json
 import os
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Thread-local flag to track when exclusive lock is held
+_lock_state = threading.local()
 
 # Cross-platform file locking
 try:
@@ -23,6 +30,13 @@ try:
     HAS_FCNTL = True
 except ImportError:
     HAS_FCNTL = False
+    import warnings
+    warnings.warn(
+        "fcntl not available (Windows). File locking is disabled; "
+        "concurrent access may cause data corruption.",
+        RuntimeWarning,
+        stacklevel=1,
+    )
 
 # Constants
 PROJECT_ROOT = Path.cwd()
@@ -42,7 +56,10 @@ REQUIRED_STATE_FIELDS = {
 }
 
 VALID_PHASES = {"INIT", "DISCOVERING", "REVIEWING", "EXECUTING", "UAT", "COMPLETE",
-                "PLANNING", "USER_REVIEW", "ESCALATE"}
+                "PLANNING", "USER_REVIEW", "ESCALATE", "VALIDATING"}
+
+VALID_SUBTEAM_STATUSES = {"creating", "running", "complete", "failed", "timeout",
+                          "interrupted", "resuming"}
 
 DEFAULT_CIRCUIT_BREAKERS = {
     "total_tokens": 0,
@@ -52,10 +69,10 @@ DEFAULT_CIRCUIT_BREAKERS = {
 
 
 def _compute_checksum(data: dict) -> str:
-    """Compute SHA-256 checksum of state dict (excluding _checksum field)."""
+    """Compute SHA-256 checksum of state dict for corruption detection (not tamper-proof)."""
     clean = {k: v for k, v in data.items() if k != "_checksum"}
     serialized = json.dumps(clean, sort_keys=True, default=str)
-    return hashlib.sha256(serialized.encode()).hexdigest()[:16]
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 def _lock_file(f, exclusive: bool = False):
@@ -70,9 +87,50 @@ def _unlock_file(f):
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def exclusive_state_lock(lock_path: Optional[Path] = None):
+    """
+    Hold an exclusive lock across a full read-modify-write cycle.
+
+    Usage:
+        with exclusive_state_lock():
+            state = load_state()
+            state["phase"] = "REVIEWING"
+            save_state(state)
+
+    The lock is held for the entire block, preventing concurrent modifications.
+    On platforms without fcntl (Windows), this is a no-op.
+    """
+    lock_path = lock_path or QRALPH_DIR / "state.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    lock_file = os.fdopen(fd, 'w')
+    try:
+        _lock_file(lock_file, exclusive=True)
+        _lock_state.held = True
+        try:
+            yield
+        finally:
+            _lock_state.held = False
+            _unlock_file(lock_file)
+    finally:
+        lock_file.close()
+
+
+def is_exclusive_lock_held() -> bool:
+    """Check if the current thread holds the exclusive state lock."""
+    return getattr(_lock_state, 'held', False)
+
+
 def load_state(state_file: Optional[Path] = None) -> dict:
     """
     Load project state with file locking and checksum validation.
+
+    WARNING: For read-modify-write cycles, callers MUST hold
+    ``exclusive_state_lock()`` for the entire duration. The per-read
+    shared lock here only guarantees a consistent snapshot; without an
+    outer exclusive lock, a concurrent writer can modify the file between
+    your read and write (TOCTOU).
 
     Args:
         state_file: Path to state file (defaults to current-project.json)
@@ -92,21 +150,23 @@ def load_state(state_file: Optional[Path] = None) -> dict:
                 if not content:
                     return {}
                 state = json.loads(content)
+
+                # Validate checksum while still holding the lock
+                if "_checksum" in state:
+                    expected = state["_checksum"]
+                    actual = _compute_checksum(state)
+                    if expected != actual:
+                        print(f"Warning: State checksum mismatch (expected {expected}, got {actual}). "
+                              "Returning repaired state.", file=sys.stderr)
+                        repaired = repair_state(state)
+                        return repaired
+
+                return state
             except json.JSONDecodeError as e:
                 print(f"Warning: Invalid JSON in state file: {e}", file=sys.stderr)
                 return {}
             finally:
                 _unlock_file(f)
-
-        # Validate checksum if present
-        if "_checksum" in state:
-            expected = state["_checksum"]
-            actual = _compute_checksum(state)
-            if expected != actual:
-                print(f"Warning: State checksum mismatch (expected {expected}, got {actual}). "
-                      "State may be corrupted.", file=sys.stderr)
-
-        return state
 
     except Exception as e:
         print(f"Warning: Error loading state: {e}", file=sys.stderr)
@@ -174,6 +234,17 @@ def validate_state(state: dict) -> List[str]:
         if not isinstance(state["heal_attempts"], int) or state["heal_attempts"] < 0:
             errors.append("heal_attempts must be a non-negative integer")
 
+    if "sub_teams" in state:
+        if not isinstance(state["sub_teams"], dict):
+            errors.append("sub_teams must be a dict")
+        else:
+            for phase_name, sub_team in state["sub_teams"].items():
+                if not isinstance(sub_team, dict):
+                    errors.append(f"sub_teams['{phase_name}'] must be a dict")
+                elif "status" in sub_team:
+                    if sub_team["status"] not in VALID_SUBTEAM_STATUSES:
+                        errors.append(f"sub_teams['{phase_name}'].status '{sub_team['status']}' is invalid")
+
     return errors
 
 
@@ -198,6 +269,9 @@ def repair_state(state: dict) -> dict:
         "circuit_breakers": dict(DEFAULT_CIRCUIT_BREAKERS),
         "findings": [],
         "domains": [],
+        "remediation_tasks": [],
+        "sub_teams": {},
+        "last_seen_version": "",
     }
 
     for field, default in defaults.items():
@@ -281,8 +355,13 @@ def safe_write(path: Path, content: str):
         path: Target file path
         content: Content to write
     """
+    # Check parent for symlinks BEFORE creating temp file (prevents TOCTOU via symlinked parent)
+    if os.path.islink(str(path.parent)):
+        raise OSError(f"Refusing to write: parent directory is a symlink: {path.parent}")
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    tmp_path = None
     try:
         fd, tmp_path = tempfile.mkstemp(
             dir=str(path.parent),
@@ -298,13 +377,17 @@ def safe_write(path: Path, content: str):
                     os.fsync(f.fileno())
                 finally:
                     _unlock_file(f)
+            os.chmod(tmp_path, 0o600)
+            if os.path.islink(str(path)):
+                os.unlink(str(path))
             os.rename(tmp_path, str(path))
         except Exception:
             # Clean up temp file on failure
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
             raise
     except Exception as e:
         print(f"Error: Failed to write {path}: {e}", file=sys.stderr)

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
 QRALPH Session State Manager - STATE.md lifecycle, session persistence, CLAUDE.md injection.
 
@@ -21,6 +23,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Safe project ID pattern: digits, lowercase, hyphens only
+SAFE_PROJECT_ID = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,99}$')
 
 # Import shared state module
 import importlib.util
@@ -47,8 +52,15 @@ QRALPH_PHASES = [
 CLAUDE_MD_SECTION_HEADER = "## QRALPH Project State"
 
 
+def _validate_project_id(project_id: str) -> bool:
+    """Validate project_id contains only safe characters."""
+    return bool(SAFE_PROJECT_ID.match(project_id))
+
+
 def _get_project_path(project_id: str) -> Optional[Path]:
     """Resolve project path from ID or partial match."""
+    if not _validate_project_id(project_id):
+        return None
     if not PROJECTS_DIR.exists():
         return None
     matches = list(PROJECTS_DIR.glob(f"{project_id}*"))
@@ -105,12 +117,18 @@ def cmd_create_state(project_id: str):
     Creates STATE.md with Meta, Execution Plan, Current Step Detail,
     Uncommitted Work, Session Log, and Next Session Instructions sections.
     """
+    with qralph_state.exclusive_state_lock():
+        return _cmd_create_state_locked(project_id)
+
+
+def _cmd_create_state_locked(project_id: str):
+    """Inner create-state logic, called under exclusive lock."""
     project_path = _get_project_path(project_id)
     if not project_path:
         print(json.dumps({"error": f"Project not found: {project_id}"}))
         return
 
-    state = safe_read_json(CURRENT_PROJECT_FILE, {})
+    state = qralph_state.load_state(CURRENT_PROJECT_FILE)
     state_md_path = _get_state_md_path(project_path)
 
     # Don't overwrite existing STATE.md (idempotent)
@@ -203,7 +221,7 @@ def cmd_session_start():
     Reads current-project.json then STATE.md, outputs JSON summary
     (<2000 tokens) with next instructions, step progress, uncommitted work alerts.
     """
-    state = safe_read_json(CURRENT_PROJECT_FILE, {})
+    state = qralph_state.load_state(CURRENT_PROJECT_FILE)
     if not state:
         output = {
             "status": "no_active_project",
@@ -245,6 +263,18 @@ def cmd_session_start():
     total_steps = len(QRALPH_PHASES)
     current_step = QRALPH_PHASES.index(phase) + 1 if phase in QRALPH_PHASES else 0
 
+    # Check for sub-team recovery (v4.1)
+    sub_teams = state.get("sub_teams", {})
+    running_subteams = {k: v for k, v in sub_teams.items()
+                        if isinstance(v, dict) and v.get("status") == "running"}
+    recovery_notice = None
+    if running_subteams:
+        phases = ", ".join(running_subteams.keys())
+        recovery_notice = (
+            f"Recovered from session break. Sub-teams were running for: {phases}. "
+            "Run resume-subteam to recover missing agents."
+        )
+
     output = {
         "status": "session_started",
         "project_id": project_id,
@@ -258,7 +288,11 @@ def cmd_session_start():
         "uncommitted_details": git_diff[:500] if git_diff else None,
         "next_instructions": next_instructions[:1500],
         "state_file": str(state_md_path),
+        "execution_mode": state.get("execution_mode", "human"),
     }
+
+    if recovery_notice:
+        output["recovery_notice"] = recovery_notice
 
     print(json.dumps(output, indent=2))
     return output
@@ -271,16 +305,22 @@ def cmd_session_end(project_id: str):
     Updates checkboxes, advances step if complete, populates uncommitted work
     from git diff --stat, appends session log row, writes next instructions.
     """
+    with qralph_state.exclusive_state_lock():
+        return _cmd_session_end_locked(project_id)
+
+
+def _cmd_session_end_locked(project_id: str):
+    """Inner session-end logic, called under exclusive lock."""
     project_path = _get_project_path(project_id)
     if not project_path:
         print(json.dumps({"error": f"Project not found: {project_id}"}))
         return
 
-    state = safe_read_json(CURRENT_PROJECT_FILE, {})
+    state = qralph_state.load_state(CURRENT_PROJECT_FILE)
     state_md_path = _get_state_md_path(project_path)
 
     if not state_md_path.exists():
-        cmd_create_state(project_id)
+        _cmd_create_state_locked(project_id)
 
     now = datetime.now()
     phase = state.get("phase", "INIT")
@@ -324,9 +364,13 @@ def cmd_session_end(project_id: str):
         content, flags=re.DOTALL
     )
 
-    # Append session log row
-    session_count = content.count("| ") - 2  # subtract header rows
-    session_count = max(session_count, 1)
+    # Append session log row (count only data rows in Session Log table)
+    log_section = re.search(r'## Session Log\s*\n(.*?)(?=\n## |\Z)', content, re.DOTALL)
+    if log_section:
+        data_rows = re.findall(r'^\| \d+', log_section.group(1), re.MULTILINE)
+        session_count = len(data_rows) + 1
+    else:
+        session_count = 1
     log_row = f"| {session_count} | {now.strftime('%Y-%m-%d')} | - | {phase} | {phase} | Session end |\n"
 
     # Insert before the closing --- in the session log
@@ -393,6 +437,12 @@ def cmd_recover(project_id: str):
 
     Used when STATE.md is missing or corrupt. Marks uncertain items as STATUS UNKNOWN.
     """
+    with qralph_state.exclusive_state_lock():
+        return _cmd_recover_locked(project_id)
+
+
+def _cmd_recover_locked(project_id: str):
+    """Inner recover logic, called under exclusive lock."""
     project_path = _get_project_path(project_id)
     if not project_path:
         print(json.dumps({"error": f"Project not found: {project_id}"}))
@@ -405,7 +455,14 @@ def cmd_recover(project_id: str):
     if checkpoint_dir.exists():
         checkpoints = sorted(checkpoint_dir.glob("*.json"))
         if checkpoints:
-            state = safe_read_json(checkpoints[-1], {})
+            state = qralph_state.load_state(checkpoints[-1])
+            # Validate checkpoint integrity before using it
+            if state:
+                errors = qralph_state.validate_state(state)
+                if errors:
+                    print(json.dumps({"warning": f"Checkpoint has validation errors: {errors}"}),
+                          file=sys.stderr)
+                    state = {}  # Fall back to minimal reconstruction
 
     if not state:
         # Minimal reconstruction
@@ -421,24 +478,50 @@ def cmd_recover(project_id: str):
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
         }
 
-    # Check for agent outputs to infer phase
+    # Gather filesystem evidence for phase inference
     agent_outputs = list((project_path / "agent-outputs").glob("*.md")) if (project_path / "agent-outputs").exists() else []
     synthesis_exists = (project_path / "SYNTHESIS.md").exists()
     uat_exists = (project_path / "UAT.md").exists()
+    summary_exists = (project_path / "SUMMARY.md").exists()
 
-    if uat_exists:
-        state["phase"] = "UAT"
-    elif synthesis_exists:
-        state["phase"] = "EXECUTING"
-    elif agent_outputs:
-        state["phase"] = "REVIEWING"
-    # else keep whatever phase was in checkpoint
+    # Only infer phase from files when checkpoint phase is NOT terminal.
+    # COMPLETE and UAT are terminal/near-terminal - trust the checkpoint.
+    checkpoint_phase = state.get("phase", "")
+    terminal_phases = {"COMPLETE", "UAT"}
+
+    # SUMMARY.md is definitive proof of COMPLETE
+    if summary_exists:
+        state["phase"] = "COMPLETE"
+    elif checkpoint_phase not in terminal_phases:
+        if uat_exists:
+            state["phase"] = "UAT"
+        elif synthesis_exists:
+            state["phase"] = "EXECUTING"
+        elif agent_outputs:
+            state["phase"] = "REVIEWING"
+        # else keep whatever phase was in checkpoint
+
+    # Recover sub-team state from phase-outputs (v4.1)
+    phase_outputs_dir = project_path / "phase-outputs"
+    if phase_outputs_dir.exists():
+        sub_teams = state.get("sub_teams", {})
+        for result_file in phase_outputs_dir.glob("*-result.json"):
+            phase_name = result_file.stem.replace("-result", "")
+            result_data = safe_read_json(result_file, {})
+            if result_data:
+                sub_teams[phase_name] = {
+                    "status": result_data.get("status", "complete"),
+                    "recovered_from": "phase-outputs",
+                    "recovered_at": datetime.now().isoformat(),
+                }
+        if sub_teams:
+            state["sub_teams"] = sub_teams
 
     # Save recovered state
     safe_write_json(CURRENT_PROJECT_FILE, state)
 
     # Create STATE.md via the normal flow
-    cmd_create_state(project_id)
+    _cmd_create_state_locked(project_id)
 
     # Mark recovery in STATE.md
     state_md_path = _get_state_md_path(project_path)
@@ -554,4 +637,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 6):
+        sys.exit("QRALPH requires Python 3.6+")
     main()

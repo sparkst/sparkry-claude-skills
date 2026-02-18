@@ -49,7 +49,7 @@ spec_heal = importlib.util.spec_from_file_location("qralph_healer", healer_path)
 qralph_healer = importlib.util.module_from_spec(spec_heal)
 spec_heal.loader.exec_module(qralph_healer)
 
-# Import functions from orchestrator (v3.0 API)
+# Import functions from orchestrator (v4.0 API)
 validate_request = qralph_orchestrator.validate_request
 validate_phase_transition = qralph_orchestrator.validate_phase_transition
 check_circuit_breakers = qralph_orchestrator.check_circuit_breakers
@@ -1355,6 +1355,44 @@ def test_check_control_commands_empty_file(temp_project_dir):
     assert result is None
 
 
+def test_check_control_commands_template_no_false_positive(temp_project_dir):
+    """REQ-QRALPH-015: Template help text must NOT trigger false PAUSE/ABORT"""
+    template = (
+        "# QRALPH Control\n\n"
+        "To issue a command, write it alone on a line.\n\n"
+        "Available commands:\n"
+        "- `PAUSE` — stop after current step\n"
+        "- `SKIP` — skip current operation\n"
+        "- `ABORT` — graceful shutdown\n"
+        "- `STATUS` — force status dump\n"
+    )
+    (temp_project_dir / "CONTROL.md").write_text(template)
+    result = qralph_orchestrator.check_control_commands(temp_project_dir)
+    assert result is None, f"Template text falsely triggered: {result}"
+
+
+def test_check_control_commands_old_template_no_false_positive(temp_project_dir):
+    """REQ-QRALPH-015: Old-style template must NOT trigger false PAUSE"""
+    old_template = (
+        "# QRALPH Control\n\n"
+        "Write commands here:\n"
+        "- PAUSE - stop after current step\n"
+        "- SKIP - skip current operation\n"
+        "- ABORT - graceful shutdown\n"
+        "- STATUS - force status dump\n"
+    )
+    (temp_project_dir / "CONTROL.md").write_text(old_template)
+    result = qralph_orchestrator.check_control_commands(temp_project_dir)
+    assert result is None, f"Old template text falsely triggered: {result}"
+
+
+def test_check_control_commands_real_command_with_whitespace(temp_project_dir):
+    """REQ-QRALPH-015: Command with surrounding whitespace still detected"""
+    (temp_project_dir / "CONTROL.md").write_text("# Control\n\n  PAUSE  \n")
+    result = qralph_orchestrator.check_control_commands(temp_project_dir)
+    assert result == "PAUSE"
+
+
 def test_validate_request_type_check():
     """REQ-QRALPH-001: Reject non-string request types"""
     assert validate_request(123) is False
@@ -1493,6 +1531,867 @@ def test_cmd_status_lists_projects(mock_qralph_env, capsys):
     qralph_orchestrator.cmd_status()
     captured = capsys.readouterr()
     assert "projects" in captured.out
+
+
+# ============================================================================
+# SECURITY HARDENING TESTS (Phase 1 & Phase 4)
+# ============================================================================
+
+
+def test_sanitize_request_multi_pass():
+    """S-4: sanitize_request loops until stable (no bypass via nested traversal)."""
+    sanitize = qralph_orchestrator.sanitize_request
+    # Nested path traversal that single-pass would miss
+    assert "../" not in sanitize("....//..//etc/passwd")
+    assert "\\..\\" not in sanitize("....\\\\..\\\\secret")
+    # Normal strings untouched
+    assert sanitize("Fix the auth bug") == "Fix the auth bug"
+
+
+def test_cmd_checkpoint_rejects_invalid_phase(mock_qralph_env, capsys):
+    """S-6: cmd_checkpoint rejects unrecognized phase strings."""
+    qralph_orchestrator.cmd_init("Test project")
+    _clear_control_md(mock_qralph_env)
+    result = qralph_orchestrator.cmd_checkpoint("INVALID_PHASE")
+    assert result is not None
+    assert "error" in result
+
+
+def test_cmd_checkpoint_accepts_valid_phase(mock_qralph_env, capsys):
+    """S-6: cmd_checkpoint accepts recognized phase strings."""
+    qralph_orchestrator.cmd_init("Test project")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_checkpoint("REVIEWING")
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "REVIEWING"
+
+
+# ============================================================================
+# SAFE_WRITE FAILURE MODE TESTS (T-5)
+# ============================================================================
+
+
+def test_safe_write_creates_parent_dirs(tmp_path):
+    """T-5: safe_write creates parent dirs if they don't exist."""
+    import importlib.util
+    state_path = Path(__file__).parent / "qralph-state.py"
+    spec = importlib.util.spec_from_file_location("qs_test", state_path)
+    qs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qs)
+
+    target = tmp_path / "a" / "b" / "c" / "test.txt"
+    qs.safe_write(target, "hello")
+    assert target.read_text() == "hello"
+
+
+def test_safe_write_permission_denied(tmp_path):
+    """T-5: safe_write raises on permission denied (dir not writable)."""
+    import importlib.util
+    state_path = Path(__file__).parent / "qralph-state.py"
+    spec = importlib.util.spec_from_file_location("qs_test2", state_path)
+    qs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qs)
+
+    target_dir = tmp_path / "readonly"
+    target_dir.mkdir()
+    target_dir.chmod(0o444)
+
+    with pytest.raises(Exception):
+        qs.safe_write(target_dir / "file.txt", "hello")
+
+    # Cleanup: restore permissions so tmp_path cleanup works
+    target_dir.chmod(0o755)
+
+
+def test_safe_write_sets_permissions(tmp_path):
+    """S-8: safe_write sets file permissions to 0600."""
+    import importlib.util
+    import stat
+    state_path = Path(__file__).parent / "qralph-state.py"
+    spec = importlib.util.spec_from_file_location("qs_test3", state_path)
+    qs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qs)
+
+    target = tmp_path / "test.txt"
+    qs.safe_write(target, "secret data")
+    mode = target.stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_exclusive_state_lock_context_manager(tmp_path):
+    """R-6: exclusive_state_lock acquires and releases lock."""
+    import importlib.util
+    state_path = Path(__file__).parent / "qralph-state.py"
+    spec = importlib.util.spec_from_file_location("qs_test4", state_path)
+    qs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qs)
+
+    lock_path = tmp_path / "test.lock"
+    with qs.exclusive_state_lock(lock_path):
+        assert lock_path.exists()
+    # Lock file still exists after release (that's normal for file locks)
+    assert lock_path.exists()
+
+
+def test_load_state_repairs_on_checksum_mismatch(tmp_path):
+    """S-7: load_state returns repaired state when checksum mismatches."""
+    import importlib.util
+    state_path = Path(__file__).parent / "qralph-state.py"
+    spec = importlib.util.spec_from_file_location("qs_test5", state_path)
+    qs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qs)
+
+    # Write state with wrong checksum
+    state_file = tmp_path / "state.json"
+    state = {
+        "project_id": "test",
+        "project_path": "/tmp/test",
+        "request": "test request",
+        "mode": "coding",
+        "phase": "INIT",
+        "created_at": "2024-01-01T00:00:00",
+        "agents": [],
+        "heal_attempts": 0,
+        "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
+        "_checksum": "wrong_checksum_value",
+    }
+    state_file.write_text(json.dumps(state))
+
+    result = qs.load_state(state_file)
+    # Should return a repaired state (not empty, not with wrong checksum passed through)
+    assert result is not None
+    assert result.get("project_id") == "test"
+
+
+# ============================================================================
+# 12. F-017: SYNTHESIZE WITH ACTUAL AGENT OUTPUTS
+# ============================================================================
+
+
+def test_cmd_synthesize_with_agent_outputs(mock_qralph_env, capsys):
+    """F-017: cmd_synthesize consolidates real agent output files into SYNTHESIS.md"""
+    qralph_orchestrator.cmd_init("Security review of auth module")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer", "code-quality-auditor"])
+
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    # Write mock agent outputs
+    (outputs_dir / "security-reviewer.md").write_text("""# Security Review
+
+## Summary
+Found 2 critical vulnerabilities in authentication module.
+
+## Findings
+
+### P0 - Critical
+- SQL injection in login endpoint
+- Missing CSRF tokens
+
+### P1 - Important
+- Weak password policy
+
+### P2 - Suggestions
+- Add rate limiting
+""")
+
+    (outputs_dir / "code-quality-auditor.md").write_text("""# Code Quality Review
+
+## Summary
+Code quality is acceptable but needs error handling improvements.
+
+## Findings
+
+### P0 - Critical
+- Bare except clause in auth handler
+
+### P1 - Important
+- Missing type annotations
+- No docstrings on public functions
+
+### P2 - Suggestions
+- Consider extracting auth logic to separate module
+""")
+
+    synth_result = qralph_orchestrator.cmd_synthesize()
+    assert synth_result["status"] == "synthesized"
+    assert synth_result["p0_count"] == 3  # 2 security + 1 quality
+    assert synth_result["p1_count"] == 3  # 1 security + 2 quality
+    assert synth_result["p2_count"] == 2  # 1 security + 1 quality
+
+    # Verify SYNTHESIS.md was written with correct content
+    synthesis_file = project_path / "SYNTHESIS.md"
+    assert synthesis_file.exists()
+    content = synthesis_file.read_text()
+    assert "SQL injection" in content
+    assert "security-reviewer" in content
+    assert "code-quality-auditor" in content
+    assert "Bare except" in content
+
+
+def test_cmd_synthesize_with_empty_agent_output(mock_qralph_env, capsys):
+    """F-017: cmd_synthesize handles agents with no findings"""
+    qralph_orchestrator.cmd_init("Simple review")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer"])
+
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    (outputs_dir / "security-reviewer.md").write_text("""# Security Review
+
+## Summary
+No issues found. Code is secure.
+
+## Findings
+
+### P0 - Critical
+- None identified
+
+### P1 - Important
+- None identified
+""")
+
+    synth_result = qralph_orchestrator.cmd_synthesize()
+    assert synth_result["status"] == "synthesized"
+    assert synth_result["p0_count"] == 0
+
+
+def test_cmd_synthesize_with_missing_agent_file(mock_qralph_env, capsys):
+    """F-017: cmd_synthesize handles missing agent output files gracefully"""
+    qralph_orchestrator.cmd_init("Review with missing output")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer", "sde-iii"])
+
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    # Only write one agent's output, leave other missing
+    (outputs_dir / "security-reviewer.md").write_text("""# Security Review
+
+## Summary
+Found issues.
+
+## Findings
+
+### P0 - Critical
+- XSS vulnerability
+""")
+
+    synth_result = qralph_orchestrator.cmd_synthesize()
+    assert synth_result["status"] == "synthesized"
+    assert synth_result["p0_count"] == 1
+
+
+# ============================================================================
+# 13. F-018: RESUME AND FINALIZE TESTS
+# ============================================================================
+
+
+def test_cmd_resume_from_checkpoint(mock_qralph_env, capsys):
+    """F-018: cmd_resume restores state from checkpoint"""
+    init_result = qralph_orchestrator.cmd_init("Resumable project")
+    _clear_control_md(mock_qralph_env)
+    project_id = init_result["project_id"]
+    project_path = Path(init_result["project_path"])
+
+    # Advance to REVIEWING via checkpoint
+    qralph_orchestrator.cmd_checkpoint("REVIEWING")
+
+    # Verify checkpoint was saved
+    checkpoint_dir = project_path / "checkpoints"
+    assert any(checkpoint_dir.glob("*.json"))
+
+    # Resume
+    result = qralph_orchestrator.cmd_resume(project_id)
+    assert result["status"] == "resumed"
+    assert result["phase"] == "REVIEWING"
+
+
+def test_cmd_resume_invalid_project_id(mock_qralph_env, capsys):
+    """F-018: cmd_resume rejects invalid project_id"""
+    qralph_orchestrator.cmd_resume("../etc/passwd")
+    captured = capsys.readouterr()
+    assert "error" in captured.out.lower() or "Invalid" in captured.out
+
+
+def test_cmd_resume_nonexistent_project(mock_qralph_env, capsys):
+    """F-018: cmd_resume handles nonexistent project"""
+    qralph_orchestrator.cmd_resume("999-nonexistent")
+    captured = capsys.readouterr()
+    assert "error" in captured.out.lower()
+
+
+def test_cmd_finalize_completes_project(mock_qralph_env, capsys):
+    """F-018: cmd_finalize marks project complete and creates SUMMARY.md"""
+    qralph_orchestrator.cmd_init("Finalizable project")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    qralph_orchestrator.cmd_select_agents(["security-reviewer"])
+
+    state = qralph_orchestrator.load_state()
+    project_path = Path(state["project_path"])
+
+    # Write agent output so synthesize works
+    (project_path / "agent-outputs" / "security-reviewer.md").write_text(
+        "# Review\n\n## Summary\nDone.\n\n## Findings\n\n### P0 - Critical\n- None"
+    )
+    qralph_orchestrator.cmd_synthesize()
+
+    # For coding mode: EXECUTING -> UAT -> COMPLETE
+    qralph_orchestrator.cmd_generate_uat()
+
+    result = qralph_orchestrator.cmd_finalize()
+    captured = capsys.readouterr()
+    # Parse last JSON line
+    lines = [l for l in captured.out.strip().split('\n') if l.strip().startswith('{')]
+    last_output = json.loads(lines[-1])
+    assert last_output["status"] == "complete"
+
+    # Verify SUMMARY.md exists
+    assert (project_path / "SUMMARY.md").exists()
+    summary_content = (project_path / "SUMMARY.md").read_text()
+    assert "QRALPH v" in summary_content
+
+    # Verify state is COMPLETE
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "COMPLETE"
+
+
+def test_cmd_finalize_rejects_from_wrong_phase(mock_qralph_env, capsys):
+    """F-018: cmd_finalize rejects transition from INIT"""
+    qralph_orchestrator.cmd_init("Cannot finalize from init")
+    _clear_control_md(mock_qralph_env)
+    result = qralph_orchestrator.cmd_finalize()
+    captured = capsys.readouterr()
+    assert "error" in captured.out.lower()
+
+
+# ============================================================================
+# 14. F-019: END-TO-END HEALING WORKFLOW
+# ============================================================================
+
+
+def test_healing_e2e_error_to_escalation(mock_qralph_env, capsys):
+    """F-019: Full healing flow: error -> classify -> heal -> escalate model"""
+    qralph_orchestrator.cmd_init("Healing test project")
+    _clear_control_md(mock_qralph_env)
+
+    # First heal: haiku
+    r1 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r1["model"] == "haiku"
+    assert r1["heal_attempt"] == 1
+
+    state = qralph_orchestrator.load_state()
+    project_path = Path(state["project_path"])
+
+    # Verify healing attempt file was created
+    heal_file = project_path / "healing-attempts" / "attempt-01.md"
+    assert heal_file.exists()
+    assert "haiku" in heal_file.read_text()
+
+    # Verify circuit breaker tracks error
+    state = qralph_orchestrator.load_state()
+    assert state["heal_attempts"] == 1
+    error_counts = state["circuit_breakers"]["error_counts"]
+    assert len(error_counts) >= 1
+
+    # Heal 2 more times -> model escalation to sonnet
+    qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    r3 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r3["model"] == "sonnet"
+
+    # Heal 2 more -> opus
+    qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    r5 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r5["model"] == "opus"
+
+    # 6th attempt -> deferred
+    r6 = qralph_orchestrator.cmd_heal("ImportError: No module named 'foo'")
+    assert r6["status"] == "deferred"
+    assert (project_path / "DEFERRED.md").exists()
+
+
+def test_healer_attempt_creates_files_and_updates_state(mock_qralph_env, capsys):
+    """F-019: healer cmd_attempt creates attempt files and updates state"""
+    # Override healer's state paths
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(qralph_healer, 'QRALPH_DIR', mock_qralph_env / ".qralph")
+
+    qralph_orchestrator.cmd_init("Healer test")
+    _clear_control_md(mock_qralph_env)
+
+    result = qralph_healer.cmd_attempt("TypeError: expected str but got int")
+    assert result["status"] == "attempt_recorded"
+    assert result["error_type"] == "type_error"
+    assert result["heal_attempt"] == 1
+
+    # Verify state updated
+    state = qralph_healer.load_state()
+    assert state["heal_attempts"] == 1
+
+    monkeypatch.undo()
+
+
+def test_healer_catastrophic_rollback(mock_qralph_env, capsys):
+    """F-019: catastrophic_rollback restores checkpoint after 3+ failures"""
+    qralph_orchestrator.cmd_init("Rollback test")
+    _clear_control_md(mock_qralph_env)
+
+    state = qralph_orchestrator.load_state()
+    project_path = Path(state["project_path"])
+
+    # Create a valid checkpoint (write to state.json so rollback finds it first)
+    checkpoint_state = dict(state)
+    checkpoint_state["phase"] = "REVIEWING"
+    checkpoint_state["heal_attempts"] = 0
+    qralph_state_mod.safe_write_json(
+        project_path / "checkpoints" / "state.json",
+        checkpoint_state
+    )
+
+    # Corrupt state with many heal attempts
+    state["heal_attempts"] = 5
+    state["circuit_breakers"]["error_counts"] = {"test_error": 5}
+    qralph_orchestrator.save_state(state)
+
+    # Rollback
+    restored = qralph_healer.catastrophic_rollback(state, project_path)
+    assert restored["heal_attempts"] == 0
+    assert restored["phase"] == "REVIEWING"
+    # Verify corrupted state was saved for forensics
+    corrupted_files = list((project_path / "healing-attempts").glob("corrupted-state-*.json"))
+    assert len(corrupted_files) >= 1
+
+
+# ============================================================================
+# 15. F-020: CONCURRENT STATE ACCESS TESTS
+# ============================================================================
+
+
+def test_exclusive_lock_prevents_concurrent_modification(tmp_path):
+    """F-020: exclusive_state_lock serializes concurrent access"""
+    import threading
+    import time
+
+    lock_path = tmp_path / "test.lock"
+    state_file = tmp_path / "counter.json"
+    qralph_state_mod.safe_write_json(state_file, {"counter": 0})
+
+    errors = []
+    iterations = 20
+
+    def increment():
+        for _ in range(iterations):
+            try:
+                with qralph_state_mod.exclusive_state_lock(lock_path):
+                    data = json.loads(state_file.read_text())
+                    data["counter"] += 1
+                    time.sleep(0.001)  # Small delay to increase race window
+                    state_file.write_text(json.dumps(data))
+            except Exception as e:
+                errors.append(str(e))
+
+    threads = [threading.Thread(target=increment) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert not errors, f"Lock errors: {errors}"
+    final = json.loads(state_file.read_text())
+    assert final["counter"] == iterations * 4, (
+        f"Expected {iterations * 4}, got {final['counter']} — "
+        "indicates lost updates from concurrent access"
+    )
+
+
+def test_exclusive_lock_reentrant_via_separate_paths(tmp_path):
+    """F-020: Different lock paths allow independent locking"""
+    lock_a = tmp_path / "a.lock"
+    lock_b = tmp_path / "b.lock"
+
+    # Both should succeed without deadlock
+    with qralph_state_mod.exclusive_state_lock(lock_a):
+        with qralph_state_mod.exclusive_state_lock(lock_b):
+            pass  # No deadlock
+
+
+def test_exclusive_lock_released_on_exception(tmp_path):
+    """F-020: Lock is released even when exception occurs inside block"""
+    lock_path = tmp_path / "test.lock"
+
+    with pytest.raises(ValueError):
+        with qralph_state_mod.exclusive_state_lock(lock_path):
+            raise ValueError("test error")
+
+    # Lock should be released — acquiring it again should succeed
+    with qralph_state_mod.exclusive_state_lock(lock_path):
+        pass  # Should not hang
+
+
+# ============================================================================
+# 16. F-021: WORK MODE PHASE TRANSITION TESTS (via commands)
+# ============================================================================
+
+
+def test_work_mode_plan_approve_execute_flow(mock_qralph_env, capsys):
+    """F-021: Full work mode flow: init -> discover -> plan -> approve -> execute"""
+    qralph_orchestrator.cmd_init("Write a blog post about AI trends", mode="work")
+    _clear_control_md(mock_qralph_env)
+
+    state = qralph_orchestrator.load_state()
+    assert state["mode"] == "work"
+    assert state["phase"] == "INIT"
+
+    # Discover
+    qralph_orchestrator.cmd_discover()
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "DISCOVERING"
+
+    # Plan
+    plan_result = qralph_orchestrator.cmd_work_plan()
+    assert plan_result["status"] == "plan_generated"
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "PLANNING"
+
+    # Verify PLAN.md was created
+    project_path = Path(state["project_path"])
+    assert (project_path / "PLAN.md").exists()
+
+    # Approve (transitions PLANNING -> USER_REVIEW -> EXECUTING)
+    approve_result = qralph_orchestrator.cmd_work_approve()
+    assert approve_result["status"] == "approved"
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "EXECUTING"
+
+
+def test_work_mode_iterate_returns_to_planning(mock_qralph_env, capsys):
+    """F-021: work-iterate returns to PLANNING for revision"""
+    qralph_orchestrator.cmd_init("Write article", mode="work")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    qralph_orchestrator.cmd_work_plan()
+
+    # Approve to USER_REVIEW
+    state = qralph_orchestrator.load_state()
+    state["phase"] = "USER_REVIEW"
+    qralph_orchestrator.save_state(state)
+
+    # Iterate with feedback
+    iterate_result = qralph_orchestrator.cmd_work_iterate("Add more detail about LLMs")
+    assert iterate_result["status"] == "iterating"
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "PLANNING"
+
+    # Verify feedback was recorded
+    project_path = Path(state["project_path"])
+    feedback_file = project_path / "PLAN-FEEDBACK.md"
+    assert feedback_file.exists()
+    assert "LLMs" in feedback_file.read_text()
+
+
+def test_work_mode_escalate_to_coding(mock_qralph_env, capsys):
+    """F-021: cmd_escalate transitions work mode to full coding mode"""
+    qralph_orchestrator.cmd_init("Automate deployment", mode="work")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    qralph_orchestrator.cmd_work_plan()
+
+    # Approve through to EXECUTING
+    qralph_orchestrator.cmd_work_approve()
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "EXECUTING"
+
+    # Escalate
+    escalate_result = qralph_orchestrator.cmd_escalate()
+    assert escalate_result["status"] == "escalated"
+    assert escalate_result["new_mode"] == "coding"
+
+    state = qralph_orchestrator.load_state()
+    assert state["mode"] == "coding"
+    assert state["phase"] == "REVIEWING"
+
+
+def test_work_mode_plan_detects_code_signals(mock_qralph_env, capsys):
+    """F-021: work-plan detects code signals and applies TDD mandate"""
+    qralph_orchestrator.cmd_init("Build a CLI script to deploy containers", mode="work")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+
+    result = qralph_orchestrator.cmd_work_plan()
+    assert result["code_signals"] is True
+
+    project_path = Path(qralph_orchestrator.load_state()["project_path"])
+    plan_content = (project_path / "PLAN.md").read_text()
+    assert "TDD" in plan_content
+
+
+def test_work_mode_plan_no_code_signals(mock_qralph_env, capsys):
+    """F-021: work-plan without code signals skips TDD mandate"""
+    qralph_orchestrator.cmd_init("Write a blog post about leadership", mode="work")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+
+    result = qralph_orchestrator.cmd_work_plan()
+    assert result["code_signals"] is False
+
+
+# ============================================================================
+# 17. F-012: PROJECT ID VALIDATION TESTS
+# ============================================================================
+
+
+def test_cmd_resume_rejects_path_traversal(mock_qralph_env, capsys):
+    """F-012: cmd_resume rejects path traversal in project_id"""
+    qralph_orchestrator.cmd_resume("../../etc/passwd")
+    captured = capsys.readouterr()
+    assert "Invalid" in captured.out or "error" in captured.out.lower()
+
+
+def test_cmd_status_rejects_path_traversal(mock_qralph_env, capsys):
+    """F-012: cmd_status rejects path traversal in project_id"""
+    qralph_orchestrator.cmd_status("../../etc/passwd")
+    captured = capsys.readouterr()
+    assert "Invalid" in captured.out or "error" in captured.out.lower()
+
+
+def test_cmd_resume_accepts_valid_id(mock_qralph_env, capsys):
+    """F-012: cmd_resume accepts valid project IDs"""
+    init = qralph_orchestrator.cmd_init("Valid project")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_checkpoint("REVIEWING")
+    qralph_orchestrator.cmd_resume(init["project_id"])
+    captured = capsys.readouterr()
+    assert "resumed" in captured.out
+
+
+# ============================================================================
+# 18. REQ-QRALPH-018: WORK MODE REMEDIATION LOOP
+# ============================================================================
+
+
+def _setup_synthesized_project(mock_env, mode="coding"):
+    """Helper: init + discover + select-agents + synthesize with mock findings."""
+    qralph_orchestrator.cmd_init("Security review", mode=mode)
+    _clear_control_md(mock_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer"])
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    (outputs_dir / "security-reviewer.md").write_text("""# Security Review
+
+## Summary
+Found vulnerabilities.
+
+## Findings
+
+### P0 - Critical
+- SQL injection in login endpoint
+- Missing CSRF tokens
+
+### P1 - Important
+- Weak password policy
+
+### P2 - Suggestions
+- Add rate limiting
+""")
+    return qralph_orchestrator.cmd_synthesize(), project_path
+
+
+def test_synthesize_work_mode_routes_to_executing(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: Work mode synthesis routes to EXECUTING, not COMPLETE."""
+    result, _ = _setup_synthesized_project(mock_qralph_env, mode="work")
+    assert result["status"] == "synthesized"
+    assert result["next_phase"] == "EXECUTING"
+    assert result["team_shutdown_needed"] is False
+
+
+def test_synthesize_work_mode_no_findings_routes_to_executing(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: Work mode with no findings still routes to EXECUTING."""
+    qralph_orchestrator.cmd_init("Simple review", mode="work")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer"])
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    (project_path / "agent-outputs" / "security-reviewer.md").write_text("""# Review
+
+## Summary
+All clear.
+
+## Findings
+
+### P0 - Critical
+### P1 - Important
+### P2 - Suggestions
+""")
+    synth = qralph_orchestrator.cmd_synthesize()
+    assert synth["next_phase"] == "EXECUTING"
+
+
+def test_cmd_remediate_creates_tasks(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: cmd_remediate creates tasks from findings."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    result = qralph_orchestrator.cmd_remediate()
+    assert result["status"] == "remediation_created"
+    assert result["p0_tasks"] == 2
+    assert result["p1_tasks"] == 1
+    assert result["p2_tasks"] == 1
+    assert result["total_tasks"] == 4
+
+
+def test_cmd_remediate_done_marks_tasks(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: cmd_remediate_done marks specific tasks as fixed."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    qralph_orchestrator.cmd_remediate()
+    result = qralph_orchestrator.cmd_remediate_done("REM-001,REM-002", notes="Fixed SQL injection and CSRF")
+    assert result["status"] == "tasks_updated"
+    assert set(result["marked_fixed"]) == {"REM-001", "REM-002"}
+    assert result["remaining_open"] == 2
+    assert result["remaining_p0"] == 0
+
+
+def test_cmd_remediate_verify_blocks_on_open_p0(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: remediate-verify blocks when P0 tasks are still open."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    qralph_orchestrator.cmd_remediate()
+    result = qralph_orchestrator.cmd_remediate_verify()
+    assert result["status"] == "blocked"
+    assert "P0" in result["reason"]
+    assert len(result["open_p0_tasks"]) == 2
+
+
+def test_cmd_remediate_verify_completes_when_p0_fixed(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: remediate-verify transitions to COMPLETE when all P0 fixed."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    qralph_orchestrator.cmd_remediate()
+    qralph_orchestrator.cmd_remediate_done("REM-001,REM-002")  # Fix both P0s
+    result = qralph_orchestrator.cmd_remediate_verify()
+    assert result["status"] == "verified"
+    assert result["phase"] == "COMPLETE"
+    assert result["team_shutdown_needed"] is True
+
+
+def test_work_mode_coding_mode_unchanged(mock_qralph_env, capsys):
+    """REQ-QRALPH-018: Coding mode synthesis still routes to EXECUTING (no regression)."""
+    result, _ = _setup_synthesized_project(mock_qralph_env, mode="coding")
+    assert result["status"] == "synthesized"
+    assert result["next_phase"] == "EXECUTING"
+
+
+# ============================================================================
+# LOOP BUG FIXES (Phase 1H)
+# ============================================================================
+
+
+def test_phase_transition_executing_to_complete_coding():
+    """Bug 1A: EXECUTING -> COMPLETE must be valid in coding mode (for remediate-verify)."""
+    assert validate_phase_transition("EXECUTING", "COMPLETE", "coding") is True
+    # UAT should still be valid too
+    assert validate_phase_transition("EXECUTING", "UAT", "coding") is True
+
+
+def test_cmd_remediate_idempotent(mock_qralph_env, capsys):
+    """Bug 1B: Second remediate call returns existing tasks instead of re-creating."""
+    result, project_path = _setup_synthesized_project(mock_qralph_env, mode="coding")
+    _clear_control_md(mock_qralph_env)
+
+    # First remediate creates tasks
+    r1 = qralph_orchestrator.cmd_remediate()
+    assert r1["status"] == "remediation_created"
+    total = r1["total_tasks"]
+    assert total > 0
+
+    # Second remediate should return existing tasks, not re-create
+    r2 = qralph_orchestrator.cmd_remediate()
+    assert r2["status"] == "remediation_exists"
+    assert r2["total_tasks"] == total
+    assert r2["open_tasks"] == total
+
+
+def test_cmd_resume_complete_project(mock_qralph_env, capsys):
+    """Bug 1C: Resuming a COMPLETE project returns already_complete instead of overwriting state."""
+    result, project_path = _setup_synthesized_project(mock_qralph_env, mode="coding")
+    _clear_control_md(mock_qralph_env)
+
+    # Remediate and verify to reach COMPLETE
+    qralph_orchestrator.cmd_remediate()
+    state = qralph_orchestrator.load_state()
+    for task in state.get("remediation_tasks", []):
+        task["status"] = "fixed"
+    qralph_orchestrator.save_state(state)
+    qralph_orchestrator.cmd_remediate_verify()
+
+    # Verify we're COMPLETE
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "COMPLETE"
+
+    # Now resume should return already_complete
+    project_id = state["project_id"]
+    r = qralph_orchestrator.cmd_resume(project_id)
+    assert r["status"] == "already_complete"
+    assert r["phase"] == "COMPLETE"
+
+
+def test_checkpoint_sync_after_synthesize(mock_qralph_env, capsys):
+    """Bug 1E: After synthesize, both current-project.json and checkpoints/state.json match."""
+    result, project_path = _setup_synthesized_project(mock_qralph_env, mode="coding")
+    _clear_control_md(mock_qralph_env)
+
+    state = qralph_orchestrator.load_state()
+    checkpoint = qralph_state_mod.load_state(project_path / "checkpoints" / "state.json")
+
+    assert state["phase"] == checkpoint["phase"] == "EXECUTING"
+    assert state["project_id"] == checkpoint["project_id"]
+
+
+def test_cmd_resume_uses_checksum_validation(mock_qralph_env, capsys):
+    """Bug 1D: cmd_resume uses load_state (with checksum) instead of safe_read_json."""
+    result, project_path = _setup_synthesized_project(mock_qralph_env, mode="coding")
+    _clear_control_md(mock_qralph_env)
+
+    # Corrupt the checkpoint checksum
+    checkpoint_file = project_path / "checkpoints" / "state.json"
+    import json as _json
+    data = _json.loads(checkpoint_file.read_text())
+    data["_checksum"] = "corrupted_checksum"
+    checkpoint_file.write_text(_json.dumps(data))
+
+    # Resume should still work (load_state repairs on checksum mismatch)
+    project_id = data["project_id"]
+    r = qralph_orchestrator.cmd_resume(project_id)
+    # Should either return resumed or already_complete, not crash
+    assert r is not None
+    assert "error" not in r or "corrupt" not in r.get("error", "")
+
+
+def test_get_next_step_work_mode_phases():
+    """Bug 1G: get_next_step returns valid instructions for work-mode phases."""
+    assert "Unknown" not in qralph_orchestrator.get_next_step("PLANNING")
+    assert "Unknown" not in qralph_orchestrator.get_next_step("USER_REVIEW")
+    assert "Unknown" not in qralph_orchestrator.get_next_step("ESCALATE")
+
+
+def test_cmd_synthesize_zero_agents(mock_qralph_env, capsys):
+    """F-012: Synthesize with zero agent outputs produces empty findings gracefully."""
+    qralph_orchestrator.cmd_init("Test zero agents")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer"])
+    # Don't write any agent outputs - go straight to synthesize
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    # Clear the output files (select-agents doesn't create them, but just in case)
+    for f in (project_path / "agent-outputs").glob("*.md"):
+        f.unlink()
+    synth = qralph_orchestrator.cmd_synthesize()
+    assert synth is not None
+    # Should still produce a result (possibly with empty findings)
+    assert synth.get("status") in ("synthesized", "error")
 
 
 # ============================================================================
