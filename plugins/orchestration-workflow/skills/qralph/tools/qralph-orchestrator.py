@@ -51,8 +51,14 @@ safe_write = qralph_state.safe_write
 safe_write_json = qralph_state.safe_write_json
 safe_read_json = qralph_state.safe_read_json
 
+# Import process monitor module
+_pm_path = Path(__file__).parent / "process-monitor.py"
+_pm_spec = importlib.util.spec_from_file_location("process_monitor", _pm_path)
+process_monitor = importlib.util.module_from_spec(_pm_spec)
+_pm_spec.loader.exec_module(process_monitor)
+
 # Version
-VERSION = "4.1.2"
+VERSION = "4.1.3"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -170,6 +176,22 @@ SKILL_REGISTRY = {
     "research-workflow": {"domains": ["research"], "description": "Research specialist agents"},
     "orchestration-workflow": {"domains": ["architecture"], "description": "Multi-agent orchestration"},
 }
+
+
+def sweep_orphaned_processes() -> Optional[dict]:
+    """Run process monitor sweep to clean up orphaned processes from previous runs.
+
+    Returns sweep results dict, or None if sweep fails/unavailable.
+    """
+    try:
+        result = process_monitor.cmd_sweep(dry_run=False)
+        killed = result.get("killed", 0)
+        if killed > 0:
+            print(f"Process sweep: cleaned up {killed} orphaned process(es)", file=sys.stderr)
+        return result
+    except Exception as e:
+        print(f"Warning: Process sweep failed: {e}", file=sys.stderr)
+        return None
 
 
 def get_state_file() -> Path:
@@ -674,6 +696,9 @@ def check_version_update(state: dict) -> Optional[str]:
 
 def cmd_init(request: str, mode: str = "coding", execution_mode: str = "human", fix_level: str = "p0_p1"):
     """Initialize a new QRALPH project: create directory, state, and STATE.md."""
+    # Sweep orphaned processes from any previous run before starting fresh
+    sweep_orphaned_processes()
+
     request = sanitize_request(request)
     if not validate_request(request):
         return _error_result("Invalid request: must be non-empty string with at least 3 characters")
@@ -1557,6 +1582,9 @@ def _cmd_generate_uat_locked():
 
 def cmd_finalize():
     """Complete the project: generate SUMMARY.md, mark COMPLETE, notify."""
+    # Final sweep to clean up any lingering processes before shutdown
+    sweep_orphaned_processes()
+
     with qralph_state.exclusive_state_lock():
         return _cmd_finalize_locked()
 
@@ -2063,6 +2091,9 @@ def _cmd_remediate_verify_locked():
 
 def cmd_resume(project_id: str):
     """Resume a project from its last checkpoint and restore team config."""
+    # Sweep orphaned processes from the interrupted run before resuming
+    sweep_orphaned_processes()
+
     if not SAFE_PROJECT_ID.match(project_id):
         return _error_result(f"Invalid project_id: {project_id}")
     with qralph_state.exclusive_state_lock():

@@ -2608,6 +2608,40 @@ def test_repair_state_adds_fix_level_default():
 
 
 # ============================================================================
+# v4.1.3 — AUTOMATIC PROCESS SWEEP
+# ============================================================================
+
+
+def test_cmd_init_calls_sweep(mock_qralph_env, capsys):
+    """REQ-QRALPH-021: cmd_init sweeps orphaned processes before starting."""
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None) as mock_sweep:
+        qralph_orchestrator.cmd_init("Test sweep on init")
+        mock_sweep.assert_called_once()
+
+
+def test_cmd_resume_calls_sweep(mock_qralph_env, capsys):
+    """REQ-QRALPH-021: cmd_resume sweeps orphaned processes before resuming."""
+    result = qralph_orchestrator.cmd_init("Test sweep on resume")
+    project_id = result["project_id"]
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None) as mock_sweep:
+        qralph_orchestrator.cmd_resume(project_id)
+        mock_sweep.assert_called_once()
+
+
+def test_cmd_finalize_calls_sweep(mock_qralph_env, capsys):
+    """REQ-QRALPH-021: cmd_finalize sweeps orphaned processes before shutdown."""
+    _setup_synthesized_project(mock_qralph_env, mode="coding")
+    # Advance to a phase that can finalize
+    state = qralph_orchestrator.load_state()
+    state["phase"] = "UAT"
+    qralph_orchestrator.save_state(state)
+    _clear_control_md(mock_qralph_env)
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None) as mock_sweep:
+        qralph_orchestrator.cmd_finalize()
+        mock_sweep.assert_called_once()
+
+
+# ============================================================================
 # RUN TESTS
 # ============================================================================
 

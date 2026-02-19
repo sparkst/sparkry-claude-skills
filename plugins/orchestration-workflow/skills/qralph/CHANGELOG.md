@@ -1,5 +1,20 @@
 # QRALPH Changelog
 
+## v4.1.3 (2026-02-18)
+
+### Fixed — Automatic Process Cleanup
+- **Process sweep on init/resume/finalize**: `cmd_init`, `cmd_resume`, and `cmd_finalize` now automatically call `process_monitor.cmd_sweep()` to clean up orphaned processes from previous/crashed runs. Previously the process monitor existed but was never invoked automatically — users had to manually run `process-monitor.py sweep`.
+- **Safe import**: Process monitor is imported at module level; `sweep_orphaned_processes()` wrapper catches exceptions so a missing/broken process-monitor.py never blocks orchestration.
+- **SKILL.md Rule 9**: Added execution rule documenting automatic process cleanup.
+
+### Modified Files
+- `qralph-orchestrator.py` — Import process_monitor, `sweep_orphaned_processes()` helper, calls in `cmd_init`, `cmd_resume`, `cmd_finalize`, VERSION bump
+- `SKILL.md` — Execution Rule 9 (process cleanup), version bump
+- `test_qralph_orchestrator.py` — 3 new tests: sweep on init, sweep on resume, sweep on finalize
+
+### Test Results
+- 447 tests passing (444 existing + 3 new, 0 regressions)
+
 ## v4.1.2 (2026-02-18)
 
 ### New Features

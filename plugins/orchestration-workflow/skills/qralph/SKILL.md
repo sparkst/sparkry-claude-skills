@@ -29,6 +29,8 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
 
 8. **Respect fix_level.** The `--fix-level` flag (none|p0|p0_p1|all) controls which findings get remediated. Default is p0_p1.
 
+9. **Process cleanup is automatic.** The orchestrator sweeps orphaned processes on `init`, `resume`, and `finalize`. You do NOT need to run `process-monitor.py sweep` manually — it happens automatically. If you need to check process status mid-run, use `python3 .qralph/tools/process-monitor.py status`.
+
 ## Version Check
 
 On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.2 — see CHANGELOG.md for changes." Update `last_seen_version`.
