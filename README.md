@@ -44,7 +44,7 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 | Plugin | Command | Description |
 |--------|---------|-------------|
-| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH v4.1 hierarchical sub-teams with quality gates, fresh-context validation, session persistence |
+| **orchestration-workflow** | `/plugin install orchestration-workflow@sparkry-claude-skills` | QRALPH v4.1.2 hierarchical sub-teams with quality gates, fix-level control, fresh-context validation, session persistence |
 | **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
 | **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, Google Docs publishing |
@@ -62,9 +62,9 @@ Production-ready Claude Code plugins for TDD workflows, research orchestration, 
 
 ---
 
-## Featured: QRALPH v4.1 Hierarchical Sub-Team Orchestration
+## Featured: QRALPH v4.1.2 Hierarchical Sub-Team Orchestration
 
-QRALPH spawns 3-7 parallel specialist agents to review your requests before implementation. v4.1 adds hierarchical sub-teams, quality gates, fresh-context validation, and execution modes (`--auto`/`--human`). Built on v4.0's session persistence, long-term memory, process monitoring, and work mode.
+QRALPH spawns 3-7 parallel specialist agents to review your requests before implementation. v4.1.2 adds fix-level control (`--fix-level`), status findings summary, and mandatory execution rules. Built on v4.1's hierarchical sub-teams, quality gates, fresh-context validation, and execution modes (`--auto`/`--human`). Built on v4.0's session persistence, long-term memory, process monitoring, and work mode.
 
 ```bash
 # Install
@@ -86,7 +86,7 @@ QRALPH resume 001
 
 ## Plugin Details
 
-### 1. Orchestration Workflow (QRALPH v4.1)
+### 1. Orchestration Workflow (QRALPH v4.1.2)
 
 Hierarchical sub-team orchestration with quality gates, fresh-context validation, session persistence, and self-healing.
 
