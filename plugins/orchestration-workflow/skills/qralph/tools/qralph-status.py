@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
 QRALPH Status Monitor
 
@@ -14,12 +16,24 @@ Usage:
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+
+import importlib.util
+_state_path = Path(__file__).parent / "qralph-state.py"
+_state_spec = importlib.util.spec_from_file_location("qralph_state", _state_path)
+qralph_state = importlib.util.module_from_spec(_state_spec)
+_state_spec.loader.exec_module(qralph_state)
+
+_session_path = Path(__file__).parent / "session-state.py"
+_session_spec = importlib.util.spec_from_file_location("session_state", _session_path)
+session_state = importlib.util.module_from_spec(_session_spec)
+_session_spec.loader.exec_module(session_state)
+
+safe_read_json = qralph_state.safe_read_json
 
 
 # ANSI color codes
@@ -51,35 +65,19 @@ def get_qralph_root() -> Path:
 
 
 def load_current_project() -> Optional[Dict]:
-    """Load current project metadata"""
+    """Load current project metadata (with file locking)."""
     qralph_root = get_qralph_root()
     current_file = qralph_root / "current-project.json"
-
-    if not current_file.exists():
-        return None
-
-    try:
-        with open(current_file, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading current project: {e}", file=sys.stderr)
-        return None
+    result = safe_read_json(current_file, None)
+    return result if result else None
 
 
 def load_project_state(project_id: str) -> Optional[Dict]:
-    """Load project state from checkpoint"""
+    """Load project state from checkpoint (with file locking)."""
     qralph_root = get_qralph_root()
     state_file = qralph_root / "projects" / project_id / "checkpoints" / "state.json"
-
-    if not state_file.exists():
-        return None
-
-    try:
-        with open(state_file, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading project state: {e}", file=sys.stderr)
-        return None
+    result = safe_read_json(state_file, None)
+    return result if result else None
 
 
 def list_all_projects() -> List[str]:
@@ -112,16 +110,23 @@ def format_duration(start_time: str) -> str:
             return f"{minutes}m {seconds}s"
         else:
             return f"{seconds}s"
-    except:
+    except (ValueError, TypeError, OverflowError):
         return "unknown"
 
 
-def count_findings_by_priority(findings: List[Dict]) -> Dict[str, int]:
-    """Count findings by priority level"""
+def count_findings_by_priority(findings) -> Dict[str, int]:
+    """Count findings by priority level. Handles both list-of-dicts and dict-of-lists formats."""
     counts = {"P0": 0, "P1": 0, "P2": 0}
-    for finding in findings:
-        priority = finding.get("priority", "P2")
-        counts[priority] = counts.get(priority, 0) + 1
+    if isinstance(findings, dict):
+        # Synthesized format: {"P0": [...], "P1": [...], "P2": [...]}
+        for priority, items in findings.items():
+            if priority in counts and isinstance(items, list):
+                counts[priority] = len(items)
+    elif isinstance(findings, list):
+        for finding in findings:
+            if isinstance(finding, dict):
+                priority = finding.get("priority", "P2")
+                counts[priority] = counts.get(priority, 0) + 1
     return counts
 
 
@@ -135,7 +140,7 @@ def format_percentage(value: float, max_value: float) -> str:
 
 def get_phase_progress(phase: str) -> tuple:
     """Get phase progress (current, total)"""
-    phases = ["INIT", "PLANNING", "AGENT_SELECTION", "REVIEWING", "SYNTHESIS", "UAT", "COMPLETE"]
+    phases = session_state.QRALPH_PHASES
     if phase in phases:
         return (phases.index(phase) + 1, len(phases))
     return (0, len(phases))
@@ -264,8 +269,12 @@ def display_detailed_view(project_id: str):
         print(f"{Colors.BOLD}Agents:{Colors.RESET}")
         agent_line = []
         for agent in agents:
-            name = agent.get("name", "unknown")
-            icon = get_agent_status_icon(agent)
+            if isinstance(agent, dict):
+                name = agent.get("name", "unknown")
+                icon = get_agent_status_icon(agent)
+            else:
+                name = str(agent)
+                icon = get_agent_status_icon({})
             agent_line.append(f"[{icon}] {name}")
         print("  " + "  ".join(agent_line))
         print()
@@ -290,16 +299,15 @@ def display_detailed_view(project_id: str):
         print(f"{Colors.GREEN}Status: Project complete{Colors.RESET}")
     elif phase == "ERROR":
         print(f"{Colors.RED}Status: Project encountered errors{Colors.RESET}")
-    elif agents and any(a.get("status") == "running" for a in agents):
+    elif agents and any(isinstance(a, dict) and a.get("status") == "running" for a in agents):
         print(f"{Colors.YELLOW}Status: Agents running...{Colors.RESET}")
     else:
         print(f"{Colors.GRAY}Status: Waiting for agent outputs...{Colors.RESET}")
 
 
 def clear_screen():
-    """Clear terminal screen using subprocess (no shell injection risk)."""
-    cmd = "cls" if os.name == "nt" else "clear"
-    subprocess.run([cmd], check=False)
+    """Clear terminal screen using ANSI escape sequences (cross-platform, no subprocess)."""
+    print("\033[2J\033[H", end="", flush=True)
 
 
 def main():
@@ -324,7 +332,14 @@ Examples:
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="Watch mode: refresh every 5 seconds"
+        help="Watch mode: auto-refresh (default 2s, override with --interval)"
+    )
+
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=float(os.environ.get("QRALPH_STATUS_INTERVAL", "2")),
+        help="Watch refresh interval in seconds (default: 2, env: QRALPH_STATUS_INTERVAL)"
     )
 
     parser.add_argument(
@@ -349,8 +364,8 @@ Examples:
                 else:
                     display_list_view()
 
-                print(f"\n{Colors.GRAY}Refreshing every 5s... (Ctrl+C to exit){Colors.RESET}")
-                time.sleep(5)
+                print(f"\n{Colors.GRAY}Refreshing every {args.interval}s... (Ctrl+C to exit){Colors.RESET}")
+                time.sleep(args.interval)
         else:
             # Single display
             if args.project_id:
@@ -361,10 +376,12 @@ Examples:
     except KeyboardInterrupt:
         print(f"\n{Colors.GRAY}Exiting...{Colors.RESET}")
         sys.exit(0)
-    except Exception as e:
+    except (json.JSONDecodeError, FileNotFoundError, PermissionError, OSError) as e:
         print(f"{Colors.RED}Error:{Colors.RESET} {e}", file=sys.stderr)
         sys.exit(1)
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 6):
+        sys.exit("QRALPH requires Python 3.6+")
     main()

@@ -1,6 +1,6 @@
 {
   "name": "orchestration-workflow",
-  "version": "4.1.3",
+  "version": "4.1.4",
   "description": "Hierarchical sub-team orchestration with quality gates, fix-level control, fresh-context validation, session persistence, self-healing, and process monitoring (QRALPH)",
   "author": {
     "name": "Sparkry.ai",

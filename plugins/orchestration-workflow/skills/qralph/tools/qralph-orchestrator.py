@@ -58,7 +58,7 @@ process_monitor = importlib.util.module_from_spec(_pm_spec)
 _pm_spec.loader.exec_module(process_monitor)
 
 # Version
-VERSION = "4.1.3"
+VERSION = "4.1.4"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -1597,6 +1597,22 @@ def _cmd_finalize_locked():
 
     project_path = Path(state["project_path"])
 
+    # Gate: block finalize if remediation tasks exist and are incomplete
+    tasks = state.get("remediation_tasks", [])
+    if tasks:
+        fix_level = state.get("fix_level", "p0_p1")
+        active_priorities = LEVEL_PRIORITIES.get(fix_level, ["P0", "P1"])
+        open_blocking = [t for t in tasks if t.get("priority") in active_priorities and t.get("status") == "open"]
+        if open_blocking:
+            ids = [t["id"] for t in open_blocking[:10]]
+            suffix = f" (and {len(open_blocking) - 10} more)" if len(open_blocking) > 10 else ""
+            log_decision(project_path, f"Finalize blocked: {len(open_blocking)} remediation tasks open at fix_level={fix_level}")
+            return _error_result(
+                f"Cannot finalize: {len(open_blocking)} remediation tasks still open at fix_level={fix_level}. "
+                f"Open tasks: {', '.join(ids)}{suffix}. "
+                f"Fix them and run remediate-verify, or change fix_level."
+            )
+
     # Evidence quality data
     eqs = state.get("evidence_quality", {})
     eqs_score = eqs.get("eqs", "N/A")
@@ -2158,6 +2174,25 @@ def _cmd_resume_locked(project_id: str):
         "next_step": get_next_step(state["phase"]),
         "execution_mode": state.get("execution_mode", "human"),
     }
+
+    # Include remediation progress so the LLM knows what's left
+    rem_tasks = state.get("remediation_tasks", [])
+    if rem_tasks:
+        fix_level = state.get("fix_level", "p0_p1")
+        active_priorities = LEVEL_PRIORITIES.get(fix_level, ["P0", "P1"])
+        open_blocking = [t for t in rem_tasks if t.get("priority") in active_priorities and t.get("status") == "open"]
+        output["remediation_progress"] = {
+            "total": len(rem_tasks),
+            "fixed": len([t for t in rem_tasks if t.get("status") == "fixed"]),
+            "open_at_fix_level": len(open_blocking),
+            "fix_level": fix_level,
+        }
+        if open_blocking:
+            output["remediation_progress"]["blocking_ids"] = [t["id"] for t in open_blocking[:20]]
+            output["remediation_progress"]["warning"] = (
+                f"{len(open_blocking)} tasks must be fixed before finalize. "
+                "Continue remediation, then run remediate-verify."
+            )
 
     if version_update:
         output["version_update"] = version_update

@@ -1,4 +1,4 @@
-# QRALPH v4.1.2 - Hierarchical Team Orchestration Skill
+# QRALPH v4.1.4 - Hierarchical Team Orchestration Skill
 
 > Sr. SDM orchestrator with hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. Builds on v4.0's native teams, plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
 
@@ -31,9 +31,13 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
 
 9. **Process cleanup is automatic.** The orchestrator sweeps orphaned processes on `init`, `resume`, and `finalize`. You do NOT need to run `process-monitor.py sweep` manually — it happens automatically. If you need to check process status mid-run, use `python3 .qralph/tools/process-monitor.py status`.
 
+10. **EXECUTING phase MUST complete before finalize.** During EXECUTING: run `remediate` to create tasks, fix all tasks within `fix_level`, then run `remediate-verify`. You MUST NOT call `finalize` until `remediate-verify` returns `"status": "verified"`. The orchestrator will reject `finalize` if remediation tasks are still open at the active fix_level. If you cannot fix a task, explain why and ask the user — do NOT skip it silently.
+
+11. **Session boundary discipline.** If you detect context compression, are running low on turns, or the user interrupts, immediately checkpoint via `python3 .qralph/tools/session-state.py save` and tell the user: "EXECUTING incomplete — N tasks remain. Resume with `/qralph resume <project-id>`." On resume, the orchestrator includes `remediation_progress` showing exactly which tasks are still open — continue from where you left off.
+
 ## Version Check
 
-On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.2 — see CHANGELOG.md for changes." Update `last_seen_version`.
+On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.4 — see CHANGELOG.md for changes." Update `last_seen_version`.
 
 ## Tools
 

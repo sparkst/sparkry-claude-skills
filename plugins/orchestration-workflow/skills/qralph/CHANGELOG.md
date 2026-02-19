@@ -1,5 +1,23 @@
 # QRALPH Changelog
 
+## v4.1.4 (2026-02-18)
+
+### Fixed — Finalize Remediation Gate
+
+- **Finalize blocks on open remediation tasks**: `cmd_finalize` now checks for open remediation tasks at the active `fix_level` before allowing transition to COMPLETE. Previously, `finalize` would happily mark a project complete even with dozens of unfixed P0/P1 tasks — the LLM could skip execution entirely after planning. Now the orchestrator enforces completion.
+- **Resume includes remediation progress**: `cmd_resume` output now includes a `remediation_progress` object showing total/fixed/open task counts, blocking IDs, and a warning message. This ensures resumed sessions know exactly where to pick up.
+- **SKILL.md Rules 10-11**: Added mandatory execution rules:
+  - Rule 10: EXECUTING must complete before finalize — `remediate-verify` must return `"verified"` first
+  - Rule 11: Session boundary discipline — checkpoint and inform user when interrupted mid-execution
+
+### Modified Files
+- `qralph-orchestrator.py` — Remediation gate in `_cmd_finalize_locked`, remediation progress in `_cmd_resume_locked`, VERSION bump
+- `SKILL.md` — Execution Rules 10-11, version bumps
+- `test_qralph_orchestrator.py` — 4 new tests: finalize blocks on open tasks, finalize allows lower-priority open, finalize succeeds with no tasks, resume includes progress
+
+### Test Results
+- 416 tests passing (211 orchestrator + 205 other, 0 regressions)
+
 ## v4.1.3 (2026-02-18)
 
 ### Fixed — Automatic Process Cleanup

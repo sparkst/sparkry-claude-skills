@@ -2642,6 +2642,108 @@ def test_cmd_finalize_calls_sweep(mock_qralph_env, capsys):
 
 
 # ============================================================================
+# REQ-QRALPH-022: FINALIZE REMEDIATION GATE
+# ============================================================================
+
+
+def test_cmd_finalize_blocks_on_open_remediation_tasks(mock_qralph_env, capsys):
+    """REQ-QRALPH-022: finalize rejects when remediation tasks are open at fix_level."""
+    _setup_synthesized_project(mock_qralph_env, mode="coding")
+    state = qralph_orchestrator.load_state()
+    state["phase"] = "EXECUTING"
+    state["fix_level"] = "p0_p1"
+    state["remediation_tasks"] = [
+        {"id": "REM-001", "priority": "P0", "status": "fixed", "finding": {"agent": "a", "finding": "f1"}},
+        {"id": "REM-002", "priority": "P1", "status": "open", "finding": {"agent": "a", "finding": "f2"}},
+        {"id": "REM-003", "priority": "P2", "status": "open", "finding": {"agent": "a", "finding": "f3"}},
+    ]
+    qralph_orchestrator.save_state(state)
+    _clear_control_md(mock_qralph_env)
+
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None):
+        result = qralph_orchestrator.cmd_finalize()
+    captured = capsys.readouterr()
+    assert "error" in captured.out.lower()
+    assert "REM-002" in captured.out
+
+    # Verify state is still EXECUTING (not COMPLETE)
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "EXECUTING"
+
+
+def test_cmd_finalize_allows_open_p2_when_fix_level_p0_p1(mock_qralph_env, capsys):
+    """REQ-QRALPH-022: finalize succeeds when only lower-priority tasks are open."""
+    _setup_synthesized_project(mock_qralph_env, mode="coding")
+    state = qralph_orchestrator.load_state()
+    state["phase"] = "EXECUTING"
+    state["fix_level"] = "p0_p1"
+    state["remediation_tasks"] = [
+        {"id": "REM-001", "priority": "P0", "status": "fixed", "finding": {"agent": "a", "finding": "f1"}},
+        {"id": "REM-002", "priority": "P1", "status": "fixed", "finding": {"agent": "a", "finding": "f2"}},
+        {"id": "REM-003", "priority": "P2", "status": "open", "finding": {"agent": "a", "finding": "f3"}},
+    ]
+    qralph_orchestrator.save_state(state)
+    _clear_control_md(mock_qralph_env)
+
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None):
+        result = qralph_orchestrator.cmd_finalize()
+    captured = capsys.readouterr()
+    lines = [l for l in captured.out.strip().split('\n') if l.strip().startswith('{')]
+    last_output = json.loads(lines[-1])
+    assert last_output["status"] == "complete"
+
+    state = qralph_orchestrator.load_state()
+    assert state["phase"] == "COMPLETE"
+
+
+def test_cmd_finalize_no_remediation_tasks_succeeds(mock_qralph_env, capsys):
+    """REQ-QRALPH-022: finalize succeeds when there are no remediation tasks at all."""
+    _setup_synthesized_project(mock_qralph_env, mode="coding")
+    state = qralph_orchestrator.load_state()
+    state["phase"] = "UAT"
+    qralph_orchestrator.save_state(state)
+    _clear_control_md(mock_qralph_env)
+
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None):
+        result = qralph_orchestrator.cmd_finalize()
+    captured = capsys.readouterr()
+    lines = [l for l in captured.out.strip().split('\n') if l.strip().startswith('{')]
+    last_output = json.loads(lines[-1])
+    assert last_output["status"] == "complete"
+
+
+def test_cmd_resume_includes_remediation_progress(mock_qralph_env, capsys):
+    """REQ-QRALPH-022: resume output includes remediation_progress when tasks exist."""
+    _setup_synthesized_project(mock_qralph_env, mode="coding")
+    state = qralph_orchestrator.load_state()
+    state["phase"] = "EXECUTING"
+    state["fix_level"] = "p0_p1"
+    state["remediation_tasks"] = [
+        {"id": "REM-001", "priority": "P0", "status": "fixed", "finding": {"agent": "a", "finding": "f1"}},
+        {"id": "REM-002", "priority": "P1", "status": "open", "finding": {"agent": "a", "finding": "f2"}},
+        {"id": "REM-003", "priority": "P1", "status": "open", "finding": {"agent": "a", "finding": "f3"}},
+    ]
+    qralph_orchestrator.save_state(state)
+    project_id = state["project_id"]
+
+    # Save checkpoint so resume can find it
+    project_path = Path(state["project_path"])
+    qralph_orchestrator.save_state_and_checkpoint(state)
+    _clear_control_md(mock_qralph_env)
+
+    with patch.object(qralph_orchestrator, 'sweep_orphaned_processes', return_value=None):
+        result = qralph_orchestrator.cmd_resume(project_id)
+
+    assert "remediation_progress" in result
+    progress = result["remediation_progress"]
+    assert progress["total"] == 3
+    assert progress["fixed"] == 1
+    assert progress["open_at_fix_level"] == 2
+    assert "warning" in progress
+    assert "REM-002" in progress["blocking_ids"]
+
+
+# ============================================================================
 # RUN TESTS
 # ============================================================================
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Travis Sparks
 """
 QRALPH Healer v1.0 - Self-healing coordinator for error analysis and recovery.
 
@@ -8,6 +10,7 @@ rollback capabilities for QRALPH multi-agent workflows.
 Commands:
     python3 qralph-healer.py analyze "<error>"       # Analyze error and suggest fix
     python3 qralph-healer.py attempt "<error>"       # Record healing attempt
+    python3 qralph-healer.py record-outcome "<error>" --success/--failure  # Record fix outcome
     python3 qralph-healer.py rollback                # Rollback to last checkpoint
     python3 qralph-healer.py history                 # Show healing history
     python3 qralph-healer.py clear                   # Clear error counts
@@ -47,6 +50,27 @@ _state_spec.loader.exec_module(qralph_state)
 
 safe_write = qralph_state.safe_write
 safe_write_json = qralph_state.safe_write_json
+
+import os
+
+def _safe_log_append(log_file: Path, message: str):
+    """Append to log file with symlink check and file locking."""
+    try:
+        if os.path.islink(str(log_file)):
+            print(f"Warning: Refusing to write to symlink: {log_file}", file=sys.stderr)
+            return
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(log_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            qralph_state._lock_file(f, exclusive=True)
+            try:
+                sanitized_msg = re.sub(r'[\x00-\x1f\x7f]', ' ', message)
+                f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {sanitized_msg}\n")
+                f.flush()
+            finally:
+                qralph_state._unlock_file(f)
+    except Exception as e:
+        print(f"Warning: Failed to log: {e}", file=sys.stderr)
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -246,7 +270,10 @@ def match_healing_pattern(error_message: str, project_path: Path) -> Optional[Di
     or None if this is a novel error.
     """
     signature = _error_signature(error_message)
-    patterns_db = _load_healing_patterns(project_path)
+    # Read patterns under lock to prevent reading partially-written JSON
+    lock_path = project_path / "healing-attempts" / "patterns.lock"
+    with qralph_state.exclusive_state_lock(lock_path):
+        patterns_db = _load_healing_patterns(project_path)
 
     for pattern in patterns_db.get("patterns", []):
         if pattern.get("error_signature") == signature:
@@ -266,6 +293,14 @@ def record_healing_outcome(error_message: str, fix_description: str, result: str
         result: "success" or "failed"
         project_path: Project directory
     """
+    lock_path = project_path / "healing-attempts" / "patterns.lock"
+    with qralph_state.exclusive_state_lock(lock_path):
+        _record_healing_outcome_locked(error_message, fix_description, result, project_path)
+
+
+def _record_healing_outcome_locked(error_message: str, fix_description: str, result: str,
+                                   project_path: Path):
+    """Inner record logic, called under exclusive lock."""
     signature = _error_signature(error_message)
     error_analysis = classify_error(error_message)
     patterns_db = _load_healing_patterns(project_path)
@@ -382,12 +417,12 @@ def catastrophic_rollback(state: dict, project_path: Path) -> dict:
 
                 # Log
                 log_file = project_path / "decisions.log"
-                with open(log_file, "a") as f:
-                    f.write(f"[{datetime.now().strftime('%H:%M:%S')}] CATASTROPHIC ROLLBACK: "
-                            f"Restored from {checkpoint_file.name}, corrupted state saved to {corrupted_file.name}\n")
+                _safe_log_append(log_file,
+                    f"CATASTROPHIC ROLLBACK: Restored from {checkpoint_file.name}, "
+                    f"corrupted state saved to {corrupted_file.name}")
 
                 return checkpoint_state
-        except (json.JSONDecodeError, Exception):
+        except (json.JSONDecodeError, ValueError, KeyError, OSError):
             continue
 
     return state
@@ -643,6 +678,12 @@ def cmd_attempt(error_message: str):
         print(json.dumps(output, indent=2))
         return output
 
+    with qralph_state.exclusive_state_lock():
+        return _cmd_attempt_locked(error_message)
+
+
+def _cmd_attempt_locked(error_message: str):
+    """Inner attempt logic, called under exclusive lock."""
     state = load_state()
     if not state:
         output = {"error": "No active project. Run qralph-orchestrator.py init first."}
@@ -775,10 +816,10 @@ Pending execution by {model} model.
 
     # Log to decisions
     log_file = project_path / "decisions.log"
-    with open(log_file, "a") as f:
-        f.write(f"[{datetime.now().strftime('%H:%M:%S')}] Healing attempt {heal_attempts} recorded: {error_analysis['error_type']}\n")
+    _safe_log_append(log_file, f"Healing attempt {heal_attempts} recorded: {error_analysis['error_type']}")
 
     # Build output
+    max_attempts = 5
     output = {
         "status": "attempt_recorded",
         "heal_attempt": heal_attempts,
@@ -790,12 +831,24 @@ Pending execution by {model} model.
         "instruction": f"Execute healing using {model} model. Prompt saved to {attempt_file}",
     }
 
+    if heal_attempts == max_attempts - 1:
+        output["warning"] = (
+            f"Penultimate healing attempt ({heal_attempts}/{max_attempts}). "
+            f"Next failure will defer to manual intervention."
+        )
+
     print(json.dumps(output, indent=2))
     return output
 
 
 def cmd_rollback():
     """Rollback to last checkpoint."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_rollback_locked()
+
+
+def _cmd_rollback_locked():
+    """Inner rollback logic, called under exclusive lock."""
     state = load_state()
     if not state:
         output = {"error": "No active project"}
@@ -831,8 +884,7 @@ def cmd_rollback():
 
         # Log rollback
         log_file = project_path / "decisions.log"
-        with open(log_file, "a") as f:
-            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] Rolled back to checkpoint: {latest_checkpoint.name}\n")
+        _safe_log_append(log_file, f"Rolled back to checkpoint: {latest_checkpoint.name}")
 
         output = {
             "status": "rolled_back",
@@ -913,6 +965,12 @@ def cmd_history():
 
 def cmd_clear():
     """Clear error counts (reset circuit breaker)."""
+    with qralph_state.exclusive_state_lock():
+        return _cmd_clear_locked()
+
+
+def _cmd_clear_locked():
+    """Inner clear logic, called under exclusive lock."""
     state = load_state()
     if not state:
         output = {"error": "No active project"}
@@ -931,8 +989,7 @@ def cmd_clear():
     project_path = Path(state.get("project_path", ""))
     if project_path.exists():
         log_file = project_path / "decisions.log"
-        with open(log_file, "a") as f:
-            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] Error counts cleared - circuit breaker reset\n")
+        _safe_log_append(log_file, "Error counts cleared - circuit breaker reset")
 
     output = {
         "status": "cleared",
@@ -1062,4 +1119,6 @@ Examples:
 
 
 if __name__ == "__main__":
+    if sys.version_info < (3, 6):
+        sys.exit("QRALPH requires Python 3.6+")
     main()
