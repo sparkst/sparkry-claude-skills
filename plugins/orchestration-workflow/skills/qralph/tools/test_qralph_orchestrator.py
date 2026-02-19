@@ -2237,14 +2237,14 @@ All clear.
 
 
 def test_cmd_remediate_creates_tasks(mock_qralph_env, capsys):
-    """REQ-QRALPH-018: cmd_remediate creates tasks from findings."""
+    """REQ-QRALPH-018: cmd_remediate creates tasks from findings (default fix_level=p0_p1)."""
     _setup_synthesized_project(mock_qralph_env, mode="work")
     result = qralph_orchestrator.cmd_remediate()
     assert result["status"] == "remediation_created"
     assert result["p0_tasks"] == 2
     assert result["p1_tasks"] == 1
-    assert result["p2_tasks"] == 1
-    assert result["total_tasks"] == 4
+    assert result["p2_tasks"] == 0  # P2 excluded by default fix_level=p0_p1
+    assert result["total_tasks"] == 3
 
 
 def test_cmd_remediate_done_marks_tasks(mock_qralph_env, capsys):
@@ -2254,25 +2254,25 @@ def test_cmd_remediate_done_marks_tasks(mock_qralph_env, capsys):
     result = qralph_orchestrator.cmd_remediate_done("REM-001,REM-002", notes="Fixed SQL injection and CSRF")
     assert result["status"] == "tasks_updated"
     assert set(result["marked_fixed"]) == {"REM-001", "REM-002"}
-    assert result["remaining_open"] == 2
+    assert result["remaining_open"] == 1  # 1 P1 task still open
     assert result["remaining_p0"] == 0
 
 
 def test_cmd_remediate_verify_blocks_on_open_p0(mock_qralph_env, capsys):
-    """REQ-QRALPH-018: remediate-verify blocks when P0 tasks are still open."""
+    """REQ-QRALPH-018: remediate-verify blocks when active-priority tasks are still open."""
     _setup_synthesized_project(mock_qralph_env, mode="work")
     qralph_orchestrator.cmd_remediate()
     result = qralph_orchestrator.cmd_remediate_verify()
     assert result["status"] == "blocked"
-    assert "P0" in result["reason"]
-    assert len(result["open_p0_tasks"]) == 2
+    assert "fix_level=" in result["reason"]
+    assert len(result["open_blocking_tasks"]) >= 2
 
 
 def test_cmd_remediate_verify_completes_when_p0_fixed(mock_qralph_env, capsys):
-    """REQ-QRALPH-018: remediate-verify transitions to COMPLETE when all P0 fixed."""
+    """REQ-QRALPH-018: remediate-verify transitions to COMPLETE when all active-priority tasks fixed."""
     _setup_synthesized_project(mock_qralph_env, mode="work")
     qralph_orchestrator.cmd_remediate()
-    qralph_orchestrator.cmd_remediate_done("REM-001,REM-002")  # Fix both P0s
+    qralph_orchestrator.cmd_remediate_done("REM-001,REM-002,REM-003")  # Fix P0s and P1
     result = qralph_orchestrator.cmd_remediate_verify()
     assert result["status"] == "verified"
     assert result["phase"] == "COMPLETE"
@@ -2484,6 +2484,127 @@ def test_prompt_contains_write_tool_instruction(mock_qralph_env):
     skills_pos = prompt.find("Optional Skills")
     if skills_pos > 0:
         assert skills_pos > workflow_pos, "Skills must come after Workflow"
+
+
+# ============================================================================
+# v4.1.2 — FIX LEVEL, STATUS FINDINGS, SKILL.MD ENFORCEMENT
+# ============================================================================
+
+
+def test_cmd_init_stores_fix_level(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: cmd_init stores fix_level in state."""
+    result = qralph_orchestrator.cmd_init("Security review", fix_level="p0")
+    assert result["status"] == "initialized"
+    state = qralph_orchestrator.load_state()
+    assert state["fix_level"] == "p0"
+
+
+def test_cmd_init_default_fix_level(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: cmd_init defaults fix_level to p0_p1."""
+    result = qralph_orchestrator.cmd_init("Security review")
+    state = qralph_orchestrator.load_state()
+    assert state["fix_level"] == "p0_p1"
+
+
+def test_cmd_init_rejects_invalid_fix_level(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: cmd_init rejects invalid fix_level."""
+    result = qralph_orchestrator.cmd_init("Security review", fix_level="invalid")
+    assert result["status"] == "error"
+    assert "fix_level" in result["error"]
+
+
+def test_cmd_remediate_fix_level_p0_only(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: fix_level=p0 only creates P0 tasks."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    # Override fix_level in state
+    state = qralph_orchestrator.load_state()
+    state["fix_level"] = "p0"
+    qralph_orchestrator.save_state(state)
+    result = qralph_orchestrator.cmd_remediate()
+    assert result["status"] == "remediation_created"
+    assert result["p0_tasks"] == 2
+    assert result["p1_tasks"] == 0
+    assert result["p2_tasks"] == 0
+
+
+def test_cmd_remediate_fix_level_none_skips(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: fix_level=none skips remediation entirely."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    state = qralph_orchestrator.load_state()
+    state["fix_level"] = "none"
+    qralph_orchestrator.save_state(state)
+    result = qralph_orchestrator.cmd_remediate()
+    assert result["status"] == "remediation_skipped"
+    assert result["fix_level"] == "none"
+
+
+def test_cmd_remediate_fix_level_all(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: fix_level=all creates tasks for P0+P1+P2."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    state = qralph_orchestrator.load_state()
+    state["fix_level"] = "all"
+    qralph_orchestrator.save_state(state)
+    result = qralph_orchestrator.cmd_remediate()
+    assert result["status"] == "remediation_created"
+    assert result["p0_tasks"] == 2
+    assert result["p1_tasks"] == 1
+    assert result["p2_tasks"] == 1
+    assert result["total_tasks"] == 4
+
+
+def test_cmd_remediate_verify_respects_fix_level_all(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: remediate-verify with fix_level=all blocks on open P2 tasks."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    state = qralph_orchestrator.load_state()
+    state["fix_level"] = "all"
+    qralph_orchestrator.save_state(state)
+    qralph_orchestrator.cmd_remediate()
+    # Fix P0s but leave P1/P2 open
+    qralph_orchestrator.cmd_remediate_done("REM-001,REM-002")
+    result = qralph_orchestrator.cmd_remediate_verify()
+    assert result["status"] == "blocked"
+    assert "fix_level=all" in result["reason"]
+
+
+def test_cmd_remediate_verify_fix_level_p0_ignores_p1(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: remediate-verify with fix_level=p0 passes when P0s fixed, P1 open."""
+    _setup_synthesized_project(mock_qralph_env, mode="work")
+    state = qralph_orchestrator.load_state()
+    state["fix_level"] = "p0"
+    qralph_orchestrator.save_state(state)
+    qralph_orchestrator.cmd_remediate()
+    # fix_level=p0 only created P0 tasks, fix them
+    result_done = qralph_orchestrator.cmd_remediate_done("REM-001,REM-002")
+    result = qralph_orchestrator.cmd_remediate_verify()
+    assert result["status"] == "verified"
+    assert result["phase"] == "COMPLETE"
+
+
+def test_cmd_status_includes_findings_summary(mock_qralph_env, capsys):
+    """REQ-QRALPH-020: cmd_status includes _status_summary with findings counts."""
+    result, project_path = _setup_synthesized_project(mock_qralph_env, mode="coding")
+    project_id = result["project_id"]
+    prefix = project_id.split("-")[0]
+    # Clear captured output from setup, then call status
+    capsys.readouterr()
+    qralph_orchestrator.cmd_status(prefix)
+    captured = capsys.readouterr()
+    status_output = json.loads(captured.out)
+    assert "_status_summary" in status_output
+    summary = status_output["_status_summary"]
+    assert "findings" in summary
+    assert summary["findings"]["p0"] >= 0
+    assert summary["findings"]["p1"] >= 0
+    assert summary["findings"]["p2"] >= 0
+    assert "eqs" in summary
+    assert "remediation" in summary
+    assert "fix_level" in summary
+
+
+def test_repair_state_adds_fix_level_default():
+    """REQ-QRALPH-020: repair_state adds fix_level default when missing."""
+    repaired = qralph_state_mod.repair_state({"project_id": "test"})
+    assert repaired["fix_level"] == "p0_p1"
 
 
 # ============================================================================

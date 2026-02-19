@@ -1,5 +1,21 @@
 # QRALPH Changelog
 
+## v4.1.2 (2026-02-18)
+
+### New Features
+- **`--fix-level` flag**: Control which findings get remediated: `none` (skip fixes), `p0` (critical only), `p0_p1` (default), `all` (P0+P1+P2). Stored in state, enforced by `cmd_remediate` and `cmd_remediate_verify`.
+- **Status findings summary**: `cmd_status` now includes a `_status_summary` section with P0/P1/P2 counts, EQS score, remediation progress (open/fixed), validation results, and fix_level.
+- **SKILL.md Execution Rules**: Added mandatory 8-point "Execution Rules (MANDATORY)" section to SKILL.md replacing the need for manual "CRITICAL CONSTRAINTS" prompts. Covers orchestrator-only state transitions, phase ordering, TeamCreate mandate, general-purpose agent type, artifact verification, decision logging, self-healing protocol, and fix_level respect.
+
+### Modified Files
+- `qralph-orchestrator.py` — `LEVEL_PRIORITIES` constant, `--fix-level` on init argparse, `fix_level` in state, `cmd_status` findings summary with `_status_summary`, `_cmd_remediate_locked` filters by fix_level (incl. `none` skip), `_cmd_remediate_verify_locked` blocks on active priorities, VERSION bump
+- `qralph-state.py` — `fix_level: "p0_p1"` default in `repair_state()`
+- `SKILL.md` — Execution Rules section, `--fix-level` in execution modes, version bumps (v4.1 -> v4.1.2, 420+ -> 440+ tests)
+- `test_qralph_orchestrator.py` — 10 new tests: fix_level filtering, status findings summary, remediate-verify respecting level, fix_level=none skip, fix_level=all blocks on P2, invalid fix_level rejection
+
+### Test Results
+- 444 tests passing (434 existing + 10 new, 0 regressions)
+
 ## v4.1.1 (2026-02-18)
 
 ### Fixed — Deterministic Agent Output

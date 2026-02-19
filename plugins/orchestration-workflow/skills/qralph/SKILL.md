@@ -1,4 +1,4 @@
-# QRALPH v4.1 - Hierarchical Team Orchestration Skill
+# QRALPH v4.1.2 - Hierarchical Team Orchestration Skill
 
 > Sr. SDM orchestrator with hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. Builds on v4.0's native teams, plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
 
@@ -7,9 +7,31 @@
 Invoke with `/qralph <request>` or use the `QRALPH` shortcut.
 For lightweight tasks: `QWORK "<request>"` (work mode with 1-3 agents).
 
+## Execution Rules (MANDATORY)
+
+These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
+
+1. **Use the orchestrator for ALL state transitions.** Run `python3 .qralph/tools/qralph-orchestrator.py <command>` for every phase change. Do NOT manually write STATE.md, current-project.json, or checkpoints.
+
+2. **Execute every phase in order.** The phase sequence is:
+   - `init` -> `discover` -> `select-agents` -> TeamCreate + spawn agents -> `synthesize` -> (human approval if --human) -> EXECUTING -> VALIDATING -> `finalize`
+   - Do NOT skip phases. Do NOT collapse multiple phases into one step.
+
+3. **Use TeamCreate for agent coordination.** Always create a native team. Do NOT use bare Task calls to build deliverables directly.
+
+4. **Agents MUST use subagent_type='general-purpose'.** Other agent types may lack the Write tool and cannot produce output files.
+
+5. **Verify artifacts exist before advancing.** After REVIEWING: `agent-outputs/*.md` must exist. After synthesize: `SYNTHESIS.md` must exist. After VALIDATING: `phase-outputs/VALIDATING-result.json` must exist.
+
+6. **Log every phase transition.** Append to `decisions.log` at every phase change via the orchestrator tools.
+
+7. **If a Python tool fails, attempt self-healing first.** Run `python3 .qralph/tools/qralph-healer.py heal "<error>"` to auto-fix. If healing succeeds, continue. If healing fails after 3 attempts, report the error to the user. Do NOT silently bypass the orchestrator — falling back to manual orchestration is never acceptable.
+
+8. **Respect fix_level.** The `--fix-level` flag (none|p0|p0_p1|all) controls which findings get remediated. Default is p0_p1.
+
 ## Version Check
 
-On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1 — see CHANGELOG.md for changes." Update `last_seen_version`.
+On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.2 — see CHANGELOG.md for changes." Update `last_seen_version`.
 
 ## Tools
 
@@ -25,7 +47,7 @@ All orchestrator tools live at `.qralph/tools/`:
 ├── qralph-state.py          # Shared state module (atomic writes, checksums, locking)
 ├── session-state.py         # Session persistence (STATE.md lifecycle, sub-team recovery)
 ├── process-monitor.py       # PID registry and orphan cleanup
-└── test_*.py                # Test suites (420+ tests)
+└── test_*.py                # Test suites (440+ tests)
 ```
 
 Long-term memory:
@@ -106,6 +128,9 @@ The quality gate checks 5 criteria:
 ```bash
 QRALPH "<request>" --human   # Default: pause after REVIEWING for approval
 QRALPH "<request>" --auto    # Auto-continue after quality gate passes
+QRALPH "<request>" --fix-level p0       # Remediate P0 only
+QRALPH "<request>" --fix-level all      # Remediate P0+P1+P2
+QRALPH "<request>" --fix-level none     # Skip remediation entirely
 ```
 
 ## Project Structure

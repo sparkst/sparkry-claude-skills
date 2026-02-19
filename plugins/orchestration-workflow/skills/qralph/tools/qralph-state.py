@@ -269,6 +269,7 @@ def repair_state(state: dict) -> dict:
         "circuit_breakers": dict(DEFAULT_CIRCUIT_BREAKERS),
         "findings": [],
         "domains": [],
+        "fix_level": "p0_p1",
         "remediation_tasks": [],
         "sub_teams": {},
         "last_seen_version": "",

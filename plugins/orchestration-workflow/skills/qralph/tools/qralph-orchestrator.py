@@ -9,7 +9,7 @@ teams via TeamCreate, spawns teammates, and coordinates via TaskList/SendMessage
 v4.1 adds hierarchical sub-teams, quality gates, and validation phases.
 
 Commands:
-    python3 qralph-orchestrator.py init "<request>" [--mode planning] [--auto|--human]
+    python3 qralph-orchestrator.py init "<request>" [--mode planning] [--auto|--human] [--fix-level none|p0|p0_p1|all]
     python3 qralph-orchestrator.py discover
     python3 qralph-orchestrator.py select-agents [--agents a,b,c] [--subteam]
     python3 qralph-orchestrator.py synthesize
@@ -52,7 +52,7 @@ safe_write_json = qralph_state.safe_write_json
 safe_read_json = qralph_state.safe_read_json
 
 # Version
-VERSION = "4.1.1"
+VERSION = "4.1.2"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -73,6 +73,14 @@ MAX_TOKENS = 500_000
 MAX_COST_USD = 40.0
 MAX_SAME_ERROR = 3
 MAX_HEAL_ATTEMPTS = 5
+
+# Fix level priorities: which finding severities to remediate
+LEVEL_PRIORITIES = {
+    "none": [],
+    "p0": ["P0"],
+    "p0_p1": ["P0", "P1"],
+    "all": ["P0", "P1", "P2"],
+}
 
 # Model Pricing (per 1M tokens - input, simplified for estimation)
 MODEL_COSTS = {
@@ -664,17 +672,20 @@ def check_version_update(state: dict) -> Optional[str]:
     return None
 
 
-def cmd_init(request: str, mode: str = "coding", execution_mode: str = "human"):
+def cmd_init(request: str, mode: str = "coding", execution_mode: str = "human", fix_level: str = "p0_p1"):
     """Initialize a new QRALPH project: create directory, state, and STATE.md."""
     request = sanitize_request(request)
     if not validate_request(request):
         return _error_result("Invalid request: must be non-empty string with at least 3 characters")
 
+    if fix_level not in LEVEL_PRIORITIES:
+        return _error_result(f"Invalid fix_level: {fix_level}. Must be one of: {', '.join(LEVEL_PRIORITIES.keys())}")
+
     with qralph_state.exclusive_state_lock():
-        return _cmd_init_locked(request, mode, execution_mode)
+        return _cmd_init_locked(request, mode, execution_mode, fix_level)
 
 
-def _cmd_init_locked(request: str, mode: str = "coding", execution_mode: str = "human"):
+def _cmd_init_locked(request: str, mode: str = "coding", execution_mode: str = "human", fix_level: str = "p0_p1"):
     """Inner init logic, called under exclusive lock."""
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -732,6 +743,7 @@ def _cmd_init_locked(request: str, mode: str = "coding", execution_mode: str = "
             "error_counts": {},
         },
         "execution_mode": execution_mode,
+        "fix_level": fix_level,
         "sub_teams": {},
         "last_seen_version": VERSION,
     }
@@ -1881,12 +1893,29 @@ def _cmd_remediate_locked():
     project_path = Path(state["project_path"])
     findings = state.get("findings", {})
 
+    # Check fix_level — skip remediation entirely if "none"
+    fix_level = state.get("fix_level", "p0_p1")
+    active_priorities = LEVEL_PRIORITIES.get(fix_level, ["P0", "P1"])
+
+    if fix_level == "none":
+        log_decision(project_path, "Remediation skipped (fix_level=none)")
+        output = {
+            "status": "remediation_skipped",
+            "fix_level": "none",
+            "project_id": state["project_id"],
+            "message": "Remediation skipped: fix_level is set to 'none'.",
+        }
+        print(json.dumps(output, indent=2))
+        return output
+
     # Normalize findings: support both dict {"P0": [...]} and flat list [{"priority": "P0", ...}]
     tasks = []
     task_id = 1
     if isinstance(findings, list):
         for item in findings:
             priority = item.get("priority", "P2")
+            if priority not in active_priorities:
+                continue
             title = item.get("title", item.get("finding", str(item)))
             tasks.append({
                 "id": f"REM-{task_id:03d}",
@@ -1896,7 +1925,7 @@ def _cmd_remediate_locked():
             })
             task_id += 1
     else:
-        for priority in ("P0", "P1", "P2"):
+        for priority in active_priorities:
             for finding in findings.get(priority, []):
                 tasks.append({
                     "id": f"REM-{task_id:03d}",
@@ -1990,30 +2019,34 @@ def _cmd_remediate_verify_locked():
         return _error_result("No active project.")
 
     tasks = state.get("remediation_tasks", [])
-    open_p0 = [t for t in tasks if t["priority"] == "P0" and t["status"] == "open"]
+    fix_level = state.get("fix_level", "p0_p1")
+    active_priorities = LEVEL_PRIORITIES.get(fix_level, ["P0", "P1"])
+
+    open_blocking = [t for t in tasks if t["priority"] in active_priorities and t["status"] == "open"]
     open_all = [t for t in tasks if t["status"] == "open"]
 
     project_path = Path(state["project_path"])
 
-    if open_p0:
-        log_decision(project_path, f"Remediation verify blocked: {len(open_p0)} P0 tasks open")
+    if open_blocking:
+        log_decision(project_path, f"Remediation verify blocked: {len(open_blocking)} tasks open at fix_level={fix_level}")
         output = {
             "status": "blocked",
-            "reason": f"{len(open_p0)} P0 tasks still open",
-            "open_p0_tasks": [t["id"] for t in open_p0],
+            "reason": f"{len(open_blocking)} tasks still open at fix_level={fix_level}",
+            "open_blocking_tasks": [t["id"] for t in open_blocking],
+            "fix_level": fix_level,
             "total_open": len(open_all),
         }
         print(json.dumps(output, indent=2))
         return output
 
-    # All P0s resolved — transition to COMPLETE
+    # All active-priority tasks resolved — transition to COMPLETE
     if not validate_phase_transition(state["phase"], "COMPLETE", state.get("mode", "coding")):
         return _error_result(f"Invalid phase transition: {state['phase']} -> COMPLETE")
 
     state["phase"] = "COMPLETE"
     save_state(state)
     safe_write_json(project_path / "checkpoints" / "state.json", state)
-    log_decision(project_path, f"Remediation verified: all P0 fixed, {len(open_all)} lower-priority open")
+    log_decision(project_path, f"Remediation verified (fix_level={fix_level}): all required priorities fixed, {len(open_all)} lower-priority open")
 
     output = {
         "status": "verified",
@@ -2121,6 +2154,45 @@ def cmd_status(project_id: Optional[str] = None):
             state_file = project_path / "checkpoints" / "state.json"
             state = safe_read_json(state_file)
             if state:
+                # Build findings summary
+                findings = state.get("findings", {})
+                if isinstance(findings, dict):
+                    p0_count = len(findings.get("P0", []))
+                    p1_count = len(findings.get("P1", []))
+                    p2_count = len(findings.get("P2", []))
+                elif isinstance(findings, list):
+                    p0_count = len([f for f in findings if f.get("priority") == "P0"])
+                    p1_count = len([f for f in findings if f.get("priority") == "P1"])
+                    p2_count = len([f for f in findings if f.get("priority") == "P2"])
+                else:
+                    p0_count = p1_count = p2_count = 0
+
+                eqs_data = state.get("evidence_quality", {})
+                remediation = state.get("remediation_tasks", [])
+
+                # Read validation result if exists
+                validation_result = None
+                validating_file = project_path / "phase-outputs" / "VALIDATING-result.json"
+                if validating_file.exists():
+                    validation_result = safe_read_json(validating_file)
+
+                state["_status_summary"] = {
+                    "findings": {
+                        "p0": p0_count,
+                        "p1": p1_count,
+                        "p2": p2_count,
+                    },
+                    "eqs": eqs_data.get("eqs", None),
+                    "eqs_confidence": eqs_data.get("confidence", None),
+                    "remediation": {
+                        "total": len(remediation),
+                        "open": len([t for t in remediation if t.get("status") == "open"]),
+                        "fixed": len([t for t in remediation if t.get("status") == "fixed"]),
+                    },
+                    "validation": validation_result,
+                    "fix_level": state.get("fix_level", "p0_p1"),
+                }
+
                 print(json.dumps(state, indent=2))
             else:
                 print(json.dumps({"project": project_path.name, "status": "no state file"}))
@@ -2339,6 +2411,11 @@ def main():
     exec_group.add_argument("--human", action="store_const", const="human", dest="execution_mode",
                             help="Pause for human approval after review (default)")
     init_parser.set_defaults(execution_mode="human")
+    init_parser.add_argument("--fix-level",
+        choices=["none", "p0", "p0_p1", "all"],
+        default="p0_p1",
+        dest="fix_level",
+        help="Which findings to remediate: none (skip fixes), p0 (critical only), p0_p1 (default), all (P0+P1+P2)")
 
     # discover
     subparsers.add_parser("discover", help="Discover available plugins and skills")
@@ -2397,7 +2474,7 @@ def main():
     args = parser.parse_args()
 
     if args.command == "init":
-        cmd_init(args.request, args.mode, args.execution_mode)
+        cmd_init(args.request, args.mode, args.execution_mode, args.fix_level)
     elif args.command == "discover":
         cmd_discover()
     elif args.command == "select-agents":
