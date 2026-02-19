@@ -1255,7 +1255,7 @@ def test_generate_team_agent_prompt_includes_skills():
         available_skills=["frontend-design"],
     )
     assert "frontend-design" in prompt
-    assert "## Available Skills" in prompt
+    assert "Optional Skills" in prompt
 
 
 def test_generate_team_agent_prompt_no_skills():
@@ -1761,7 +1761,7 @@ No issues found. Code is secure.
 
 
 def test_cmd_synthesize_with_missing_agent_file(mock_qralph_env, capsys):
-    """F-017: cmd_synthesize handles missing agent output files gracefully"""
+    """F-017: cmd_synthesize BLOCKS when agent output files are missing"""
     qralph_orchestrator.cmd_init("Review with missing output")
     _clear_control_md(mock_qralph_env)
     qralph_orchestrator.cmd_discover()
@@ -1783,8 +1783,10 @@ Found issues.
 """)
 
     synth_result = qralph_orchestrator.cmd_synthesize()
-    assert synth_result["status"] == "synthesized"
-    assert synth_result["p0_count"] == 1
+    # Synthesis should be BLOCKED because sde-iii output is missing
+    assert synth_result["status"] == "error"
+    assert "blocked" in synth_result["error"].lower()
+    assert "sde-iii" in synth_result["error"]
 
 
 # ============================================================================
@@ -2378,7 +2380,7 @@ def test_get_next_step_work_mode_phases():
 
 
 def test_cmd_synthesize_zero_agents(mock_qralph_env, capsys):
-    """F-012: Synthesize with zero agent outputs produces empty findings gracefully."""
+    """F-012: Synthesize with zero agent outputs is BLOCKED by synthesis gate."""
     qralph_orchestrator.cmd_init("Test zero agents")
     _clear_control_md(mock_qralph_env)
     qralph_orchestrator.cmd_discover()
@@ -2390,8 +2392,98 @@ def test_cmd_synthesize_zero_agents(mock_qralph_env, capsys):
         f.unlink()
     synth = qralph_orchestrator.cmd_synthesize()
     assert synth is not None
-    # Should still produce a result (possibly with empty findings)
-    assert synth.get("status") in ("synthesized", "error")
+    # Synthesis should be BLOCKED — missing output files
+    assert synth["status"] == "error"
+    assert "blocked" in synth["error"].lower()
+
+
+def test_compute_evidence_quality_score_full_coverage(mock_qralph_env):
+    """EQS returns HIGH confidence when all agents have substantive output."""
+    qralph_orchestrator.cmd_init("Test EQS full")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer", "sde-iii"])
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    # Write substantive output for both agents (~300 words each)
+    content = "# Review\n\n## Summary\nDetailed analysis.\n\n## Findings\n\n### P0 - Critical\n- Issue found\n\n" + ("word " * 300)
+    (outputs_dir / "security-reviewer.md").write_text(content)
+    (outputs_dir / "sde-iii.md").write_text(content)
+
+    eqs = qralph_orchestrator.compute_evidence_quality_score(["security-reviewer", "sde-iii"], outputs_dir)
+    assert eqs["agents_with_output"] == 2
+    assert eqs["total_agents"] == 2
+    assert eqs["eqs"] >= 80
+    assert eqs["confidence"] == "HIGH"
+
+
+def test_compute_evidence_quality_score_partial(mock_qralph_env):
+    """EQS returns lower confidence when some agents missing."""
+    qralph_orchestrator.cmd_init("Test EQS partial")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer", "sde-iii"])
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    # Only one agent writes output
+    content = "# Review\n\n## Summary\nAnalysis done.\n\n## Findings\n\n### P1 - Important\n- Issue\n\n" + ("word " * 200)
+    (outputs_dir / "security-reviewer.md").write_text(content)
+    # sde-iii has no output file
+
+    eqs = qralph_orchestrator.compute_evidence_quality_score(["security-reviewer", "sde-iii"], outputs_dir)
+    assert eqs["agents_with_output"] == 1
+    assert eqs["total_agents"] == 2
+    assert eqs["agent_status"]["sde-iii"]["status"] == "missing"
+    assert eqs["eqs"] < 80  # Can't be HIGH with 50% coverage
+
+
+def test_compute_evidence_quality_score_empty_agents(mock_qralph_env):
+    """EQS handles zero agents gracefully."""
+    import tempfile
+    outputs_dir = Path(tempfile.mkdtemp())
+    eqs = qralph_orchestrator.compute_evidence_quality_score([], outputs_dir)
+    assert eqs["eqs"] == 0
+    assert eqs["confidence"] == "HOLLOW RUN"
+    assert eqs["agents_with_output"] == 0
+
+
+def test_synthesis_gate_blocks_empty_output(mock_qralph_env, capsys):
+    """Synthesis gate blocks when agent output exists but is empty (<50 bytes)."""
+    qralph_orchestrator.cmd_init("Test empty gate")
+    _clear_control_md(mock_qralph_env)
+    qralph_orchestrator.cmd_discover()
+    result = qralph_orchestrator.cmd_select_agents(["security-reviewer"])
+    project_path = Path(result["agents"][0]["output_file"]).parent.parent
+    outputs_dir = project_path / "agent-outputs"
+
+    # Write a tiny file (under 50 bytes)
+    (outputs_dir / "security-reviewer.md").write_text("# Empty\n")
+
+    synth = qralph_orchestrator.cmd_synthesize()
+    assert synth["status"] == "error"
+    assert "empty" in synth["error"].lower() or "blocked" in synth["error"].lower()
+
+
+def test_prompt_contains_write_tool_instruction(mock_qralph_env):
+    """Agent prompt explicitly instructs to use the Write tool."""
+    prompt = qralph_orchestrator.generate_team_agent_prompt(
+        agent_type="security-reviewer",
+        request="Test request",
+        project_id="test-001",
+        project_path=Path("/tmp/test"),
+        team_name="test-team",
+        available_skills=[],
+    )
+    assert "Write tool" in prompt
+    assert "QRALPH-RECEIPT" in prompt
+    assert "CRITICAL REMINDER" in prompt
+    # Skills section should come AFTER workflow
+    workflow_pos = prompt.find("## Workflow")
+    skills_pos = prompt.find("Optional Skills")
+    if skills_pos > 0:
+        assert skills_pos > workflow_pos, "Skills must come after Workflow"
 
 
 # ============================================================================

@@ -1,10 +1,10 @@
-# Orchestration Workflow (QRALPH v4.1)
+# Orchestration Workflow (QRALPH v4.1.1)
 
 Hierarchical sub-team orchestration for Claude Code with quality gates, fresh-context validation, session persistence, self-healing, process monitoring, long-term memory, and work mode.
 
 ## What is QRALPH?
 
-QRALPH creates a Claude Code native team to analyze requests from multiple specialist perspectives (security, architecture, requirements, UX, code quality) before implementation. It dynamically discovers installed plugins and selects the best 3-7 agents for your request. v4.1 introduces hierarchical sub-teams with quality gates and a dedicated VALIDATING phase for fresh-context verification.
+QRALPH creates a Claude Code native team to analyze requests from multiple specialist perspectives (security, architecture, requirements, UX, code quality) before implementation. It dynamically discovers installed plugins and selects the best 3-7 agents for your request. v4.1.1 adds deterministic agent output enforcement with synthesis gates, Evidence Quality Score (EQS), and QRALPH-RECEIPT verification.
 
 ## Installation
 

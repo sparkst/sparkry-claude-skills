@@ -52,7 +52,7 @@ safe_write_json = qralph_state.safe_write_json
 safe_read_json = qralph_state.safe_read_json
 
 # Version
-VERSION = "4.1.0"
+VERSION = "4.1.1"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -219,7 +219,7 @@ def validate_request(request: str) -> bool:
 
 def _error_result(message: str) -> dict:
     """Create and print a consistent error result dict."""
-    result = {"error": message}
+    result = {"status": "error", "error": message}
     print(json.dumps(result))
     return result
 
@@ -926,7 +926,8 @@ def _cmd_select_agents_locked(custom_agents: Optional[list] = None, use_subteam:
         instruction = (
             "1. TeamCreate(team_name='" + state["team_name"] + "')\n"
             "2. TaskCreate for each agent's review task\n"
-            "3. Spawn teammates via Task(subagent_type=..., team_name=..., name=...)\n"
+            "3. Spawn teammates via Task(subagent_type='general-purpose', team_name=..., name=...)\n"
+            "   IMPORTANT: Always use subagent_type='general-purpose' — specialized types may lack the Write tool.\n"
             "4. Monitor via TaskList + receive SendMessage from teammates\n"
             "5. When all complete, run synthesize"
         )
@@ -945,6 +946,62 @@ def _cmd_select_agents_locked(custom_agents: Optional[list] = None, use_subteam:
     return output
 
 
+def compute_evidence_quality_score(agents: List[str], outputs_dir: Path) -> Dict[str, Any]:
+    """Compute Evidence Quality Score (EQS) for a synthesis run.
+
+    Returns dict with eqs (0-100), agents_with_output, total_words,
+    confidence level, and per-agent status.
+    """
+    total_agents = len(agents) if agents else 1
+    agents_with_output = 0
+    total_words = 0
+    has_findings = False
+    agent_status = {}
+
+    for agent in agents:
+        output_file = outputs_dir / f"{agent}.md"
+        if output_file.exists():
+            content = output_file.read_text()
+            size = len(content)
+            words = len(content.split())
+            has_receipt = "QRALPH-RECEIPT" in content
+            if size >= 50:
+                agents_with_output += 1
+                total_words += words
+                if any(p in content for p in ["P0", "P1", "P2"]):
+                    has_findings = True
+                agent_status[agent] = {"status": "present", "words": words, "receipt": has_receipt}
+            else:
+                agent_status[agent] = {"status": "empty", "words": words, "receipt": False}
+        else:
+            agent_status[agent] = {"status": "missing", "words": 0, "receipt": False}
+
+    # EQS = (agents_with_output / total) * 60 + (avg_words / 300) * 30 + findings_bonus * 10
+    coverage_score = (agents_with_output / total_agents) * 60
+    avg_words = total_words / max(agents_with_output, 1)
+    depth_score = min((avg_words / 300) * 30, 30)
+    findings_bonus = 10 if has_findings else 0
+    eqs = round(min(coverage_score + depth_score + findings_bonus, 100))
+
+    if eqs >= 80:
+        confidence = "HIGH"
+    elif eqs >= 50:
+        confidence = "MEDIUM"
+    elif eqs >= 20:
+        confidence = "LOW"
+    else:
+        confidence = "HOLLOW RUN"
+
+    return {
+        "eqs": eqs,
+        "agents_with_output": agents_with_output,
+        "total_agents": total_agents,
+        "total_words": total_words,
+        "confidence": confidence,
+        "agent_status": agent_status,
+    }
+
+
 def generate_team_agent_prompt(
     agent_type: str,
     request: str,
@@ -954,18 +1011,6 @@ def generate_team_agent_prompt(
     available_skills: List[str],
 ) -> str:
     """Generate a prompt for a team-based agent."""
-    skills_section = ""
-    if available_skills:
-        skill_lines = "\n".join(f"- /{s} - Use when relevant to your review" for s in available_skills)
-        skills_section = f"""
-## Available Skills
-
-You have access to these skills that are relevant to your work:
-{skill_lines}
-
-Use the Skill tool to invoke them when they would improve your analysis.
-"""
-
     agent_context = {
         "security-reviewer": "Authentication/authorization, input validation, sensitive data, injection, OWASP Top 10",
         "architecture-advisor": "System design patterns, scalability, technical debt, dependencies, interface contracts",
@@ -985,11 +1030,32 @@ Use the Skill tool to invoke them when they would improve your analysis.
         "debugger": "Root cause analysis, minimal reproduction, targeted fixes",
         "perf-optimizer": "Hot paths, bottlenecks, measurable optimizations",
         "integration-specialist": "API contracts, system integration, external services",
+        "ux-tester": "Usability testing, heuristic evaluation, user research, interaction patterns",
+        "release-manager": "Release gates, deployment readiness, version management, CI/CD",
+        "usability-expert": "Usability heuristics, user flows, interaction patterns, accessibility",
     }
 
-    focus = agent_context.get(agent_type, "Analyze from your specialized perspective")
+    focus = agent_context.get(
+        agent_type,
+        f"Analyze the {agent_type.replace('-', ' ')} aspects of the request: identify risks, gaps, and specific recommendations."
+    )
 
-    return f"""You are {agent_type.replace('-', ' ')} on team "{team_name}", reviewing project {project_id}.
+    output_path = f"{project_path}/agent-outputs/{agent_type}.md"
+    timestamp = datetime.now().isoformat()
+
+    skills_section = ""
+    if available_skills:
+        skill_lines = "\n".join(f"- /{s} - Use when relevant to your review" for s in available_skills)
+        skills_section = f"""
+## Optional Skills (use AFTER writing your output file)
+
+Complete steps 1-7 of the Workflow FIRST. Only then invoke skills if they would
+add value to your already-written analysis.
+
+{skill_lines}
+"""
+
+    return f"""You are the {agent_type.replace('-', ' ')} on team "{team_name}". Your PRIMARY deliverable is the output file at {output_path}. Everything else is secondary to producing that file.
 
 REQUEST: {request}
 
@@ -1004,24 +1070,26 @@ You are a teammate in a QRALPH team. You coordinate with other agents through:
 
 ## Focus Areas
 {focus}
-{skills_section}
+
 ## Workflow
 
 1. Check TaskList for your assigned task
 2. Mark it in_progress via TaskUpdate
 3. Analyze the request from your specialized perspective
-4. Write findings to: {project_path}/agent-outputs/{agent_type}.md
-5. Mark task completed via TaskUpdate
-6. Send summary to team lead via SendMessage
-
+4. **Use the Write tool** to save your analysis to: `{output_path}`
+   IMPORTANT: You MUST call the Write tool. Writing text in your response is NOT sufficient.
+5. Verify the Write tool succeeded (check for errors in the tool response)
+6. Mark task completed via TaskUpdate
+7. Send summary to team lead via SendMessage — include "File written: YES" or "File written: NO, error: [reason]"
+{skills_section}
 ## Output Format
 
-Write your findings using this structure:
+Use the Write tool to write this structure to `{output_path}`:
 
 # {agent_type.replace('-', ' ').title()} Review
 
 ## Summary
-[2-3 sentence summary]
+[2-3 sentence summary of your analysis]
 
 ## Findings
 
@@ -1038,7 +1106,19 @@ Write your findings using this structure:
 [Numbered list of specific actions]
 
 ---
-*Review completed at: {datetime.now().isoformat()}*
+*Review completed at: {timestamp}*
+<!-- QRALPH-RECEIPT: {{"agent":"{agent_type}","status":"complete","written_at":"{timestamp}"}} -->
+
+---
+## CRITICAL REMINDER
+
+Before marking your task complete, you MUST have:
+1. Called the Write tool to write your findings to: `{output_path}`
+2. Verified the Write tool returned success
+3. The file MUST end with the QRALPH-RECEIPT comment shown in the Output Format above
+
+If you cannot write the file, report the error in your SendMessage to the team lead.
+DO NOT mark your task as completed without a confirmed written output file.
 """
 
 
@@ -1073,10 +1153,38 @@ def _cmd_synthesize_locked():
     if reviewing_result_file.exists():
         subteam_metadata = safe_read_json(reviewing_result_file, {})
 
+    agents = state.get("agents", [])
+
+    # ── PHASE 1: Synthesis hard-gate on missing outputs ──
+    if agents:
+        missing_outputs = [a for a in agents if not (outputs_dir / f"{a}.md").exists()]
+        if missing_outputs:
+            log_decision(project_path,
+                f"Synthesis BLOCKED: {len(missing_outputs)}/{len(agents)} agent outputs missing: {missing_outputs}")
+            return _error_result(
+                f"Synthesis blocked: {len(missing_outputs)}/{len(agents)} agents have not written "
+                f"output files: {missing_outputs}. Check team tasks or re-run failed agents."
+            )
+        empty_outputs = [
+            a for a in agents
+            if (outputs_dir / f"{a}.md").exists() and (outputs_dir / f"{a}.md").stat().st_size < 50
+        ]
+        if empty_outputs:
+            log_decision(project_path,
+                f"Synthesis BLOCKED: {len(empty_outputs)} agent outputs empty: {empty_outputs}")
+            return _error_result(
+                f"Synthesis blocked: {len(empty_outputs)} agents wrote empty output (<50 bytes): {empty_outputs}"
+            )
+
+    # ── PHASE 2D: Compute Evidence Quality Score ──
+    eqs_data = compute_evidence_quality_score(agents, outputs_dir)
+    log_decision(project_path,
+        f"Synthesis preflight: {eqs_data['agents_with_output']}/{eqs_data['total_agents']} agent outputs present, "
+        f"EQS={eqs_data['eqs']}/100 ({eqs_data['confidence']})")
+
     all_findings = {"P0": [], "P1": [], "P2": []}
     agent_summaries = []
 
-    agents = state.get("agents", [])
     for i, agent in enumerate(agents, 1):
         print(f"Synthesizing agent {i}/{len(agents)}: {agent}...", file=sys.stderr)
         output_file = outputs_dir / f"{agent}.md"
@@ -1098,10 +1206,48 @@ def _cmd_synthesize_locked():
         for agent, skills in skills_info.items():
             skills_section += f"- **{agent}**: {', '.join(skills)}\n"
 
+    # Build evidence quality section
+    eqs_warning = ""
+    if eqs_data["eqs"] < 20:
+        eqs_warning = (
+            "\n> **WARNING: HOLLOW RUN** — No agent output files contained substantive content. "
+            "The findings below reflect absence of evidence, not evidence of absence. "
+            "Do not act on this synthesis without re-running or manually inspecting agents.\n"
+        )
+    elif eqs_data["eqs"] < 50:
+        eqs_warning = (
+            "\n> **WARNING: LOW CONFIDENCE** — Partial agent output. "
+            "Synthesis may be incomplete.\n"
+        )
+
+    agent_evidence_lines = []
+    for agent in agents:
+        status_info = eqs_data["agent_status"].get(agent, {})
+        s = status_info.get("status", "missing")
+        w = status_info.get("words", 0)
+        r = " [receipt]" if status_info.get("receipt") else ""
+        mark = "present" if s == "present" else s.upper()
+        agent_evidence_lines.append(f"| {agent} | {mark} | {w} |{r}")
+
+    evidence_table = "\n".join(agent_evidence_lines)
+
     synthesis = f"""# QRALPH Synthesis Report: {state['project_id']}
 
 ## Request
 {state['request']}
+
+## Evidence Quality
+
+| Metric | Value |
+|--------|-------|
+| Agents with output | {eqs_data['agents_with_output']} / {eqs_data['total_agents']} |
+| Total output words | {eqs_data['total_words']:,} |
+| Evidence Quality Score | {eqs_data['eqs']}/100 |
+| Confidence | {eqs_data['confidence']} |
+{eqs_warning}
+| Agent | Output | Words |
+|-------|--------|-------|
+{evidence_table}
 
 ## Team Composition
 - **Team**: {state.get('team_name', 'N/A')}
@@ -1129,6 +1275,7 @@ def _cmd_synthesize_locked():
 ---
 *Synthesized at: {datetime.now().isoformat()}*
 *QRALPH v{VERSION} - Hierarchical Team Orchestration*
+*Evidence Quality Score: {eqs_data['eqs']}/100 ({eqs_data['confidence']})*
 """
 
     safe_write(project_path / "SYNTHESIS.md", synthesis)
@@ -1143,8 +1290,12 @@ def _cmd_synthesize_locked():
 
     log_decision(project_path,
         f"Synthesis complete: {len(all_findings['P0'])} P0, "
-        f"{len(all_findings['P1'])} P1, {len(all_findings['P2'])} P2"
+        f"{len(all_findings['P1'])} P1, {len(all_findings['P2'])} P2 "
+        f"[EQS:{eqs_data['eqs']}/100 — {eqs_data['confidence']}]"
     )
+
+    # Store EQS in state for SUMMARY.md
+    state["evidence_quality"] = eqs_data
 
     output = {
         "status": "synthesized",
@@ -1153,6 +1304,8 @@ def _cmd_synthesize_locked():
         "p0_count": len(all_findings["P0"]),
         "p1_count": len(all_findings["P1"]),
         "p2_count": len(all_findings["P2"]),
+        "evidence_quality_score": eqs_data["eqs"],
+        "evidence_confidence": eqs_data["confidence"],
         "next_phase": state["phase"],
         "team_shutdown_needed": False,
     }
@@ -1404,6 +1557,25 @@ def _cmd_finalize_locked():
 
     project_path = Path(state["project_path"])
 
+    # Evidence quality data
+    eqs = state.get("evidence_quality", {})
+    eqs_score = eqs.get("eqs", "N/A")
+    eqs_confidence = eqs.get("confidence", "N/A")
+    eqs_agents_with = eqs.get("agents_with_output", "?")
+    eqs_agents_total = eqs.get("total_agents", "?")
+    eqs_words = eqs.get("total_words", 0)
+
+    # Per-agent evidence
+    agent_evidence_lines = []
+    for agent in state.get("agents", []):
+        status_info = eqs.get("agent_status", {}).get(agent, {})
+        s = status_info.get("status", "unknown")
+        mark = "present" if s == "present" else s.upper()
+        agent_evidence_lines.append(f"  - {agent}: {mark} ({status_info.get('words', 0)} words)")
+    agent_evidence = "\n".join(agent_evidence_lines) if agent_evidence_lines else "  - No agent data"
+
+    findings = state.get('findings', {}) if isinstance(state.get('findings'), dict) else {}
+
     summary = f"""# QRALPH Summary: {state['project_id']}
 
 ## Request
@@ -1418,10 +1590,22 @@ def _cmd_finalize_locked():
 - **Domains**: {', '.join(state.get('domains', []))}
 - **Self-Heal Attempts**: {state.get('heal_attempts', 0)}
 
+## Evidence Quality
+- **Agents with output**: {eqs_agents_with} / {eqs_agents_total}
+- **Total output words**: {eqs_words:,}
+- **Evidence Quality Score**: {eqs_score}/100
+- **Confidence**: {eqs_confidence}
+
 ## Results
-- P0 Issues: {len(state.get('findings', {}).get('P0', []) if isinstance(state.get('findings'), dict) else [])}
-- P1 Issues: {len(state.get('findings', {}).get('P1', []) if isinstance(state.get('findings'), dict) else [])}
-- P2 Issues: {len(state.get('findings', {}).get('P2', []) if isinstance(state.get('findings'), dict) else [])}
+
+| Priority | Count | Evidence |
+|----------|-------|---------|
+| P0       | {len(findings.get('P0', []))}     | {eqs_agents_with}/{eqs_agents_total} agents reported |
+| P1       | {len(findings.get('P1', []))}     | {eqs_agents_with}/{eqs_agents_total} agents reported |
+| P2       | {len(findings.get('P2', []))}     | {eqs_agents_with}/{eqs_agents_total} agents reported |
+
+## Agent Output Status
+{agent_evidence}
 
 ## Team Lifecycle
 1. Team created: {state.get('team_name', 'N/A')}
@@ -1436,6 +1620,7 @@ def _cmd_finalize_locked():
 
 ---
 *QRALPH v{VERSION} - Hierarchical Team Orchestration*
+*Evidence Quality Score: {eqs_score}/100 ({eqs_confidence})*
 """
 
     safe_write(project_path / "SUMMARY.md", summary)
