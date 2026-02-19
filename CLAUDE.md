@@ -58,12 +58,15 @@ Tool files to copy (all from `.qralph/tools/`):
 - `test_work_mode.py`
 - `test_process_monitor.py`
 
-### 3. Update plugin metadata
+### 3. Update plugin metadata (CRITICAL — skipping this breaks marketplace updates)
 
 For each updated plugin:
-- Bump `version` in `.claude-plugin/plugin.json`
+- Bump `version` in `plugins/<plugin-name>/.claude-plugin/plugin.json`
+- Bump `version` in `.claude-plugin/marketplace.json` for the matching plugin entry
 - Update the plugin's `README.md` with new features, version, test counts
 - Update root `README.md` plugin description if the summary changed
+
+**Both version files MUST be bumped.** The marketplace uses `marketplace.json` to detect updates — if the version there is stale, `/plugin marketplace update` will see no changes and users must delete + reinstall to get updates.
 
 ### 4. Commit and push
 
