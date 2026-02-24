@@ -64,8 +64,8 @@
     {
       "name": "orchestration-workflow",
       "source": "./plugins/orchestration-workflow",
-      "description": "Hierarchical sub-team orchestration with quality gates, fix-level control, fresh-context validation, session persistence, and self-healing (QRALPH v4.1.4)",
-      "version": "4.1.4",
+      "description": "Hierarchical sub-team orchestration with quality gates, fix-level control, fresh-context validation, session persistence, self-contained TDD enforcement, and self-healing (QRALPH v4.1.5)",
+      "version": "4.1.5",
       "license": "MIT",
       "keywords": ["orchestration", "multi-agent", "qralph", "sub-teams", "quality-gates", "self-healing"],
       "category": "orchestration",

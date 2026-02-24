@@ -446,6 +446,107 @@ def contains_code_signals(request: str) -> bool:
     return bool(words & CODE_SIGNAL_KEYWORDS)
 
 
+def detect_test_infrastructure() -> Dict[str, Any]:
+    """Detect the project's test infrastructure by scanning config files.
+
+    Returns a dict with detected test/lint/typecheck commands and framework info.
+    This makes QRALPH self-contained — it doesn't rely on CLAUDE.md for TDD knowledge.
+    """
+    infra: Dict[str, Any] = {
+        "test_cmd": None,
+        "lint_cmd": None,
+        "typecheck_cmd": None,
+        "framework": None,
+        "quality_gate_cmd": None,
+        "detected_from": None,
+    }
+
+    # 1. Check package.json (Node/JS/TS projects)
+    pkg_json = PROJECT_ROOT / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text())
+            scripts = pkg.get("scripts", {})
+            infra["detected_from"] = "package.json"
+
+            if "test" in scripts:
+                infra["test_cmd"] = "npm run test"
+                # Detect framework from test script content
+                test_script = scripts["test"]
+                for fw in ("vitest", "jest", "mocha", "ava", "tap"):
+                    if fw in test_script:
+                        infra["framework"] = fw
+                        break
+            if "lint" in scripts:
+                infra["lint_cmd"] = "npm run lint"
+            if "typecheck" in scripts:
+                infra["typecheck_cmd"] = "npm run typecheck"
+            elif "type-check" in scripts:
+                infra["typecheck_cmd"] = "npm run type-check"
+            elif "tsc" in scripts:
+                infra["typecheck_cmd"] = "npm run tsc"
+
+            # Build composite quality gate command
+            gates = [cmd for cmd in [infra["typecheck_cmd"], infra["lint_cmd"], infra["test_cmd"]] if cmd]
+            if gates:
+                infra["quality_gate_cmd"] = " && ".join(gates)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # 2. Check for Python projects (pyproject.toml, setup.py, pytest.ini)
+    if not infra["test_cmd"]:
+        for marker in ("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini"):
+            if (PROJECT_ROOT / marker).exists():
+                infra["detected_from"] = marker
+                infra["test_cmd"] = "python -m pytest"
+                infra["framework"] = "pytest"
+                # Check for ruff/flake8/mypy
+                if (PROJECT_ROOT / "pyproject.toml").exists():
+                    try:
+                        toml_text = (PROJECT_ROOT / "pyproject.toml").read_text()
+                        if "ruff" in toml_text:
+                            infra["lint_cmd"] = "ruff check ."
+                        if "mypy" in toml_text:
+                            infra["typecheck_cmd"] = "mypy ."
+                    except OSError:
+                        pass
+                gates = [cmd for cmd in [infra["typecheck_cmd"], infra["lint_cmd"], infra["test_cmd"]] if cmd]
+                if gates:
+                    infra["quality_gate_cmd"] = " && ".join(gates)
+                break
+
+    # 3. Check for Rust projects
+    if not infra["test_cmd"] and (PROJECT_ROOT / "Cargo.toml").exists():
+        infra["detected_from"] = "Cargo.toml"
+        infra["test_cmd"] = "cargo test"
+        infra["framework"] = "cargo"
+        infra["lint_cmd"] = "cargo clippy"
+        infra["quality_gate_cmd"] = "cargo clippy && cargo test"
+
+    # 4. Check for Go projects
+    if not infra["test_cmd"] and (PROJECT_ROOT / "go.mod").exists():
+        infra["detected_from"] = "go.mod"
+        infra["test_cmd"] = "go test ./..."
+        infra["framework"] = "go"
+        infra["lint_cmd"] = "golangci-lint run"
+        infra["quality_gate_cmd"] = "go test ./..."
+
+    # 5. Check for Makefile with test target
+    if not infra["test_cmd"]:
+        makefile = PROJECT_ROOT / "Makefile"
+        if makefile.exists():
+            try:
+                content = makefile.read_text()
+                if re.search(r'^test:', content, re.MULTILINE):
+                    infra["detected_from"] = "Makefile"
+                    infra["test_cmd"] = "make test"
+                    infra["quality_gate_cmd"] = "make test"
+            except OSError:
+                pass
+
+    return infra
+
+
 def discover_work_skills(request: str) -> List[str]:
     """Discover relevant skills for a work-mode request."""
     lower = request.lower()
@@ -652,6 +753,9 @@ def _cmd_discover_locked():
 
     safe_write_json(project_path / "discovered-plugins.json", discovery_result)
 
+    # Detect test infrastructure (makes QRALPH self-contained for TDD)
+    test_infra = detect_test_infrastructure()
+
     # Update state
     state["phase"] = "DISCOVERING"
     state["domains"] = domains
@@ -659,9 +763,14 @@ def _cmd_discover_locked():
         "total": len(scored),
         "relevant": len(discovery_result["relevant_capabilities"]),
     }
+    state["test_infrastructure"] = test_infra
     save_state(state)
 
-    log_decision(project_path, f"Discovery: {len(domains)} domains, {len(discovery_result['relevant_capabilities'])} relevant capabilities")
+    infra_summary = f"test_infra={test_infra['framework'] or 'none'}"
+    if test_infra["quality_gate_cmd"]:
+        infra_summary += f", gate={test_infra['quality_gate_cmd']}"
+
+    log_decision(project_path, f"Discovery: {len(domains)} domains, {len(discovery_result['relevant_capabilities'])} relevant capabilities, {infra_summary}")
 
     # Output for Claude
     output = {
@@ -677,6 +786,7 @@ def _cmd_discover_locked():
             c["name"] for c in scored
             if c["type"] == "skill" and c["relevance_score"] >= 0.2
         ],
+        "test_infrastructure": test_infra,
         "next_step": "Run select-agents to pick the best team composition",
     }
     print(json.dumps(output, indent=2))
@@ -1952,6 +2062,11 @@ def _cmd_remediate_locked():
         print(json.dumps(output, indent=2))
         return output
 
+    # Detect TDD applicability from test infrastructure
+    test_infra = state.get("test_infrastructure", {})
+    has_test_infra = bool(test_infra.get("test_cmd"))
+    tdd_applicable = has_test_infra and state.get("mode") == "coding"
+
     # Normalize findings: support both dict {"P0": [...]} and flat list [{"priority": "P0", ...}]
     tasks = []
     task_id = 1
@@ -1961,22 +2076,36 @@ def _cmd_remediate_locked():
             if priority not in active_priorities:
                 continue
             title = item.get("title", item.get("finding", str(item)))
-            tasks.append({
+            task = {
                 "id": f"REM-{task_id:03d}",
                 "priority": priority,
                 "finding": title,
                 "status": "open",
-            })
+            }
+            if tdd_applicable:
+                task["tdd_steps"] = [
+                    "Write a failing test that reproduces the finding",
+                    "Implement the minimal fix to make the test pass",
+                    f"Run quality gate: {test_infra['quality_gate_cmd'] or test_infra['test_cmd']}",
+                ]
+            tasks.append(task)
             task_id += 1
     else:
         for priority in active_priorities:
             for finding in findings.get(priority, []):
-                tasks.append({
+                task = {
                     "id": f"REM-{task_id:03d}",
                     "priority": priority,
                     "finding": finding,
                     "status": "open",
-                })
+                }
+                if tdd_applicable:
+                    task["tdd_steps"] = [
+                        "Write a failing test that reproduces the finding",
+                        "Implement the minimal fix to make the test pass",
+                        f"Run quality gate: {test_infra['quality_gate_cmd'] or test_infra['test_cmd']}",
+                    ]
+                tasks.append(task)
                 task_id += 1
 
     state["remediation_tasks"] = tasks
@@ -1985,12 +2114,21 @@ def _cmd_remediate_locked():
 
     # Write REMEDIATION.md
     lines = ["# Remediation Plan\n"]
+    if tdd_applicable:
+        lines.append(f"\n> **TDD Enforcement Active** — test infrastructure detected: `{test_infra['framework']}`")
+        lines.append(f"> Quality gate: `{test_infra['quality_gate_cmd'] or test_infra['test_cmd']}`")
+        lines.append("> Each task MUST follow: write failing test → implement fix → run quality gate\n")
+    elif has_test_infra:
+        lines.append(f"\n> Test infrastructure detected: `{test_infra['framework']}` — run `{test_infra['test_cmd']}` to verify fixes\n")
     for priority in ("P0", "P1", "P2"):
         priority_tasks = [t for t in tasks if t["priority"] == priority]
         if priority_tasks:
             lines.append(f"\n## {priority} ({len(priority_tasks)} tasks)\n")
             for t in priority_tasks:
                 lines.append(f"- [ ] **{t['id']}**: {t['finding']}")
+                if t.get("tdd_steps"):
+                    for step in t["tdd_steps"]:
+                        lines.append(f"  - [ ] {step}")
     lines.append(f"\n---\n*Generated at: {datetime.now().isoformat()}*")
     safe_write(project_path / "REMEDIATION.md", "\n".join(lines))
 
@@ -2057,7 +2195,13 @@ def cmd_remediate_verify():
 
 
 def _cmd_remediate_verify_locked():
-    """Inner remediate-verify logic, called under exclusive lock."""
+    """Inner remediate-verify logic, called under exclusive lock.
+
+    Performs TWO verification passes:
+    1. Bookkeeping check: all active-priority tasks marked "fixed"
+    2. Quality gate check: runs detected test/lint/typecheck commands
+    Both must pass before transitioning to COMPLETE.
+    """
     state = load_state()
     if not state:
         return _error_result("No active project.")
@@ -2083,20 +2227,85 @@ def _cmd_remediate_verify_locked():
         print(json.dumps(output, indent=2))
         return output
 
-    # All active-priority tasks resolved — transition to COMPLETE
+    # ── Quality gate verification ──
+    # Run detected test infrastructure commands to verify fixes actually work
+    test_infra = state.get("test_infrastructure", {})
+    quality_gate_cmd = test_infra.get("quality_gate_cmd")
+    quality_gate_result = None
+
+    if quality_gate_cmd and state.get("mode") == "coding":
+        log_decision(project_path, f"Running quality gate: {quality_gate_cmd}")
+        try:
+            result = subprocess.run(
+                quality_gate_cmd,
+                shell=True,
+                cwd=str(PROJECT_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+            quality_gate_result = {
+                "command": quality_gate_cmd,
+                "exit_code": result.returncode,
+                "passed": result.returncode == 0,
+                "stdout_tail": result.stdout[-2000:] if result.stdout else "",
+                "stderr_tail": result.stderr[-2000:] if result.stderr else "",
+            }
+            state["quality_gate_result"] = quality_gate_result
+            save_state(state)
+
+            if result.returncode != 0:
+                log_decision(project_path, f"Quality gate FAILED (exit code {result.returncode})")
+                output = {
+                    "status": "quality_gate_failed",
+                    "reason": f"Quality gate command failed: {quality_gate_cmd}",
+                    "exit_code": result.returncode,
+                    "stdout_tail": quality_gate_result["stdout_tail"],
+                    "stderr_tail": quality_gate_result["stderr_tail"],
+                    "instruction": "Fix the failing tests/lint/typecheck, then run remediate-verify again.",
+                }
+                print(json.dumps(output, indent=2))
+                return output
+        except subprocess.TimeoutExpired:
+            log_decision(project_path, f"Quality gate TIMEOUT: {quality_gate_cmd}")
+            output = {
+                "status": "quality_gate_timeout",
+                "reason": f"Quality gate timed out after 300s: {quality_gate_cmd}",
+                "instruction": "Investigate hanging tests, then run remediate-verify again.",
+            }
+            print(json.dumps(output, indent=2))
+            return output
+        except OSError as e:
+            log_decision(project_path, f"Quality gate error: {e}")
+            # Non-blocking — proceed if command can't be run (e.g., missing tool)
+            quality_gate_result = {"command": quality_gate_cmd, "error": str(e), "passed": None}
+            state["quality_gate_result"] = quality_gate_result
+            save_state(state)
+
+    # All active-priority tasks resolved + quality gate passed — transition to COMPLETE
     if not validate_phase_transition(state["phase"], "COMPLETE", state.get("mode", "coding")):
         return _error_result(f"Invalid phase transition: {state['phase']} -> COMPLETE")
 
     state["phase"] = "COMPLETE"
     save_state(state)
     safe_write_json(project_path / "checkpoints" / "state.json", state)
-    log_decision(project_path, f"Remediation verified (fix_level={fix_level}): all required priorities fixed, {len(open_all)} lower-priority open")
+
+    gate_msg = ""
+    if quality_gate_result and quality_gate_result.get("passed"):
+        gate_msg = f", quality gate passed ({quality_gate_cmd})"
+    elif quality_gate_result and quality_gate_result.get("passed") is None:
+        gate_msg = f", quality gate skipped (command error: {quality_gate_result.get('error', 'unknown')})"
+    elif not quality_gate_cmd:
+        gate_msg = ", no quality gate detected"
+
+    log_decision(project_path, f"Remediation verified (fix_level={fix_level}): all required priorities fixed{gate_msg}, {len(open_all)} lower-priority open")
 
     output = {
         "status": "verified",
         "project_id": state["project_id"],
         "phase": "COMPLETE",
         "open_lower_priority": len(open_all),
+        "quality_gate": quality_gate_result,
         "team_shutdown_needed": True,
     }
     print(json.dumps(output, indent=2))

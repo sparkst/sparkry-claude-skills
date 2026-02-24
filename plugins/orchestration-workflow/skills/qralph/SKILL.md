@@ -35,6 +35,13 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
 
 11. **Session boundary discipline.** If you detect context compression, are running low on turns, or the user interrupts, immediately checkpoint via `python3 .qralph/tools/session-state.py save` and tell the user: "EXECUTING incomplete — N tasks remain. Resume with `/qralph resume <project-id>`." On resume, the orchestrator includes `remediation_progress` showing exactly which tasks are still open — continue from where you left off.
 
+12. **TDD enforcement during EXECUTING (self-contained).** QRALPH does NOT rely on the host project's CLAUDE.md for development methodology. During `discover`, the orchestrator auto-detects test infrastructure (package.json scripts, pytest, cargo, go test, Makefile). During `remediate`, each task includes `tdd_steps` when test infra is detected. During `remediate-verify`, the orchestrator runs the detected quality gate command (typecheck + lint + test) and blocks verification if it fails. For each remediation task, you MUST:
+    - Write a failing test that reproduces the finding BEFORE implementing the fix
+    - Implement the minimal change to make the test pass
+    - Run the quality gate command shown in `REMEDIATION.md`
+    - Only mark the task as fixed (`remediate-done`) after the quality gate passes
+    If no test infrastructure is detected, log a warning but do not block — the `remediate-verify` quality gate will be skipped gracefully.
+
 ## Version Check
 
 On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.4 — see CHANGELOG.md for changes." Update `last_seen_version`.
@@ -85,10 +92,11 @@ QRALPH v4.1 (main session — "Sr. SDM")
   │     ├── QRALPH runs 95% confidence quality gate
   │     └── If --human: pause for user approval. If --auto: continue.
   │
-  ├── EXECUTING (sub-team per context window)
-  │     ├── Sub-team 1: implement + run automated tests
-  │     ├── Sub-team 2: continue from where sub-team 1 left off (if needed)
-  │     └── Repeats until all automated tests pass
+  ├── EXECUTING (TDD remediation loop)
+  │     ├── `remediate` creates tasks with tdd_steps from detected test infra
+  │     ├── For each task: write failing test → fix → run quality gate
+  │     ├── `remediate-done` marks tasks fixed after quality gate passes
+  │     └── `remediate-verify` runs full quality gate before allowing COMPLETE
   │
   ├── VALIDATING (fresh sub-team)
   │     ├── Fresh context — no knowledge of implementation details
@@ -200,13 +208,16 @@ QRALPH "<request>" [--mode coding]
 ```
 
 1. `init` - creates project, STATE.md
-2. `discover` - scans plugins/skills/agents
+2. `discover` - scans plugins/skills/agents + detects test infrastructure
 3. `select-agents` - picks best 3-7 agents
 4. TeamCreate + TaskCreate + spawn teammates
 5. Monitor via TaskList + receive messages
 6. `synthesize` - consolidates into SYNTHESIS.md
-7. `generate-uat` - UAT scenarios
-8. `finalize` - SUMMARY.md + team shutdown
+7. `remediate` - creates TDD-enforced remediation tasks
+8. For each task: write failing test → implement fix → run quality gate → `remediate-done`
+9. `remediate-verify` - runs quality gate, blocks if tests/lint/typecheck fail
+10. `generate-uat` - UAT scenarios
+11. `finalize` - SUMMARY.md + team shutdown
 
 ### Work Mode
 
