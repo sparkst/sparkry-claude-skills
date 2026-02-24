@@ -58,7 +58,7 @@ process_monitor = importlib.util.module_from_spec(_pm_spec)
 _pm_spec.loader.exec_module(process_monitor)
 
 # Version
-VERSION = "4.1.4"
+VERSION = "4.1.6"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -2228,8 +2228,16 @@ def _cmd_remediate_verify_locked():
         return output
 
     # ── Quality gate verification ──
-    # Run detected test infrastructure commands to verify fixes actually work
-    test_infra = state.get("test_infrastructure", {})
+    # Re-detect test infrastructure (agents may have created it during EXECUTING)
+    test_infra = detect_test_infrastructure()
+    if test_infra.get("test_cmd") and not state.get("test_infrastructure", {}).get("test_cmd"):
+        log_decision(project_path, f"Post-execution test infra detected: {test_infra['framework']} via {test_infra['detected_from']}")
+        state["test_infrastructure"] = test_infra
+        save_state(state)
+    elif test_infra.get("test_cmd"):
+        # Use latest detection (infra may have changed during execution)
+        state["test_infrastructure"] = test_infra
+        save_state(state)
     quality_gate_cmd = test_infra.get("quality_gate_cmd")
     quality_gate_result = None
 

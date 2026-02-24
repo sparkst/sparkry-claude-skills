@@ -1,4 +1,4 @@
-# QRALPH v4.1.4 - Hierarchical Team Orchestration Skill
+# QRALPH v4.1.6 - Hierarchical Team Orchestration Skill
 
 > Sr. SDM orchestrator with hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. Builds on v4.0's native teams, plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
 
@@ -35,16 +35,16 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
 
 11. **Session boundary discipline.** If you detect context compression, are running low on turns, or the user interrupts, immediately checkpoint via `python3 .qralph/tools/session-state.py save` and tell the user: "EXECUTING incomplete — N tasks remain. Resume with `/qralph resume <project-id>`." On resume, the orchestrator includes `remediation_progress` showing exactly which tasks are still open — continue from where you left off.
 
-12. **TDD enforcement during EXECUTING (self-contained).** QRALPH does NOT rely on the host project's CLAUDE.md for development methodology. During `discover`, the orchestrator auto-detects test infrastructure (package.json scripts, pytest, cargo, go test, Makefile). During `remediate`, each task includes `tdd_steps` when test infra is detected. During `remediate-verify`, the orchestrator runs the detected quality gate command (typecheck + lint + test) and blocks verification if it fails. For each remediation task, you MUST:
+12. **TDD enforcement during EXECUTING (self-contained).** QRALPH does NOT rely on the host project's CLAUDE.md for development methodology. During `discover`, the orchestrator auto-detects test infrastructure (package.json scripts, pytest, cargo, go test, Makefile). During `remediate`, each task includes `tdd_steps` when test infra is detected. During `remediate-verify`, the orchestrator **re-runs detection** (to catch test infra created by agents during EXECUTING — critical for greenfield projects) and then runs the quality gate command (typecheck + lint + test), blocking verification if it fails. For each remediation task, you MUST:
     - Write a failing test that reproduces the finding BEFORE implementing the fix
     - Implement the minimal change to make the test pass
     - Run the quality gate command shown in `REMEDIATION.md`
     - Only mark the task as fixed (`remediate-done`) after the quality gate passes
-    If no test infrastructure is detected, log a warning but do not block — the `remediate-verify` quality gate will be skipped gracefully.
+    If no test infrastructure is detected at either discovery or verify time, log a warning but do not block.
 
 ## Version Check
 
-On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.4 — see CHANGELOG.md for changes." Update `last_seen_version`.
+On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.6 — see CHANGELOG.md for changes." Update `last_seen_version`.
 
 ## Tools
 
