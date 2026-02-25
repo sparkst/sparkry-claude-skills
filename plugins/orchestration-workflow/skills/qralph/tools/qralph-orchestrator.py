@@ -58,7 +58,7 @@ process_monitor = importlib.util.module_from_spec(_pm_spec)
 _pm_spec.loader.exec_module(process_monitor)
 
 # Version
-VERSION = "4.1.6"
+VERSION = "4.1.7"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent

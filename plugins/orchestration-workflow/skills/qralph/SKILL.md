@@ -1,4 +1,4 @@
-# QRALPH v4.1.6 - Hierarchical Team Orchestration Skill
+# QRALPH v4.1.7 - Hierarchical Team Orchestration Skill
 
 > Sr. SDM orchestrator with hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. Builds on v4.0's native teams, plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
 
@@ -44,7 +44,7 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
 
 ## Version Check
 
-On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.6 — see CHANGELOG.md for changes." Update `last_seen_version`.
+On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.7 — see CHANGELOG.md for changes." Update `last_seen_version`.
 
 ## Tools
 
