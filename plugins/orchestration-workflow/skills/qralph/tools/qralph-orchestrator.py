@@ -446,105 +446,162 @@ def contains_code_signals(request: str) -> bool:
     return bool(words & CODE_SIGNAL_KEYWORDS)
 
 
+def _detect_node_infra(search_dir: Path) -> Optional[Dict[str, Any]]:
+    """Check a directory for Node/JS/TS test infrastructure via package.json."""
+    pkg_json = search_dir / "package.json"
+    if not pkg_json.exists():
+        return None
+    try:
+        pkg = json.loads(pkg_json.read_text())
+        scripts = pkg.get("scripts", {})
+        if "test" not in scripts:
+            return None
+
+        infra: Dict[str, Any] = {
+            "test_cmd": "npm run test",
+            "lint_cmd": None,
+            "typecheck_cmd": None,
+            "framework": None,
+            "quality_gate_cmd": None,
+            "detected_from": str(pkg_json.relative_to(PROJECT_ROOT)),
+            "cwd": str(search_dir),
+        }
+        # Detect framework from test script content
+        test_script = scripts["test"]
+        for fw in ("vitest", "jest", "mocha", "ava", "tap", "node:test", "node --test"):
+            if fw in test_script:
+                infra["framework"] = fw.replace("node:test", "node-test").replace("node --test", "node-test")
+                break
+        if "lint" in scripts:
+            infra["lint_cmd"] = "npm run lint"
+        if "typecheck" in scripts:
+            infra["typecheck_cmd"] = "npm run typecheck"
+        elif "type-check" in scripts:
+            infra["typecheck_cmd"] = "npm run type-check"
+        elif "tsc" in scripts:
+            infra["typecheck_cmd"] = "npm run tsc"
+
+        gates = [cmd for cmd in [infra["typecheck_cmd"], infra["lint_cmd"], infra["test_cmd"]] if cmd]
+        if gates:
+            infra["quality_gate_cmd"] = " && ".join(gates)
+        return infra
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _detect_python_infra(search_dir: Path) -> Optional[Dict[str, Any]]:
+    """Check a directory for Python test infrastructure."""
+    for marker in ("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini"):
+        if (search_dir / marker).exists():
+            infra: Dict[str, Any] = {
+                "test_cmd": "python -m pytest",
+                "lint_cmd": None,
+                "typecheck_cmd": None,
+                "framework": "pytest",
+                "quality_gate_cmd": None,
+                "detected_from": str((search_dir / marker).relative_to(PROJECT_ROOT)),
+                "cwd": str(search_dir),
+            }
+            if (search_dir / "pyproject.toml").exists():
+                try:
+                    toml_text = (search_dir / "pyproject.toml").read_text()
+                    if "ruff" in toml_text:
+                        infra["lint_cmd"] = "ruff check ."
+                    if "mypy" in toml_text:
+                        infra["typecheck_cmd"] = "mypy ."
+                except OSError:
+                    pass
+            gates = [cmd for cmd in [infra["typecheck_cmd"], infra["lint_cmd"], infra["test_cmd"]] if cmd]
+            if gates:
+                infra["quality_gate_cmd"] = " && ".join(gates)
+            return infra
+    return None
+
+
 def detect_test_infrastructure() -> Dict[str, Any]:
     """Detect the project's test infrastructure by scanning config files.
 
-    Returns a dict with detected test/lint/typecheck commands and framework info.
+    Searches the project root first, then immediate subdirectories (1 level deep).
+    This handles greenfield projects where agents create code in subdirectories
+    like api/, site/, app/ etc.
+
+    Returns a dict with detected test/lint/typecheck commands, framework info,
+    and cwd (the directory where commands should be executed).
     This makes QRALPH self-contained — it doesn't rely on CLAUDE.md for TDD knowledge.
     """
-    infra: Dict[str, Any] = {
+    empty_infra: Dict[str, Any] = {
         "test_cmd": None,
         "lint_cmd": None,
         "typecheck_cmd": None,
         "framework": None,
         "quality_gate_cmd": None,
         "detected_from": None,
+        "cwd": None,
     }
 
-    # 1. Check package.json (Node/JS/TS projects)
-    pkg_json = PROJECT_ROOT / "package.json"
-    if pkg_json.exists():
-        try:
-            pkg = json.loads(pkg_json.read_text())
-            scripts = pkg.get("scripts", {})
-            infra["detected_from"] = "package.json"
+    # Directories to search: root first, then immediate subdirectories
+    search_dirs = [PROJECT_ROOT]
+    try:
+        for child in sorted(PROJECT_ROOT.iterdir()):
+            if child.is_dir() and not child.name.startswith(".") and child.name != "node_modules":
+                search_dirs.append(child)
+    except OSError:
+        pass
 
-            if "test" in scripts:
-                infra["test_cmd"] = "npm run test"
-                # Detect framework from test script content
-                test_script = scripts["test"]
-                for fw in ("vitest", "jest", "mocha", "ava", "tap"):
-                    if fw in test_script:
-                        infra["framework"] = fw
-                        break
-            if "lint" in scripts:
-                infra["lint_cmd"] = "npm run lint"
-            if "typecheck" in scripts:
-                infra["typecheck_cmd"] = "npm run typecheck"
-            elif "type-check" in scripts:
-                infra["typecheck_cmd"] = "npm run type-check"
-            elif "tsc" in scripts:
-                infra["typecheck_cmd"] = "npm run tsc"
+    for search_dir in search_dirs:
+        # 1. Check Node/JS/TS (package.json with test script)
+        result = _detect_node_infra(search_dir)
+        if result:
+            return result
 
-            # Build composite quality gate command
-            gates = [cmd for cmd in [infra["typecheck_cmd"], infra["lint_cmd"], infra["test_cmd"]] if cmd]
-            if gates:
-                infra["quality_gate_cmd"] = " && ".join(gates)
-        except (json.JSONDecodeError, OSError):
-            pass
+        # 2. Check Python (pyproject.toml, setup.py, pytest.ini)
+        result = _detect_python_infra(search_dir)
+        if result:
+            return result
 
-    # 2. Check for Python projects (pyproject.toml, setup.py, pytest.ini)
-    if not infra["test_cmd"]:
-        for marker in ("pyproject.toml", "setup.py", "setup.cfg", "pytest.ini"):
-            if (PROJECT_ROOT / marker).exists():
-                infra["detected_from"] = marker
-                infra["test_cmd"] = "python -m pytest"
-                infra["framework"] = "pytest"
-                # Check for ruff/flake8/mypy
-                if (PROJECT_ROOT / "pyproject.toml").exists():
-                    try:
-                        toml_text = (PROJECT_ROOT / "pyproject.toml").read_text()
-                        if "ruff" in toml_text:
-                            infra["lint_cmd"] = "ruff check ."
-                        if "mypy" in toml_text:
-                            infra["typecheck_cmd"] = "mypy ."
-                    except OSError:
-                        pass
-                gates = [cmd for cmd in [infra["typecheck_cmd"], infra["lint_cmd"], infra["test_cmd"]] if cmd]
-                if gates:
-                    infra["quality_gate_cmd"] = " && ".join(gates)
-                break
+        # 3. Check Rust
+        if (search_dir / "Cargo.toml").exists():
+            return {
+                "test_cmd": "cargo test",
+                "lint_cmd": "cargo clippy",
+                "typecheck_cmd": None,
+                "framework": "cargo",
+                "quality_gate_cmd": "cargo clippy && cargo test",
+                "detected_from": str((search_dir / "Cargo.toml").relative_to(PROJECT_ROOT)),
+                "cwd": str(search_dir),
+            }
 
-    # 3. Check for Rust projects
-    if not infra["test_cmd"] and (PROJECT_ROOT / "Cargo.toml").exists():
-        infra["detected_from"] = "Cargo.toml"
-        infra["test_cmd"] = "cargo test"
-        infra["framework"] = "cargo"
-        infra["lint_cmd"] = "cargo clippy"
-        infra["quality_gate_cmd"] = "cargo clippy && cargo test"
+        # 4. Check Go
+        if (search_dir / "go.mod").exists():
+            return {
+                "test_cmd": "go test ./...",
+                "lint_cmd": "golangci-lint run",
+                "typecheck_cmd": None,
+                "framework": "go",
+                "quality_gate_cmd": "go test ./...",
+                "detected_from": str((search_dir / "go.mod").relative_to(PROJECT_ROOT)),
+                "cwd": str(search_dir),
+            }
 
-    # 4. Check for Go projects
-    if not infra["test_cmd"] and (PROJECT_ROOT / "go.mod").exists():
-        infra["detected_from"] = "go.mod"
-        infra["test_cmd"] = "go test ./..."
-        infra["framework"] = "go"
-        infra["lint_cmd"] = "golangci-lint run"
-        infra["quality_gate_cmd"] = "go test ./..."
-
-    # 5. Check for Makefile with test target
-    if not infra["test_cmd"]:
-        makefile = PROJECT_ROOT / "Makefile"
+        # 5. Check Makefile with test target
+        makefile = search_dir / "Makefile"
         if makefile.exists():
             try:
                 content = makefile.read_text()
                 if re.search(r'^test:', content, re.MULTILINE):
-                    infra["detected_from"] = "Makefile"
-                    infra["test_cmd"] = "make test"
-                    infra["quality_gate_cmd"] = "make test"
+                    return {
+                        "test_cmd": "make test",
+                        "lint_cmd": None,
+                        "typecheck_cmd": None,
+                        "framework": "make",
+                        "quality_gate_cmd": "make test",
+                        "detected_from": str(makefile.relative_to(PROJECT_ROOT)),
+                        "cwd": str(search_dir),
+                    }
             except OSError:
                 pass
 
-    return infra
+    return empty_infra
 
 
 def discover_work_skills(request: str) -> List[str]:
@@ -2115,7 +2172,8 @@ def _cmd_remediate_locked():
     # Write REMEDIATION.md
     lines = ["# Remediation Plan\n"]
     if tdd_applicable:
-        lines.append(f"\n> **TDD Enforcement Active** — test infrastructure detected: `{test_infra['framework']}`")
+        cwd_note = f" (from `{test_infra.get('cwd', 'project root')}`)" if test_infra.get("cwd") and test_infra["cwd"] != str(PROJECT_ROOT) else ""
+        lines.append(f"\n> **TDD Enforcement Active** — test infrastructure detected: `{test_infra['framework']}`{cwd_note}")
         lines.append(f"> Quality gate: `{test_infra['quality_gate_cmd'] or test_infra['test_cmd']}`")
         lines.append("> Each task MUST follow: write failing test → implement fix → run quality gate\n")
     elif has_test_infra:
@@ -2242,12 +2300,13 @@ def _cmd_remediate_verify_locked():
     quality_gate_result = None
 
     if quality_gate_cmd and state.get("mode") == "coding":
-        log_decision(project_path, f"Running quality gate: {quality_gate_cmd}")
+        gate_cwd = test_infra.get("cwd") or str(PROJECT_ROOT)
+        log_decision(project_path, f"Running quality gate: {quality_gate_cmd} (cwd={gate_cwd})")
         try:
             result = subprocess.run(
                 quality_gate_cmd,
                 shell=True,
-                cwd=str(PROJECT_ROOT),
+                cwd=gate_cwd,
                 capture_output=True,
                 text=True,
                 timeout=300,  # 5 minute timeout
