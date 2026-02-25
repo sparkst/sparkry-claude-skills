@@ -1490,6 +1490,7 @@ def _cmd_synthesize_locked():
 
     state["findings"] = all_findings
     state["phase"] = next_phase
+    state["evidence_quality"] = eqs_data
     save_state_and_checkpoint(state)
 
     log_decision(project_path,
@@ -1497,9 +1498,6 @@ def _cmd_synthesize_locked():
         f"{len(all_findings['P1'])} P1, {len(all_findings['P2'])} P2 "
         f"[EQS:{eqs_data['eqs']}/100 — {eqs_data['confidence']}]"
     )
-
-    # Store EQS in state for SUMMARY.md
-    state["evidence_quality"] = eqs_data
 
     output = {
         "status": "synthesized",
