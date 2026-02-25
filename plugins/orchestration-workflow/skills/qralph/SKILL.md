@@ -1,4 +1,4 @@
-# QRALPH v5.1.0 - Hierarchical Team Orchestration Skill
+# QRALPH v5.1.1 - Hierarchical Team Orchestration Skill
 
 > Sr. SDM orchestrator with **enforced** PE overlay, hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. All PE gates, COE analyses, pattern sweeps, and VALIDATING phase are **blocking** — not advisory.
 
@@ -50,9 +50,26 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
 
 16. **ADR lifecycle.** The orchestrator loads ADRs from `docs/adrs/` in the target repo during INIT->DISCOVERING. New ADRs are proposed during REVIEWING and stored in the project's `proposed-adrs/` directory. Approve proposed ADRs with: `python3 .qralph/tools/qralph-orchestrator.py adr-check --approve NNN`. List all ADRs with: `adr-list`.
 
-## Version Check
+## Version Check (MANDATORY — Run Before Any Work)
 
-On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v5.1.0 — see CHANGELOG.md for changes." Update `last_seen_version`.
+On EVERY invocation, before any other action, run:
+
+```bash
+python3 .qralph/tools/qralph-version-check.py check --json
+```
+
+**If status is `"outdated"`:** Run `python3 .qralph/tools/qralph-version-check.py sync` to update project-local files from the plugin cache. Announce: "QRALPH updated to vX.Y.Z — synced from plugin cache." Then **re-read this SKILL.md** since it may have changed.
+
+**If status is `"current"`:** Continue normally.
+
+**If the script does not exist:** Copy it from the plugin cache:
+```bash
+cp ~/.claude/plugins/cache/sparkry-claude-skills/orchestration-workflow/*/skills/qralph/tools/qralph-version-check.py .qralph/tools/
+```
+
+**NEVER modify SKILL.md, tools/*.py, or templates/ directly.** These files are owned by the plugin cache. If they need updating, update the marketplace package and run `sync`.
+
+Legacy check: Also compare `.qralph/VERSION` against `current-project.json` `last_seen_version`. If different, update `last_seen_version`.
 
 ## Tools
 
@@ -70,6 +87,7 @@ All orchestrator tools live at `.qralph/tools/`:
 ├── process-monitor.py       # PID registry and orphan cleanup
 ├── pe-overlay.py           # PE gate logic (ADR, DoD, COE, pattern sweep, requirement inference)
 ├── codebase-nav.py         # Adaptive codebase navigation (ts-aware, polyglot, grep-enhanced)
+├── qralph-version-check.py # Version check + sync (cache vs project-local)
 └── test_*.py                # Test suites (600+ tests)
 ```
 
