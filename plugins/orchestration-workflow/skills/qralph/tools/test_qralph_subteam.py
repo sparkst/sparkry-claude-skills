@@ -67,7 +67,7 @@ def tmp_project(tmp_path):
         "mode": "coding",
         "phase": "REVIEWING",
         "created_at": datetime.now().isoformat(),
-        "agents": ["security-reviewer", "architecture-advisor", "sde-iii", "code-quality-auditor"],
+        "agents": ["security-reviewer", "architecture-advisor", "sde-iii", "pe-reviewer", "code-quality-auditor"],
         "team_name": "qralph-001-test-project",
         "teammates": [],
         "skills_for_agents": {},
@@ -107,9 +107,9 @@ Reviewed from {agent_name} perspective. All looks good.
 - Minor style improvements
 
 ## Recommendations
-1. Add acceptance criteria for all endpoints
-2. Verify test coverage meets complexity threshold
-3. Review risk assessment for maintainability
+- Add acceptance criteria for all endpoints
+- Verify test coverage meets complexity threshold
+- Review risk assessment for maintainability
 """
     output_file = project_dir / "agent-outputs" / f"{agent_name}.md"
     output_file.write_text(content)
@@ -151,7 +151,7 @@ class TestCreateSubteam:
 
         assert result["status"] == "subteam_ready"
         assert result["phase"] == "REVIEWING"
-        assert result["agent_count"] == 4
+        assert result["agent_count"] == 5
 
     def test_create_subteam_outputs_instructions(self, tmp_project, capsys):
         tmp_path, project_dir, state = tmp_project
@@ -497,7 +497,7 @@ class TestVersionDetection:
             result = qralph_orchestrator.cmd_resume("001-test-project")
 
         assert "version_update" in result
-        assert "4.1" in result["version_update"]
+        assert "5.1" in result["version_update"]
 
     def test_no_version_update_when_current(self, tmp_project, capsys):
         tmp_path, project_dir, state = tmp_project
@@ -602,8 +602,12 @@ class TestExecutionMode:
 class TestValidatingPhase:
     """REQ-QRALPH-026: VALIDATING phase transitions."""
 
-    def test_reviewing_to_validating(self):
-        assert qralph_orchestrator.validate_phase_transition("REVIEWING", "VALIDATING") is True
+    def test_reviewing_to_validating_blocked(self):
+        """v5.1: REVIEWING must go through EXECUTING before VALIDATING."""
+        assert qralph_orchestrator.validate_phase_transition("REVIEWING", "VALIDATING") is False
+
+    def test_reviewing_to_executing(self):
+        assert qralph_orchestrator.validate_phase_transition("REVIEWING", "EXECUTING") is True
 
     def test_executing_to_validating(self):
         assert qralph_orchestrator.validate_phase_transition("EXECUTING", "VALIDATING") is True

@@ -42,7 +42,7 @@ AGENT_TIMEOUTS = {
 }
 
 # Agent criticality levels
-CRITICAL_AGENTS = {"security-reviewer", "architecture-advisor", "sde-iii"}
+CRITICAL_AGENTS = {"security-reviewer", "architecture-advisor", "sde-iii", "pe-reviewer"}
 NON_CRITICAL_AGENTS = {"docs-writer", "code-quality-auditor"}
 
 # Escalation path for stuck agents
@@ -51,8 +51,8 @@ ESCALATION_STEPS = ["timeout", "retry_once", "skip_if_non_critical", "defer", "a
 # Phase preconditions
 PHASE_PRECONDITIONS = {
     "DISCOVERING": ["project_path_exists", "request_non_empty"],
-    "REVIEWING": ["discovery_results_exist", "at_least_one_capability"],
-    "EXECUTING": ["synthesis_exists", "reviewing_result_exists"],
+    "REVIEWING": ["discovery_results_exist", "at_least_one_capability", "adrs_loaded"],
+    "EXECUTING": ["synthesis_exists", "reviewing_result_exists", "coe_analysis_exists"],
     "VALIDATING": ["execution_artifacts_exist", "automated_tests_passing"],
     "UAT": ["execution_artifacts_exist"],
     "COMPLETE": ["uat_exists"],
@@ -315,6 +315,29 @@ def check_phase_preconditions(phase: str, state: dict, project_path: Path) -> Li
                         "message": f"Work remaining: {work_remaining}",
                     })
 
+        elif precond == "coe_analysis_exists":
+            # v5.0: Check that COE analyses exist for EXECUTING tasks
+            # This is a soft check -- warn but don't block
+            pe_data = state.get("pe_overlay", {})
+            if pe_data:  # Only check if PE overlay is active
+                coe_dir = project_path / "coe-analyses"
+                tasks = state.get("remediation_tasks", [])
+                fixed_tasks = [t for t in tasks if t.get("status") == "fixed"]
+                if fixed_tasks and not coe_dir.exists():
+                    issues.append({
+                        "precondition": precond,
+                        "met": False,
+                        "message": "Fixed tasks exist but no COE analyses found",
+                    })
+
+        elif precond == "adrs_loaded":
+            # v5.0: Check that ADRs were loaded during INIT->DISCOVERING
+            # This is a soft check -- auto-passes if PE overlay not active
+            pe_data = state.get("pe_overlay", {})
+            if pe_data and "adrs" not in pe_data:
+                # PE overlay is active but ADRs weren't loaded -- warning only
+                pass  # Not a hard failure, ADRs are optional
+
     return issues
 
 
@@ -374,6 +397,48 @@ def get_escalation_action(agent_name: str, issue: dict) -> str:
         return "retry_once"
 
 
+def check_pe_overlay_health(state: dict, project_path: Path) -> List[Dict[str, Any]]:
+    """Check PE overlay data integrity."""
+    issues = []
+    pe_data = state.get("pe_overlay", {})
+
+    if not pe_data:
+        return issues  # PE overlay not active, nothing to check
+
+    # Check nav strategy is valid
+    nav_strategy = pe_data.get("nav_strategy", "")
+    if nav_strategy and nav_strategy not in ("ts-aware", "polyglot", "grep-enhanced"):
+        issues.append({
+            "level": "warning",
+            "check": "pe_overlay",
+            "message": f"Unknown nav strategy: {nav_strategy}",
+        })
+
+    # Check DoD template reference is valid
+    dod_template = pe_data.get("dod_template", "")
+    if dod_template:
+        template_path = project_path.parent.parent / "templates" / dod_template
+        # Also check .qralph/templates/
+        alt_template_path = Path.cwd() / ".qralph" / "templates" / dod_template
+        if not template_path.exists() and not alt_template_path.exists():
+            issues.append({
+                "level": "info",
+                "check": "pe_overlay",
+                "message": f"DoD template not found: {dod_template} (will use defaults)",
+            })
+
+    # Check last gate result consistency
+    last_gate = pe_data.get("last_gate", {})
+    if last_gate and last_gate.get("blockers"):
+        issues.append({
+            "level": "warning",
+            "check": "pe_overlay",
+            "message": f"Last PE gate had blockers: {last_gate['blockers'][:3]}",
+        })
+
+    return issues
+
+
 def cmd_check():
     """Run all health checks."""
     state = safe_read_json(CURRENT_PROJECT_FILE, {})
@@ -389,8 +454,9 @@ def cmd_check():
     agent_issues = check_agent_health(state, project_path)
     state_issues = check_state_integrity(state, project_path)
     subteam_issues = check_subteam_health(state, project_path)
+    pe_issues = check_pe_overlay_health(state, project_path)
 
-    all_issues = agent_issues + state_issues + subteam_issues
+    all_issues = agent_issues + state_issues + subteam_issues + pe_issues
     critical_count = sum(1 for i in all_issues if i.get("level") == "critical")
     error_count = sum(1 for i in all_issues if i.get("level") == "error")
 

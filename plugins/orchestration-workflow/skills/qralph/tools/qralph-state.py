@@ -273,6 +273,10 @@ def repair_state(state: dict) -> dict:
         "remediation_tasks": [],
         "sub_teams": {},
         "last_seen_version": "",
+        "pe_overlay": {},
+        "adrs": [],
+        "dod_template": "",
+        "coe_analyses": {},
     }
 
     for field, default in defaults.items():

@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH Orchestrator v4.1 - Hierarchical team orchestration with sub-team architecture.
+QRALPH Orchestrator v5.1 - Hierarchical team orchestration with enforced PE overlay.
 
 This orchestrator MANAGES STATE and DISCOVERS PLUGINS. Claude creates native
 teams via TeamCreate, spawns teammates, and coordinates via TaskList/SendMessage.
 v4.1 adds hierarchical sub-teams, quality gates, and validation phases.
+v5.0 adds PE overlay gates, COE analysis, pattern sweeps, and ADR management.
+v5.1 makes ALL PE gates, COE, pattern sweeps, and VALIDATING phase ENFORCED (blocking).
 
 Commands:
     python3 qralph-orchestrator.py init "<request>" [--mode planning] [--auto|--human] [--fix-level none|p0|p0_p1|all]
@@ -28,6 +30,11 @@ Commands:
     python3 qralph-orchestrator.py remediate-verify
     python3 qralph-orchestrator.py subteam-status --phase <phase>
     python3 qralph-orchestrator.py quality-gate --phase <phase>
+    python3 qralph-orchestrator.py pe-gate --from-phase REVIEWING --to-phase EXECUTING
+    python3 qralph-orchestrator.py coe-analyze --task REM-001
+    python3 qralph-orchestrator.py pattern-sweep --task REM-001 [--scope repo]
+    python3 qralph-orchestrator.py adr-check --approve NNN
+    python3 qralph-orchestrator.py adr-list
 """
 
 import argparse
@@ -57,8 +64,20 @@ _pm_spec = importlib.util.spec_from_file_location("process_monitor", _pm_path)
 process_monitor = importlib.util.module_from_spec(_pm_spec)
 _pm_spec.loader.exec_module(process_monitor)
 
+# Import PE overlay module
+_pe_path = Path(__file__).parent / "pe-overlay.py"
+_pe_spec = importlib.util.spec_from_file_location("pe_overlay", _pe_path)
+pe_overlay = importlib.util.module_from_spec(_pe_spec)
+_pe_spec.loader.exec_module(pe_overlay)
+
+# Import codebase navigation module
+_nav_path = Path(__file__).parent / "codebase-nav.py"
+_nav_spec = importlib.util.spec_from_file_location("codebase_nav", _nav_path)
+codebase_nav = importlib.util.module_from_spec(_nav_spec)
+_nav_spec.loader.exec_module(codebase_nav)
+
 # Version
-VERSION = "4.1.7"
+VERSION = "5.1.0"
 
 # Constants
 SCRIPT_DIR = Path(__file__).parent
@@ -259,10 +278,10 @@ def validate_phase_transition(current_phase: str, next_phase: str, mode: str = "
     coding_transitions = {
         "INIT": ["DISCOVERING", "REVIEWING"],
         "DISCOVERING": ["REVIEWING"],
-        "REVIEWING": ["EXECUTING", "VALIDATING", "COMPLETE"],
-        "EXECUTING": ["UAT", "VALIDATING", "COMPLETE"],
+        "REVIEWING": ["EXECUTING"],
+        "EXECUTING": ["UAT", "VALIDATING"],
         "VALIDATING": ["COMPLETE", "EXECUTING"],
-        "UAT": ["COMPLETE"],
+        "UAT": ["VALIDATING"],
         "COMPLETE": [],
     }
     work_transitions = {
@@ -277,6 +296,31 @@ def validate_phase_transition(current_phase: str, next_phase: str, mode: str = "
     }
     transitions = work_transitions if mode == "work" else coding_transitions
     return next_phase in transitions.get(current_phase, [])
+
+
+def run_pe_gate(current_phase: str, next_phase: str, state: dict) -> dict:
+    """Run PE overlay gate checks for a phase transition.
+
+    Returns gate result dict. Blockers BLOCK the transition (enforced since v5.1).
+    If pe_overlay import fails, returns a blocker — PE gates are mandatory.
+    """
+    try:
+        project_path = Path(state.get("project_path", ""))
+        result = pe_overlay.run_gate(current_phase, next_phase, state, project_path)
+        # Store gate result in state
+        pe_data = state.get("pe_overlay", {})
+        pe_data["last_gate"] = {
+            "transition": f"{current_phase} -> {next_phase}",
+            "passed": result.get("passed", True),
+            "blockers": result.get("blockers", []),
+            "warnings": result.get("warnings", []),
+            "timestamp": datetime.now().isoformat(),
+        }
+        state["pe_overlay"] = pe_data
+        return result
+    except Exception as e:
+        print(f"ERROR: PE gate check failed: {e}", file=sys.stderr)
+        return {"passed": False, "blockers": [f"PE gate check failed: {e}"], "warnings": [], "proposed_adrs": []}
 
 
 def generate_slug(request: str) -> str:
@@ -812,6 +856,26 @@ def _cmd_discover_locked():
 
     # Detect test infrastructure (makes QRALPH self-contained for TDD)
     test_infra = detect_test_infrastructure()
+
+    # v5.0: DoD template selection and nav strategy
+    repo_root = Path(state.get("repo_root", str(Path.cwd())))
+    try:
+        nav_result = codebase_nav.detect_strategy(repo_root)
+        pe_data = state.get("pe_overlay", {})
+        pe_data["nav_strategy"] = nav_result.get("strategy", "grep-enhanced")
+        pe_data["detected_languages"] = nav_result.get("languages", [])
+        state["pe_overlay"] = pe_data
+    except Exception as e:
+        print(f"Warning: Nav strategy detection failed: {e}", file=sys.stderr)
+
+    try:
+        proj_type = pe_overlay.detect_project_type(repo_root)
+        pe_data = state.get("pe_overlay", {})
+        pe_data["project_type"] = proj_type
+        pe_data["dod_template"] = pe_overlay.DOD_TEMPLATES.get(proj_type, "dod-api.md")
+        state["pe_overlay"] = pe_data
+    except Exception as e:
+        print(f"Warning: Project type detection failed: {e}", file=sys.stderr)
 
     # Update state
     state["phase"] = "DISCOVERING"
@@ -1661,6 +1725,22 @@ def _cmd_checkpoint_locked(phase: str):
         return _error_result(f"Invalid phase: {phase}. Must be one of {sorted(qralph_state.VALID_PHASES)}")
 
     project_path = Path(state["project_path"])
+
+    # v5.1: Run PE overlay gate check — blockers BLOCK the transition
+    old_phase = state.get("phase", "INIT")
+    pe_gate_result = run_pe_gate(old_phase, phase, state)
+    pe_gate_blockers = pe_gate_result.get("blockers", [])
+    pe_gate_warnings = [f"PE gate warning: {w}" for w in pe_gate_result.get("warnings", [])]
+
+    if pe_gate_blockers:
+        blocker_list = "; ".join(pe_gate_blockers)
+        log_decision(project_path, f"PE gate BLOCKED {old_phase} -> {phase}: {pe_gate_blockers}")
+        return _error_result(
+            f"PE gate blocked transition {old_phase} -> {phase}. "
+            f"Blockers: {blocker_list}. "
+            f"Resolve blockers before proceeding."
+        )
+
     state["phase"] = phase
     state["checkpoint_at"] = datetime.now().isoformat()
     save_state(state)
@@ -1670,13 +1750,16 @@ def _cmd_checkpoint_locked(phase: str):
     # Also update state.json so cmd_resume picks up the latest phase
     safe_write_json(project_path / "checkpoints" / "state.json", state)
 
-    log_decision(project_path, f"Checkpoint saved: {phase}")
+    log_decision(project_path, f"Checkpoint saved: {phase} (PE gate passed)")
 
-    print(json.dumps({
+    output = {
         "status": "checkpointed",
         "phase": phase,
         "checkpoint_file": str(checkpoint_file),
-    }))
+    }
+    if pe_gate_warnings:
+        output["pe_gate_warnings"] = pe_gate_warnings
+    print(json.dumps(output))
 
 
 def cmd_generate_uat():
@@ -1761,6 +1844,31 @@ def _cmd_finalize_locked():
         return _error_result("No active project.")
 
     project_path = Path(state["project_path"])
+    mode = state.get("mode", "coding")
+
+    # v5.1: VALIDATING phase is mandatory for coding mode before finalize
+    if mode == "coding":
+        validating_result = project_path / "phase-outputs" / "VALIDATING-result.json"
+        if not validating_result.exists():
+            return _error_result(
+                "Cannot finalize without VALIDATING phase. "
+                "The fresh-context validation sub-team must run and produce "
+                "phase-outputs/VALIDATING-result.json before finalize. "
+                "Run: checkpoint VALIDATING, then spawn the validation sub-team."
+            )
+        # Check the validation actually passed
+        try:
+            vr = json.loads(validating_result.read_text())
+            if vr.get("status") == "failed":
+                return _error_result(
+                    f"VALIDATING phase failed: {vr.get('reason', 'unknown')}. "
+                    f"Return to EXECUTING to address failures before finalizing."
+                )
+        except (json.JSONDecodeError, OSError):
+            return _error_result(
+                "VALIDATING-result.json exists but is unreadable. "
+                "Re-run the VALIDATING phase."
+            )
 
     # Gate: block finalize if remediation tasks exist and are incomplete
     tasks = state.get("remediation_tasks", [])
@@ -2210,15 +2318,49 @@ def cmd_remediate_done(task_ids: str, notes: str = ""):
 
 
 def _cmd_remediate_done_locked(task_ids: str, notes: str = ""):
-    """Inner remediate-done logic, called under exclusive lock."""
+    """Inner remediate-done logic, called under exclusive lock.
+
+    v5.1: COE analysis and pattern sweep are REQUIRED before marking tasks fixed.
+    """
     state = load_state()
     if not state:
         return _error_result("No active project.")
 
+    project_path = Path(state["project_path"])
     ids = [tid.strip() for tid in task_ids.split(",")]
     tasks = state.get("remediation_tasks", [])
-    marked = []
 
+    # v5.1: Enforce COE analysis and pattern sweep before allowing remediate-done
+    missing_coe = []
+    missing_sweep = []
+    for tid in ids:
+        try:
+            coe = pe_overlay.load_coe_analysis(project_path, tid)
+            if coe is None:
+                missing_coe.append(tid)
+            else:
+                # COE exists — check if pattern sweep was run
+                sweep_file = project_path / "pattern-sweeps" / f"{tid}.json"
+                if not sweep_file.exists():
+                    missing_sweep.append(tid)
+        except Exception:
+            missing_coe.append(tid)
+
+    if missing_coe:
+        return _error_result(
+            f"Cannot mark tasks as fixed without COE analysis. "
+            f"Missing COE for: {', '.join(missing_coe)}. "
+            f"Run: coe-analyze --task <ID> for each, fill in 5-Whys, then validate."
+        )
+
+    if missing_sweep:
+        return _error_result(
+            f"Cannot mark tasks as fixed without pattern sweep. "
+            f"Missing sweep for: {', '.join(missing_sweep)}. "
+            f"Run: pattern-sweep --task <ID> for each."
+        )
+
+    marked = []
     for task in tasks:
         if task["id"] in ids:
             task["status"] = "fixed"
@@ -2229,9 +2371,8 @@ def _cmd_remediate_done_locked(task_ids: str, notes: str = ""):
     state["remediation_tasks"] = tasks
     save_state(state)
 
-    project_path = Path(state["project_path"])
     safe_write_json(project_path / "checkpoints" / "state.json", state)
-    log_decision(project_path, f"Remediation tasks marked fixed: {', '.join(marked)}")
+    log_decision(project_path, f"Remediation tasks marked fixed (COE+sweep verified): {', '.join(marked)}")
 
     open_tasks = [t for t in tasks if t["status"] == "open"]
     output = {
@@ -2734,16 +2875,144 @@ def cmd_quality_gate_wrapper(phase: str):
     return result
 
 
+# ─── PE OVERLAY COMMANDS (v5.0) ──────────────────────────────────────────────
+
+def cmd_pe_gate(from_phase: str, to_phase: str):
+    """Run PE overlay gate check manually."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+    result = run_pe_gate(from_phase, to_phase, state)
+    save_state(state)
+    print(json.dumps(result, indent=2, default=str))
+    return result
+
+
+def cmd_coe_analyze(task_id: str, validate_only: bool = False):
+    """Create or validate a COE analysis for a remediation task."""
+    with qralph_state.exclusive_state_lock():
+        state = load_state()
+        if not state:
+            return _error_result("No active project.")
+        project_path = Path(state["project_path"])
+
+        if validate_only:
+            coe_path = project_path / "coe-analyses" / f"{task_id}.json"
+            result = pe_overlay.validate_coe_analysis(coe_path)
+            print(json.dumps(result, indent=2))
+            return result
+
+        # Find the task finding
+        tasks = state.get("remediation_tasks", [])
+        task = next((t for t in tasks if t["id"] == task_id), None)
+        if not task:
+            return _error_result(f"Task {task_id} not found in remediation tasks.")
+
+        # Create COE template
+        coe = pe_overlay.create_coe_template(task_id, task.get("finding", ""))
+        coe_dir = project_path / "coe-analyses"
+        coe_dir.mkdir(parents=True, exist_ok=True)
+        coe_path = coe_dir / f"{task_id}.json"
+        safe_write_json(coe_path, coe)
+
+        output = {
+            "status": "coe_template_created",
+            "task_id": task_id,
+            "coe_file": str(coe_path),
+            "instruction": f"Fill in the 5-Whys analysis in {coe_path}, then run: coe-analyze --task {task_id} --validate",
+        }
+        print(json.dumps(output, indent=2))
+        return output
+
+
+def cmd_pattern_sweep(task_id: str, scope: str = "repo"):
+    """Run pattern sweep for a remediation task. Saves result to pattern-sweeps/<task_id>.json."""
+    with qralph_state.exclusive_state_lock():
+        state = load_state()
+        if not state:
+            return _error_result("No active project.")
+        project_path = Path(state["project_path"])
+
+        coe = pe_overlay.load_coe_analysis(project_path, task_id)
+        if not coe:
+            return _error_result(f"No COE analysis for {task_id}. Run coe-analyze --task {task_id} first.")
+
+        result = pe_overlay.pattern_sweep(project_path, task_id, coe)
+
+        # Persist sweep result so remediate-done can verify it was run
+        sweep_dir = project_path / "pattern-sweeps"
+        sweep_dir.mkdir(parents=True, exist_ok=True)
+        safe_write_json(sweep_dir / f"{task_id}.json", result)
+
+        print(json.dumps(result, indent=2, default=str))
+        return result
+
+
+def cmd_adr_check(approve_id: Optional[str] = None, list_adrs: bool = False):
+    """Check or approve ADRs."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+    project_path = Path(state["project_path"])
+
+    if list_adrs:
+        return cmd_adr_list()
+
+    if approve_id:
+        # Move from proposed-adrs/ to docs/adrs/
+        proposed_dir = project_path / "proposed-adrs"
+        repo_root = Path(state.get("repo_root", str(Path.cwd())))
+        adrs_dir = repo_root / "docs" / "adrs"
+        adrs_dir.mkdir(parents=True, exist_ok=True)
+
+        # Find the proposed ADR
+        proposed_files = list(proposed_dir.glob(f"*{approve_id}*")) if proposed_dir.exists() else []
+        if not proposed_files:
+            return _error_result(f"Proposed ADR {approve_id} not found.")
+
+        for pf in proposed_files:
+            dest = adrs_dir / pf.name
+            content = pf.read_text()
+            content = content.replace("## Status\nProposed", "## Status\nAccepted")
+            safe_write(dest, content)
+            pf.unlink()
+
+        output = {"status": "adr_approved", "id": approve_id, "destination": str(adrs_dir)}
+        print(json.dumps(output, indent=2))
+        return output
+
+    return _error_result("Specify --approve ID or --list")
+
+
+def cmd_adr_list():
+    """List all loaded ADRs."""
+    state = load_state()
+    if not state:
+        return _error_result("No active project.")
+
+    pe_data = state.get("pe_overlay", {})
+    adrs = pe_data.get("adrs", [])
+
+    output = {
+        "status": "adr_list",
+        "count": len(adrs),
+        "adrs": adrs,
+    }
+    print(json.dumps(output, indent=2))
+    return output
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def main():
     """CLI entry point: parse args and dispatch to the appropriate command."""
-    parser = argparse.ArgumentParser(description="QRALPH Orchestrator v4.1 - Hierarchical Teams")
+    parser = argparse.ArgumentParser(description="QRALPH Orchestrator v5.0 - Hierarchical Teams with PE Overlay")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
 
     # init
     init_parser = subparsers.add_parser("init", help="Initialize new project")
-    init_parser.add_argument("request", help="The request to execute")
+    init_parser.add_argument("request", nargs="?", default=None, help="The request to execute")
+    init_parser.add_argument("--request", dest="request_flag", default=None, help="The request to execute (alias for positional)")
     init_parser.add_argument("--mode", choices=["coding", "planning", "work"], default="coding")
     exec_group = init_parser.add_mutually_exclusive_group()
     exec_group.add_argument("--auto", action="store_const", const="auto", dest="execution_mode",
@@ -2811,10 +3080,32 @@ def main():
     qg_parser = subparsers.add_parser("quality-gate", help="Run quality gate on phase")
     qg_parser.add_argument("--phase", required=True, help="Phase to validate")
 
+    # v5.0 PE overlay commands
+    pe_gate_parser = subparsers.add_parser("pe-gate", help="Run PE overlay gate check")
+    pe_gate_parser.add_argument("--from-phase", required=True, help="Current phase")
+    pe_gate_parser.add_argument("--to-phase", required=True, help="Target phase")
+
+    coe_parser = subparsers.add_parser("coe-analyze", help="Create/validate COE analysis")
+    coe_parser.add_argument("--task", required=True, help="Task ID (e.g., REM-001)")
+    coe_parser.add_argument("--validate", action="store_true", help="Validate existing COE")
+
+    sweep_parser = subparsers.add_parser("pattern-sweep", help="Run pattern sweep for a task")
+    sweep_parser.add_argument("--task", required=True, help="Task ID (e.g., REM-001)")
+    sweep_parser.add_argument("--scope", choices=["file", "dir", "repo"], default="repo")
+
+    adr_parser = subparsers.add_parser("adr-check", help="Check or approve ADRs")
+    adr_parser.add_argument("--approve", help="Approve proposed ADR by ID")
+    adr_parser.add_argument("--list", action="store_true", help="List all ADRs")
+
+    subparsers.add_parser("adr-list", help="List all loaded ADRs")
+
     args = parser.parse_args()
 
     if args.command == "init":
-        cmd_init(args.request, args.mode, args.execution_mode, args.fix_level)
+        request = args.request_flag or args.request
+        if not request:
+            parser.error("init requires a request argument")
+        cmd_init(request, args.mode, args.execution_mode, args.fix_level)
     elif args.command == "discover":
         cmd_discover()
     elif args.command == "select-agents":
@@ -2852,6 +3143,16 @@ def main():
         cmd_subteam_status(args.phase)
     elif args.command == "quality-gate":
         cmd_quality_gate_wrapper(args.phase)
+    elif args.command == "pe-gate":
+        cmd_pe_gate(args.from_phase, args.to_phase)
+    elif args.command == "coe-analyze":
+        cmd_coe_analyze(args.task, args.validate)
+    elif args.command == "pattern-sweep":
+        cmd_pattern_sweep(args.task, args.scope)
+    elif args.command == "adr-check":
+        cmd_adr_check(args.approve, args.list)
+    elif args.command == "adr-list":
+        cmd_adr_list()
     else:
         parser.print_help()
 

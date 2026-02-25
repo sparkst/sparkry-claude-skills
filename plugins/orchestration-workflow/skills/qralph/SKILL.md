@@ -1,6 +1,6 @@
-# QRALPH v4.1.7 - Hierarchical Team Orchestration Skill
+# QRALPH v5.1.0 - Hierarchical Team Orchestration Skill
 
-> Sr. SDM orchestrator with hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. Builds on v4.0's native teams, plugin discovery, session persistence, process monitoring, long-term memory, and work mode.
+> Sr. SDM orchestrator with **enforced** PE overlay, hierarchical sub-teams, quality gates, fresh-context validation, and cross-session persistence. All PE gates, COE analyses, pattern sweeps, and VALIDATING phase are **blocking** — not advisory.
 
 ## Trigger
 
@@ -42,9 +42,17 @@ These rules are NON-NEGOTIABLE. Violating them produces incorrect results.
     - Only mark the task as fixed (`remediate-done`) after the quality gate passes
     If no test infrastructure is detected at either discovery or verify time, log a warning but do not block.
 
+13. **PE overlay gates are ENFORCED.** The orchestrator runs PE gate checks at every phase transition automatically. Gate results include blockers and warnings. Blockers BLOCK the phase transition — the checkpoint command will fail with an error. You MUST resolve all blockers before the transition can proceed. There is no bypass.
+
+14. **COE analysis REQUIRED before remediate-done.** Before marking a remediation task as fixed, create a COE (Correction of Error) analysis: `python3 .qralph/tools/qralph-orchestrator.py coe-analyze --task REM-NNN`. Fill in the 5-Whys analysis, then validate: `coe-analyze --task REM-NNN --validate`. The orchestrator BLOCKS `remediate-done` if COE is missing — there is no bypass.
+
+15. **Pattern sweep REQUIRED after fixes.** After fixing a remediation task, run pattern sweep: `python3 .qralph/tools/qralph-orchestrator.py pattern-sweep --task REM-NNN`. This searches the codebase for remaining instances of the same pattern. The orchestrator BLOCKS `remediate-done` if no pattern sweep result exists — there is no bypass. If instances remain, address them before marking the task complete.
+
+16. **ADR lifecycle.** The orchestrator loads ADRs from `docs/adrs/` in the target repo during INIT->DISCOVERING. New ADRs are proposed during REVIEWING and stored in the project's `proposed-adrs/` directory. Approve proposed ADRs with: `python3 .qralph/tools/qralph-orchestrator.py adr-check --approve NNN`. List all ADRs with: `adr-list`.
+
 ## Version Check
 
-On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v4.1.7 — see CHANGELOG.md for changes." Update `last_seen_version`.
+On first run, check `.qralph/VERSION`. Compare against `current-project.json` `last_seen_version`. If different, announce: "QRALPH updated to v5.1.0 — see CHANGELOG.md for changes." Update `last_seen_version`.
 
 ## Tools
 
@@ -60,7 +68,17 @@ All orchestrator tools live at `.qralph/tools/`:
 ├── qralph-state.py          # Shared state module (atomic writes, checksums, locking)
 ├── session-state.py         # Session persistence (STATE.md lifecycle, sub-team recovery)
 ├── process-monitor.py       # PID registry and orphan cleanup
-└── test_*.py                # Test suites (440+ tests)
+├── pe-overlay.py           # PE gate logic (ADR, DoD, COE, pattern sweep, requirement inference)
+├── codebase-nav.py         # Adaptive codebase navigation (ts-aware, polyglot, grep-enhanced)
+└── test_*.py                # Test suites (600+ tests)
+```
+
+DoD templates:
+```
+.qralph/templates/
+├── dod-webapp.md            # Definition of Done for web applications
+├── dod-api.md               # Definition of Done for API/backend services
+└── dod-library.md           # Definition of Done for libraries/packages
 ```
 
 Long-term memory:
@@ -75,35 +93,41 @@ Long-term memory:
 
 QRALPH creates a Claude Code native team to analyze requests and produce consolidated findings. It dynamically discovers installed plugins and skills, selects the best agents, and coordinates them through shared task lists and messaging.
 
-## Architecture: Hierarchical Sub-Teams (v4.1)
+## Architecture: Hierarchical Sub-Teams + Enforced PE Overlay (v5.1)
 
 ```
-QRALPH v4.1 (main session — "Sr. SDM")
+QRALPH v5.1 (main session — "Sr. SDM")
   │
   │  Persists: STATE.md, current-project.json, checkpoints/, phase-outputs/
   │  Manages: phases, healing, circuit breakers, audit trail, version
+  │  PE Overlay: ENFORCED gate checks at every phase transition (ADR, DoD, COE, patterns)
   │
   ├── INIT + DISCOVERING (direct, no sub-team)
+  │     └── PE gate (BLOCKING): load ADRs, infer requirements, select DoD template, select nav strategy
   │
   ├── REVIEWING (sub-team)
   │     ├── Sub-team lead (Sonnet) spawns N review agents
   │     ├── Agents write agent-outputs/*.md to disk
   │     ├── Lead writes phase-outputs/REVIEWING-result.json
-  │     ├── QRALPH runs 95% confidence quality gate
+  │     ├── QRALPH runs 95% confidence quality gate (7 criteria)
+  │     ├── PE gate (BLOCKING): check ADR consistency, propose new ADRs, validate DoD
   │     └── If --human: pause for user approval. If --auto: continue.
   │
-  ├── EXECUTING (TDD remediation loop)
+  ├── EXECUTING (TDD remediation loop + COE/5-Whys — all enforced)
   │     ├── `remediate` creates tasks with tdd_steps from detected test infra
-  │     ├── For each task: write failing test → fix → run quality gate
-  │     ├── `remediate-done` marks tasks fixed after quality gate passes
-  │     └── `remediate-verify` runs full quality gate before allowing COMPLETE
+  │     ├── For each task: COE analysis → write failing test → fix → pattern sweep → quality gate
+  │     ├── `remediate-done` BLOCKED without COE + pattern sweep for each task
+  │     ├── PE gate (BLOCKING): full DoD check, ADR final check, pattern sweep summary
+  │     └── `remediate-verify` runs full quality gate before allowing VALIDATING
   │
-  ├── VALIDATING (fresh sub-team)
+  ├── VALIDATING (fresh sub-team — MANDATORY before finalize)
   │     ├── Fresh context — no knowledge of implementation details
   │     ├── Given: requirements + built artifacts + mini-UAT scenarios
+  │     ├── Must produce phase-outputs/VALIDATING-result.json
+  │     ├── PE gate (BLOCKING): final ADR compliance, DoD sign-off, store learnings
   │     └── If fails: back to EXECUTING with failure details
   │
-  └── COMPLETE (direct, no sub-team)
+  └── COMPLETE (direct, no sub-team — requires VALIDATING-result.json)
 ```
 
 ### Sub-Team Lifecycle
@@ -130,12 +154,14 @@ python3 .qralph/tools/qralph-subteam.py teardown-subteam --phase REVIEWING
 
 ### Quality Gate (95% Confidence)
 
-The quality gate checks 5 criteria:
-1. All critical agents completed (security-reviewer, architecture-advisor, sde-iii)
+The quality gate checks 7 criteria:
+1. All critical agents completed (security-reviewer, architecture-advisor, sde-iii, pe-reviewer)
 2. Every domain from the request covered by at least one finding
 3. No unresolved contradictions between agents
 4. Execution plan has testable acceptance criteria
-5. PE risk assessment present (complexity, coverage, maintainability)
+5. PE risk assessment present (structured validation)
+6. ADR consistency — agent findings don't contradict accepted ADRs (v5.0)
+7. DoD template compliance — Testing and Security categories addressed (v5.0)
 
 ### Execution Modes
 
@@ -145,6 +171,45 @@ QRALPH "<request>" --auto    # Auto-continue after quality gate passes
 QRALPH "<request>" --fix-level p0       # Remediate P0 only
 QRALPH "<request>" --fix-level all      # Remediate P0+P1+P2
 QRALPH "<request>" --fix-level none     # Skip remediation entirely
+```
+
+## PE Overlay (v5.1 — Enforced)
+
+The PE overlay adds Principal Engineer practices across all QRALPH phases. **All gates are enforced** — blockers prevent phase transitions, COE is required before remediate-done, pattern sweeps are required before remediate-done, and VALIDATING phase is mandatory before finalize.
+
+### Gate Checks (BLOCKING)
+Every phase transition runs gate checks that validate:
+- **ADR compliance** — loaded ADRs aren't contradicted by findings
+- **DoD completeness** — Definition of Done categories are addressed
+- **Requirements inference** — implicit requirements detected from tech stack
+- **Pattern consistency** — codebase navigation strategy selected
+
+If any gate produces a **blocker**, the checkpoint command fails. Resolve all blockers before proceeding.
+
+### COE / 5-Whys
+Before marking remediation tasks as fixed, conduct root cause analysis:
+1. Create template: `coe-analyze --task REM-NNN`
+2. Fill in 5-Whys (Claude fills via pe-overlay agent)
+3. Validate: `coe-analyze --task REM-NNN --validate`
+4. Pattern sweep: `pattern-sweep --task REM-NNN`
+
+### Quality Gate (7 Criteria — all enforced)
+The quality gate checks 7 criteria. All must pass:
+1. All critical agents completed (now includes pe-reviewer)
+2. Every domain covered by findings
+3. No unresolved contradictions
+4. Testable acceptance criteria present
+5. PE risk assessment (structured validation)
+6. ADR consistency
+7. DoD template compliance
+
+### New Commands
+```
+python3 .qralph/tools/qralph-orchestrator.py pe-gate --from-phase X --to-phase Y
+python3 .qralph/tools/qralph-orchestrator.py coe-analyze --task REM-NNN [--validate]
+python3 .qralph/tools/qralph-orchestrator.py pattern-sweep --task REM-NNN [--scope repo]
+python3 .qralph/tools/qralph-orchestrator.py adr-check --approve NNN
+python3 .qralph/tools/qralph-orchestrator.py adr-list
 ```
 
 ## Project Structure
@@ -170,6 +235,9 @@ Projects are created in: `.qralph/projects/`
 │   └── VALIDATING-result.json
 ├── healing-attempts/        # Self-healing audit trail + patterns DB
 │   └── healing-patterns.json
+├── coe-analyses/            # COE/5-Whys analysis per task (required before remediate-done)
+├── pattern-sweeps/          # Pattern sweep results per task (required before remediate-done)
+├── proposed-adrs/           # ADRs proposed during REVIEWING
 └── checkpoints/             # Resumable state snapshots
 ```
 
@@ -323,7 +391,7 @@ qralph-watchdog.py check-state                   # State integrity
 qralph-watchdog.py check-preconditions <phase>   # Pre-transition validation
 ```
 
-**Agent criticality**: security-reviewer, architecture-advisor, sde-iii are critical (never auto-skip).
+**Agent criticality**: security-reviewer, architecture-advisor, sde-iii, pe-reviewer are critical (never auto-skip).
 
 ## Self-Healing (Enhanced in v4.0)
 
