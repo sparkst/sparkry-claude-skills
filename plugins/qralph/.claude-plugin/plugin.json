@@ -1,5 +1,5 @@
 {
-  "name": "orchestration-workflow",
+  "name": "qralph",
   "version": "6.1.0",
   "description": "Deterministic multi-agent pipeline with state machine orchestration, enforcement hooks, quality gates, and fresh-context validation (QRALPH)",
   "author": {

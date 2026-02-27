@@ -62,8 +62,8 @@
       "tags": ["beginner", "essentials", "quick-start"]
     },
     {
-      "name": "orchestration-workflow",
-      "source": "./plugins/orchestration-workflow",
+      "name": "qralph",
+      "source": "./plugins/qralph",
       "description": "Deterministic multi-agent pipeline with state machine orchestration, enforcement hooks, quality gates, and fresh-context validation (QRALPH v6.1.0)",
       "version": "6.1.0",
       "license": "MIT",
