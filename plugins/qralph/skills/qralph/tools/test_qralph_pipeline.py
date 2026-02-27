@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
-"""Tests for QRALPH v6.1 Pipeline."""
+"""Tests for QRALPH v6.2 Pipeline."""
 
 import json
 import os
@@ -434,8 +434,9 @@ class TestPhaseGating:
 
 class TestResume:
     def test_resume_plan_phase(self, tmp_path):
-        project_path = tmp_path / "project"
-        project_path.mkdir()
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
         (project_path / "agent-outputs").mkdir()
         state = {
             "phase": "PLAN",
@@ -444,14 +445,16 @@ class TestResume:
             "request": "test request",
             "template": "research",
         }
-        with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-            result = qralph_pipeline.cmd_resume()
-            assert result["phase"] == "PLAN"
-            assert result["status"] == "resumable"
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+                result = qralph_pipeline.cmd_resume()
+                assert result["phase"] == "PLAN"
+                assert result["status"] == "resumable"
 
     def test_resume_execute_phase(self, tmp_path):
-        project_path = tmp_path / "project"
-        project_path.mkdir()
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
         (project_path / "agent-outputs").mkdir()
         (project_path / "execution-outputs").mkdir()
         (project_path / "manifest.json").write_text("{}")
@@ -463,10 +466,11 @@ class TestResume:
             "request": "test",
             "template": "bug-fix",
         }
-        with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-            result = qralph_pipeline.cmd_resume()
-            assert result["phase"] == "EXECUTE"
-            assert result["has_manifest"] is True
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+                result = qralph_pipeline.cmd_resume()
+                assert result["phase"] == "EXECUTE"
+                assert result["has_manifest"] is True
 
     def test_resume_no_project(self):
         with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value={}):
@@ -474,8 +478,9 @@ class TestResume:
             assert "error" in result
 
     def test_resume_complete(self, tmp_path):
-        project_path = tmp_path / "project"
-        project_path.mkdir()
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
         (project_path / "agent-outputs").mkdir()
         (project_path / "execution-outputs").mkdir()
         state = {
@@ -484,9 +489,10 @@ class TestResume:
             "project_path": str(project_path),
             "request": "done",
         }
-        with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-            result = qralph_pipeline.cmd_resume()
-            assert "SUMMARY.md" in result["next_action"]
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+                result = qralph_pipeline.cmd_resume()
+                assert "SUMMARY.md" in result["next_action"]
 
 
 # ─── Status Tests ───────────────────────────────────────────────────────────
@@ -498,6 +504,9 @@ class TestStatus:
             assert result["status"] == "no_active_project"
 
     def test_status_active_project(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
         state = {
             "project_id": "001-test",
             "request": "test request",
@@ -506,13 +515,14 @@ class TestStatus:
             "agents": ["researcher", "sde-iii"],
             "created_at": "2026-01-01T00:00:00",
             "pipeline_version": "6.0.0",
-            "project_path": str(tmp_path),
+            "project_path": str(project_path),
         }
-        with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-            result = qralph_pipeline.cmd_status()
-            assert result["project_id"] == "001-test"
-            assert result["phase"] == "PLAN"
-            assert result["pipeline_version"] == "6.0.0"
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+                result = qralph_pipeline.cmd_status()
+                assert result["project_id"] == "001-test"
+                assert result["phase"] == "PLAN"
+                assert result["pipeline_version"] == "6.0.0"
 
 
 # ─── Dry Run Tests ──────────────────────────────────────────────────────────
@@ -531,8 +541,9 @@ class TestDryRun:
 
 class TestExecuteCollect:
     def test_all_complete(self, tmp_path):
-        project_path = tmp_path / "project"
-        project_path.mkdir()
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
         outputs_dir = project_path / "execution-outputs"
         outputs_dir.mkdir()
         (outputs_dir / "T1.md").write_text("Done")
@@ -543,16 +554,18 @@ class TestExecuteCollect:
 
         state = {"phase": "EXECUTE", "project_path": str(project_path)}
 
-        with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-            with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
-                with mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
-                    result = qralph_pipeline.cmd_execute_collect()
-                    assert result["status"] == "execute_complete"
-                    assert result["phase"] == "VERIFY"
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+                with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
+                    with mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
+                        result = qralph_pipeline.cmd_execute_collect()
+                        assert result["status"] == "execute_complete"
+                        assert result["phase"] == "VERIFY"
 
     def test_incomplete(self, tmp_path):
-        project_path = tmp_path / "project"
-        project_path.mkdir()
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
         outputs_dir = project_path / "execution-outputs"
         outputs_dir.mkdir()
         (outputs_dir / "T1.md").write_text("Done")
@@ -562,10 +575,11 @@ class TestExecuteCollect:
 
         state = {"phase": "EXECUTE", "project_path": str(project_path)}
 
-        with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-            result = qralph_pipeline.cmd_execute_collect()
-            assert result["status"] == "execute_incomplete"
-            assert "T2" in result["missing_tasks"]
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+                result = qralph_pipeline.cmd_execute_collect()
+                assert result["status"] == "execute_incomplete"
+                assert "T2" in result["missing_tasks"]
 
 
 # ─── Template Coverage Tests ────────────────────────────────────────────────
@@ -780,8 +794,8 @@ class TestCmdNext:
 
     def test_plan_waiting_outputs_present_advances(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="PLAN_WAITING")
-        (project_path / "agent-outputs" / "researcher.md").write_text("Research findings here")
-        (project_path / "agent-outputs" / "sde-iii.md").write_text("Implementation plan here")
+        (project_path / "agent-outputs" / "researcher.md").write_text("x" * 200)
+        (project_path / "agent-outputs" / "sde-iii.md").write_text("x" * 200)
 
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
             with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
@@ -826,7 +840,7 @@ class TestCmdNext:
 
         exec_group = {
             "task_ids": ["T1"],
-            "agents": [{"task_id": "T1", "name": "impl-T1", "model": "sonnet", "prompt": "Implement..."}],
+            "agents": [{"task_id": "T1", "name": "T1", "model": "sonnet", "prompt": "Implement..."}],
             "parallel": False,
         }
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
@@ -846,7 +860,7 @@ class TestCmdNext:
 
     def test_exec_waiting_missing_outputs_returns_error(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="EXEC_WAITING")
-        exec_group = {"task_ids": ["T1"], "agents": [{"name": "impl-T1"}]}
+        exec_group = {"task_ids": ["T1"], "agents": [{"name": "T1"}]}
         state["pipeline"]["execution_groups"] = [exec_group]
         state["pipeline"]["current_group_index"] = 0
 
@@ -858,26 +872,27 @@ class TestCmdNext:
 
     def test_exec_waiting_complete_spawns_verifier(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="EXEC_WAITING")
-        exec_group = {"task_ids": ["T1"], "agents": [{"name": "impl-T1"}]}
+        exec_group = {"task_ids": ["T1"], "agents": [{"name": "T1"}]}
         state["pipeline"]["execution_groups"] = [exec_group]
         state["pipeline"]["current_group_index"] = 0
-        (project_path / "execution-outputs" / "T1.md").write_text("Done implementing")
+        (project_path / "execution-outputs" / "T1.md").write_text("x" * 200)
 
-        verifier_agent = {"name": "verifier", "model": "sonnet", "prompt": "Verify..."}
-        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
-            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-                with mock.patch.object(qralph_pipeline, 'cmd_execute_collect', return_value={
-                    "status": "execute_complete", "phase": "VERIFY",
-                }):
-                    with mock.patch.object(qralph_pipeline, 'cmd_verify', return_value={
-                        "status": "verify_ready", "agent": verifier_agent,
-                    }):
-                        with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
-                            with mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
-                                result = qralph_pipeline.cmd_next(confirm=False)
-                                assert result["action"] == "spawn_agents"
-                                assert result["agents"][0]["name"] == "verifier"
-                                assert "verification" in result["output_dir"]
+        verifier_agent = {"name": "result", "model": "sonnet", "prompt": "Verify..."}
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
+             mock.patch.object(qralph_pipeline, 'cmd_execute_collect', return_value={
+                 "status": "execute_complete", "phase": "VERIFY",
+             }), \
+             mock.patch.object(qralph_pipeline, 'cmd_verify', return_value={
+                 "status": "verify_ready", "agent": verifier_agent,
+             }), \
+             mock.patch.object(qralph_pipeline, 'detect_quality_gate', return_value=""), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'save_state'), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
+            result = qralph_pipeline.cmd_next(confirm=False)
+            assert result["action"] == "spawn_agents"
+            assert result["agents"][0]["name"] == "result"
+            assert "verification" in result["output_dir"]
 
     def test_verify_wait_missing_output_returns_error(self, tmp_path):
         state, _, projects_dir = self._make_state(tmp_path, sub_phase="VERIFY_WAIT")
@@ -1017,7 +1032,8 @@ class TestVerifyVerdictEnforcement:
         # Write manifest.json so finalize can read it
         (project_path / "manifest.json").write_text(json.dumps({"tasks": [{"id": "T-001", "summary": "test"}]}))
 
-        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+        with mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+             mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
              mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
              mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
             result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
@@ -1043,8 +1059,8 @@ class TestQualityGateEnforcement:
         }
         (project_path / "manifest.json").write_text(json.dumps(manifest))
 
-        # Write execution output so collect passes
-        (project_path / "execution-outputs" / "T-001.md").write_text("Task done.")
+        # Write execution output so collect passes (must exceed MIN_AGENT_OUTPUT_LENGTH)
+        (project_path / "execution-outputs" / "T-001.md").write_text("x" * 200)
 
         state = {
             "project_id": "001-test",
@@ -1062,15 +1078,11 @@ class TestQualityGateEnforcement:
         state, project_path, projects_dir = self._make_state(tmp_path)
         pipeline = state["pipeline"]
 
-        # Set quality gate to a failing command
-        manifest = json.loads((project_path / "manifest.json").read_text())
-        manifest["quality_gate_cmd"] = "exit 1"
-        (project_path / "manifest.json").write_text(json.dumps(manifest))
-
         with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
              mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
              mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
-             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+             mock.patch.object(qralph_pipeline, "detect_quality_gate", return_value="exit 1"):
             result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
 
         assert result["action"] == "error"
@@ -1083,13 +1095,163 @@ class TestQualityGateEnforcement:
         with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
              mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
              mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
-             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+             mock.patch.object(qralph_pipeline, "detect_quality_gate", return_value="echo 'tests pass'"):
             result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
 
         assert result["action"] == "spawn_agents"
         # Should be spawning verifier
         assert len(result["agents"]) == 1
-        assert result["agents"][0]["name"] == "verifier"
+        assert result["agents"][0]["name"] == "result"
+
+
+class TestMinimumOutputLength:
+    """Agent outputs below MIN_AGENT_OUTPUT_LENGTH are rejected."""
+
+    def _make_state(self, tmp_path, sub_phase="PLAN_WAITING"):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "agent-outputs").mkdir()
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "checkpoints").mkdir()
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "PLAN" if "PLAN" in sub_phase else "EXECUTE",
+            "pipeline": {
+                "sub_phase": sub_phase,
+                "plan_agents": [{"name": "researcher", "model": "opus"}],
+            },
+        }
+        return state, project_path, projects_dir
+
+    def test_plan_short_output_rejected(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+        (project_path / "agent-outputs" / "researcher.md").write_text("Too short")
+
+        result = qralph_pipeline._next_plan_waiting(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert "too short" in result["message"].lower()
+
+    def test_plan_long_output_accepted(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+        (project_path / "agent-outputs" / "researcher.md").write_text("x" * 200)
+
+        with mock.patch.object(qralph_pipeline, 'cmd_plan_collect', return_value={"status": "ok", "analyses_summary": "done"}):
+            with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
+                with mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
+                    result = qralph_pipeline._next_plan_waiting(state, pipeline, project_path)
+        assert result["action"] != "error"
+
+    def test_exec_short_output_rejected(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="EXEC_WAITING")
+        pipeline = state["pipeline"]
+        pipeline["execution_groups"] = [{"task_ids": ["T1"], "agents": []}]
+        pipeline["current_group_index"] = 0
+        (project_path / "execution-outputs" / "T1.md").write_text("Short")
+
+        result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert "too short" in result["message"].lower()
+
+
+class TestTaskValidation:
+    """Task schema validation in cmd_plan_finalize."""
+
+    def test_missing_id_rejected(self):
+        errors = qralph_pipeline._validate_tasks([{"summary": "x", "files": ["a.ts"], "acceptance_criteria": ["works"]}])
+        assert any("missing 'id'" in e for e in errors)
+
+    def test_missing_summary_rejected(self):
+        errors = qralph_pipeline._validate_tasks([{"id": "T1", "files": ["a.ts"], "acceptance_criteria": ["works"]}])
+        assert any("missing 'summary'" in e for e in errors)
+
+    def test_missing_files_rejected(self):
+        errors = qralph_pipeline._validate_tasks([{"id": "T1", "summary": "x", "acceptance_criteria": ["works"]}])
+        assert any("files" in e for e in errors)
+
+    def test_empty_acceptance_criteria_rejected(self):
+        errors = qralph_pipeline._validate_tasks([{"id": "T1", "summary": "x", "files": ["a.ts"], "acceptance_criteria": []}])
+        assert any("acceptance_criteria" in e for e in errors)
+
+    def test_valid_task_passes(self):
+        errors = qralph_pipeline._validate_tasks([{
+            "id": "T1", "summary": "Do thing", "files": ["a.ts"],
+            "acceptance_criteria": ["It works"],
+        }])
+        assert errors == []
+
+
+class TestVerdictParsing:
+    """_parse_verdict extracts verdicts from various formats."""
+
+    def test_json_code_block(self):
+        content = 'Some prose\n\n```json\n{"verdict": "PASS", "issues": []}\n```\n\nMore prose'
+        assert qralph_pipeline._parse_verdict(content) == "PASS"
+
+    def test_raw_json(self):
+        content = '{"verdict": "FAIL", "issues": ["broken"]}'
+        assert qralph_pipeline._parse_verdict(content) == "FAIL"
+
+    def test_no_verdict(self):
+        content = "Everything looks great! All tests pass."
+        assert qralph_pipeline._parse_verdict(content) is None
+
+    def test_regex_fallback(self):
+        content = 'The result is: "verdict": "PASS" based on my analysis.'
+        assert qralph_pipeline._parse_verdict(content) == "PASS"
+
+    def test_prose_with_verdict_in_json_block_preferred(self):
+        content = 'I think the verdict is PASS\n\n```json\n{"verdict": "FAIL"}\n```'
+        assert qralph_pipeline._parse_verdict(content) == "FAIL"
+
+
+class TestQualityGateRecomputation:
+    """Quality gate command is recomputed at runtime, not read from manifest."""
+
+    def test_gate_recomputed_not_from_manifest(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        (project_path / "checkpoints").mkdir()
+
+        # Manifest has a MALICIOUS quality gate command
+        manifest = {
+            "tasks": [{"id": "T-001", "summary": "test", "files": []}],
+            "parallel_groups": [["T-001"]],
+            "quality_gate_cmd": "echo HACKED && rm -rf /",
+            "target_directory": str(tmp_path),
+        }
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+        (project_path / "execution-outputs" / "T-001.md").write_text("x" * 200)
+
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "EXECUTE",
+            "pipeline": {
+                "sub_phase": "EXEC_WAITING",
+                "execution_groups": [{"task_ids": ["T-001"], "agents": []}],
+                "current_group_index": 0,
+            },
+        }
+
+        # detect_quality_gate should return "" (no package.json etc in tmp)
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+             mock.patch.object(qralph_pipeline, "detect_quality_gate", return_value=""):
+            result = qralph_pipeline._next_exec_waiting(state, state["pipeline"], project_path)
+
+        # Should NOT have run the malicious command — should proceed to verify
+        assert result["action"] == "spawn_agents"
+        assert result["agents"][0]["name"] == "result"
 
 
 if __name__ == "__main__":

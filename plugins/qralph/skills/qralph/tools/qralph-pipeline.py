@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.1 Pipeline — deterministic multi-agent orchestration.
+QRALPH v6.2 Pipeline — deterministic multi-agent orchestration.
 
 3-phase pipeline: PLAN → EXECUTE → VERIFY
 Python does the orchestration. Claude does the thinking.
@@ -42,10 +42,15 @@ _config_spec = importlib.util.spec_from_file_location("qralph_config", _config_p
 qralph_config = importlib.util.module_from_spec(_config_spec)
 _config_spec.loader.exec_module(qralph_config)
 
+__version__ = "6.2.0"
+
 PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"
 PROJECTS_DIR = QRALPH_DIR / "projects"
 STATE_FILE = QRALPH_DIR / "current-project.json"
+
+# Minimum length for agent output to be considered valid (not a stub/error)
+MIN_AGENT_OUTPUT_LENGTH = 100
 
 # Pipeline phases
 PHASES = ["PLAN", "EXECUTE", "VERIFY", "COMPLETE"]
@@ -157,6 +162,53 @@ def _sanitize_request(request: str) -> str:
     if re.search(r'(?i)(key|token|secret|password)\s*[=:]\s*\S{8,}', request):
         print("Warning: Request may contain sensitive data. Review before proceeding.", file=sys.stderr)
     return request
+
+
+def _parse_verdict(content: str) -> Optional[str]:
+    """Extract verdict from verification output. Returns 'PASS', 'FAIL', or None."""
+    # Try 1: Extract ```json ... ``` code block and parse
+    block_match = re.search(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
+    if block_match:
+        try:
+            data = json.loads(block_match.group(1))
+            verdict = data.get("verdict", "").upper()
+            if verdict in ("PASS", "FAIL"):
+                return verdict
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+    # Try 2: Parse entire content as JSON
+    try:
+        data = json.loads(content)
+        verdict = data.get("verdict", "").upper()
+        if verdict in ("PASS", "FAIL"):
+            return verdict
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # Try 3: Regex fallback (last resort)
+    match = re.search(r'"verdict"\s*:\s*"(PASS|FAIL)"', content, re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+
+    return None
+
+
+def _validate_tasks(tasks: list) -> list[str]:
+    """Validate task schema. Returns list of error messages (empty = valid)."""
+    errors = []
+    for i, task in enumerate(tasks):
+        prefix = f"Task {task.get('id', f'#{i}')}"
+        if "id" not in task:
+            errors.append(f"{prefix}: missing 'id'")
+        if "summary" not in task:
+            errors.append(f"{prefix}: missing 'summary'")
+        if "files" not in task or not isinstance(task.get("files"), list):
+            errors.append(f"{prefix}: missing or invalid 'files' (must be a list)")
+        ac = task.get("acceptance_criteria")
+        if not ac or not isinstance(ac, list) or not any(ac):
+            errors.append(f"{prefix}: missing or empty 'acceptance_criteria' (must be a non-empty list)")
+    return errors
 
 
 def _safe_project_path(state: dict) -> Path:
@@ -427,7 +479,7 @@ def _init_project(request: str, target_dir: Optional[str] = None) -> dict:
         "agents": [],
         "heal_attempts": 0,
         "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-        "pipeline_version": "6.1.0",
+        "pipeline_version": __version__,
     }
 
     with qralph_state.exclusive_state_lock():
@@ -618,7 +670,10 @@ def cmd_plan_finalize() -> dict:
     if not state:
         return {"error": "No active project."}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
     manifest_path = project_path / "manifest.json"
 
     if not manifest_path.exists():
@@ -629,6 +684,11 @@ def cmd_plan_finalize() -> dict:
 
     if not tasks:
         return {"error": "No tasks defined in manifest.json. Define tasks before finalizing."}
+
+    # Validate task schema
+    task_errors = _validate_tasks(tasks)
+    if task_errors:
+        return {"error": f"Invalid tasks in manifest.json: {'; '.join(task_errors)}"}
 
     # Compute parallel groups from tasks
     groups = compute_parallel_groups(tasks)
@@ -689,7 +749,10 @@ def cmd_execute() -> dict:
     if state.get("phase") != "EXECUTE":
         return {"error": f"Cannot execute in phase {state.get('phase')}. Must be in EXECUTE."}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
     manifest_path = project_path / "manifest.json"
 
     if not manifest_path.exists():
@@ -725,7 +788,7 @@ def cmd_execute() -> dict:
             prompt = _generate_execute_agent_prompt(task, manifest)
             group_agents.append({
                 "task_id": tid,
-                "name": f"impl-{tid}",
+                "name": f"{tid}",
                 "model": "sonnet",
                 "prompt": prompt,
                 "use_worktree": len(group_ids) > 1,
@@ -804,7 +867,10 @@ def cmd_execute_collect() -> dict:
     if state.get("phase") != "EXECUTE":
         return {"error": f"Cannot execute-collect in phase {state.get('phase')}. Must be in EXECUTE."}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
     manifest_path = project_path / "manifest.json"
     manifest = qralph_state.safe_read_json(manifest_path, {})
     tasks = manifest.get("tasks", [])
@@ -857,7 +923,10 @@ def cmd_verify() -> dict:
     if state.get("phase") != "VERIFY":
         return {"error": f"Cannot verify in phase {state.get('phase')}. Must be in VERIFY."}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
     manifest_path = project_path / "manifest.json"
     manifest = qralph_state.safe_read_json(manifest_path, {})
 
@@ -909,7 +978,7 @@ def cmd_verify() -> dict:
         "status": "verify_ready",
         "project_id": state["project_id"],
         "agent": {
-            "name": "verifier",
+            "name": "result",
             "model": "sonnet",
             "prompt": prompt,
         },
@@ -925,7 +994,10 @@ def cmd_finalize() -> dict:
     if state.get("phase") != "VERIFY":
         return {"error": f"Cannot finalize in phase {state.get('phase')}. Must be in VERIFY."}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
 
     # Check verification result exists
     verify_result = project_path / "verification" / "result.md"
@@ -935,7 +1007,8 @@ def cmd_finalize() -> dict:
     verification_content = verify_result.read_text().strip()
 
     # Check for FAIL verdict
-    if re.search(r'"verdict"\s*:\s*"FAIL"', verification_content, re.IGNORECASE):
+    verdict = _parse_verdict(verification_content)
+    if verdict == "FAIL":
         return {
             "error": "Verification FAILED. Review verification/result.md before finalizing.",
             "verification_path": str(verify_result),
@@ -998,7 +1071,10 @@ def cmd_resume() -> dict:
     if not state:
         return {"error": "No active project to resume."}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
     phase = state.get("phase", "PLAN")
 
     # Determine next action based on phase
@@ -1035,7 +1111,10 @@ def cmd_status() -> dict:
     if not state:
         return {"status": "no_active_project"}
 
-    project_path = Path(state["project_path"])
+    try:
+        project_path = _safe_project_path(state)
+    except ValueError as e:
+        return {"error": str(e)}
 
     return {
         "project_id": state.get("project_id"),
@@ -1127,10 +1206,13 @@ def _next_plan_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     outputs_dir = project_path / "agent-outputs"
 
     missing = []
+    too_short = []
     for name in expected:
         output_file = outputs_dir / f"{name}.md"
         if not output_file.exists() or not output_file.read_text().strip():
             missing.append(name)
+        elif len(output_file.read_text().strip()) < MIN_AGENT_OUTPUT_LENGTH:
+            too_short.append(name)
 
     if missing:
         return {
@@ -1138,6 +1220,13 @@ def _next_plan_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             "message": f"Missing outputs: {', '.join(missing)}",
             "output_dir": str(outputs_dir),
             "expected": expected,
+        }
+
+    if too_short:
+        return {
+            "action": "error",
+            "message": f"Agent output too short (< {MIN_AGENT_OUTPUT_LENGTH} chars): {', '.join(too_short)}",
+            "output_dir": str(outputs_dir),
         }
 
     # All outputs present — auto-run plan-collect
@@ -1219,10 +1308,13 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     expected_ids = current_group.get("task_ids", [])
 
     missing = []
+    too_short = []
     for tid in expected_ids:
         output_file = outputs_dir / f"{tid}.md"
         if not output_file.exists() or not output_file.read_text().strip():
             missing.append(tid)
+        elif len(output_file.read_text().strip()) < MIN_AGENT_OUTPUT_LENGTH:
+            too_short.append(tid)
 
     if missing:
         return {
@@ -1230,6 +1322,13 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             "message": f"Missing outputs: {', '.join(missing)}",
             "output_dir": str(outputs_dir),
             "expected": expected_ids,
+        }
+
+    if too_short:
+        return {
+            "action": "error",
+            "message": f"Agent output too short (< {MIN_AGENT_OUTPUT_LENGTH} chars): {', '.join(too_short)}",
+            "output_dir": str(outputs_dir),
         }
 
     # Current group complete — check if more groups
@@ -1259,9 +1358,10 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
         }
 
     # Run quality gate BEFORE verification — pipeline enforces this
-    manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
-    quality_gate_cmd = manifest.get("quality_gate_cmd", "")
+    # Recompute at runtime (never trust manifest — Claude writes it)
+    quality_gate_cmd = detect_quality_gate()
     if quality_gate_cmd:
+        manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
         working_dir = manifest.get("target_directory", str(PROJECT_ROOT))
         _log_decision(project_path, f"QUALITY-GATE: Running '{quality_gate_cmd}' in {working_dir}")
         try:
@@ -1317,10 +1417,11 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
             "expected": ["result"],
         }
 
-    # Parse verdict — block finalize on FAIL
+    # Parse verdict — block finalize on FAIL or ambiguous
     verification_content = verify_file.read_text().strip()
-    fail_match = re.search(r'"verdict"\s*:\s*"FAIL"', verification_content, re.IGNORECASE)
-    if fail_match:
+    verdict = _parse_verdict(verification_content)
+
+    if verdict == "FAIL":
         _log_decision(project_path, "VERIFY: Verdict is FAIL — blocking finalize")
         return {
             "action": "error",
@@ -1328,9 +1429,7 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
             "verification_path": str(verify_file),
         }
 
-    # Require explicit PASS verdict — don't accept ambiguous output
-    pass_match = re.search(r'"verdict"\s*:\s*"PASS"', verification_content, re.IGNORECASE)
-    if not pass_match:
+    if verdict != "PASS":
         _log_decision(project_path, "VERIFY: No PASS/FAIL verdict found — blocking finalize")
         return {
             "action": "error",
@@ -1361,7 +1460,7 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="QRALPH v6.1 Pipeline")
+    parser = argparse.ArgumentParser(description=f"QRALPH v{__version__} Pipeline")
     subparsers = parser.add_subparsers(dest="command")
 
     plan_parser = subparsers.add_parser("plan", help="Init project and generate plan agent configs")

@@ -57,9 +57,9 @@ def main():
 
     # During VERIFY_WAIT, only expect verifier
     elif sub_phase == "VERIFY_WAIT":
-        if agent_name != "verifier":
+        if agent_name != "result":
             print(
-                f"Warning: Unexpected agent '{agent_name}'. Expected 'verifier'.",
+                f"Warning: Unexpected agent '{agent_name}'. Expected 'result'.",
                 file=sys.stderr,
             )
 

@@ -9,6 +9,7 @@
 3. Write each agent's COMPLETE return text to disk verbatim. Never summarize or paraphrase.
 4. At gates (confirm_template, confirm_plan): STOP and ask the user. Do not proceed without confirmation.
 5. Never call pipeline commands directly. Only use `next`.
+6. If blocked or confused, STOP and ask the user. Do not guess.
 
 ## Trigger
 
@@ -39,9 +40,9 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm]
 |--------|-----------|
 | confirm_template | Show template + agents to user. After they confirm: `next --confirm` |
 | spawn_agents | For EACH agent: `Task(subagent_type='general-purpose', name=agent.name, model=agent.model, prompt=agent.prompt)`. Write EXACT return to `{output_dir}/{agent.name}.md` |
-| define_tasks | Read the `analyses_summary` from the action response. Update `manifest.json` at `manifest_path` — set the `tasks` array. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
+| define_tasks | Read the `analyses_summary` from the action response. Read EXISTING `manifest.json` at `manifest_path`, ADD a `tasks` array (preserving all other fields), write back. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
 | confirm_plan | Show PLAN.md + tasks to user. After they confirm: `next --confirm` |
-| error | Fix what the pipeline says is wrong. Then call `next` again. |
+| error | Fix what the pipeline says is wrong. If the fix is unclear, show the error to the user and ask. Then call `next` again. |
 | complete | Show SUMMARY.md to user. Done. |
 
 ### What the pipeline enforces (you don't need to)

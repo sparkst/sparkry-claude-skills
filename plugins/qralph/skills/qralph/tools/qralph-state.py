@@ -56,7 +56,8 @@ REQUIRED_STATE_FIELDS = {
 }
 
 VALID_PHASES = {"INIT", "DISCOVERING", "REVIEWING", "EXECUTING", "UAT", "COMPLETE",
-                "PLANNING", "USER_REVIEW", "ESCALATE", "VALIDATING"}
+                "PLANNING", "USER_REVIEW", "ESCALATE", "VALIDATING",
+                "PLAN", "EXECUTE", "VERIFY"}
 
 VALID_SUBTEAM_STATUSES = {"creating", "running", "complete", "failed", "timeout",
                           "interrupted", "resuming"}
