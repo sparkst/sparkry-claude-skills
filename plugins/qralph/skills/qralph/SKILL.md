@@ -39,10 +39,16 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm]
 |--------|-----------|
 | confirm_template | Show template + agents to user. After they confirm: `next --confirm` |
 | spawn_agents | For EACH agent: `Task(subagent_type='general-purpose', name=agent.name, model=agent.model, prompt=agent.prompt)`. Write EXACT return to `{output_dir}/{agent.name}.md` |
-| define_tasks | Read analyses_summary. Define tasks in manifest.json with schema: `{id, summary, files, acceptance_criteria, depends_on?, tests_needed?}`. Call `next`. |
+| define_tasks | Read the `analyses_summary` from the action response. Update `manifest.json` at `manifest_path` — set the `tasks` array. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
 | confirm_plan | Show PLAN.md + tasks to user. After they confirm: `next --confirm` |
 | error | Fix what the pipeline says is wrong. Then call `next` again. |
 | complete | Show SUMMARY.md to user. Done. |
+
+### What the pipeline enforces (you don't need to)
+- Critical agents (sde-iii, architecture-advisor) are always included regardless of template
+- Quality gate (tests/lint/typecheck) runs automatically after execution, before verification
+- Verification verdict must be explicit PASS — ambiguous or FAIL blocks finalize
+- State is checkpointed at every transition for crash recovery
 
 ## Recovery
 ```bash

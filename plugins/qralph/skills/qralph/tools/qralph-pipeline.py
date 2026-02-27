@@ -86,6 +86,19 @@ TASK_TEMPLATES = {
     },
 }
 
+# Critical agents that MUST be included in every template's plan_agents.
+# These are non-negotiable — the pipeline enforces their presence.
+CRITICAL_AGENTS = ["sde-iii", "architecture-advisor"]
+
+
+def _enforce_critical_agents(agents: list[str]) -> list[str]:
+    """Ensure all critical agents are present. Append any that are missing."""
+    result = list(agents)
+    for critical in CRITICAL_AGENTS:
+        if critical not in result:
+            result.append(critical)
+    return result
+
 # Keywords for template suggestion (simple, deterministic matching)
 TEMPLATE_KEYWORDS = {
     "code-audit": ["audit", "review", "analyze", "quality", "lint", "check"],
@@ -476,9 +489,10 @@ def cmd_plan(request: str, target_dir: Optional[str] = None) -> dict:
     suggested, scores = suggest_template(request)
     template = TASK_TEMPLATES[suggested]
 
-    # Generate agent configs
+    # Generate agent configs — enforce critical agents are always present
+    plan_agent_types = _enforce_critical_agents(template["plan_agents"])
     agents = []
-    for agent_type in template["plan_agents"]:
+    for agent_type in plan_agent_types:
         agent_config = generate_plan_agent_prompt(agent_type, request, str(project_path), config)
         agents.append(agent_config)
 
@@ -1244,6 +1258,34 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             "message": f"Execution incomplete. Missing tasks: {collect_result.get('missing_tasks', [])}",
         }
 
+    # Run quality gate BEFORE verification — pipeline enforces this
+    manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
+    quality_gate_cmd = manifest.get("quality_gate_cmd", "")
+    if quality_gate_cmd:
+        working_dir = manifest.get("target_directory", str(PROJECT_ROOT))
+        _log_decision(project_path, f"QUALITY-GATE: Running '{quality_gate_cmd}' in {working_dir}")
+        try:
+            gate_result = subprocess.run(
+                quality_gate_cmd, shell=True, cwd=working_dir,
+                capture_output=True, text=True, timeout=120,
+            )
+            gate_passed = gate_result.returncode == 0
+            gate_output = (gate_result.stdout + gate_result.stderr)[-2000:]  # last 2000 chars
+            _log_decision(project_path, f"QUALITY-GATE: {'PASSED' if gate_passed else 'FAILED'} (exit {gate_result.returncode})")
+            if not gate_passed:
+                return {
+                    "action": "error",
+                    "message": f"Quality gate FAILED (exit {gate_result.returncode}). Fix issues before verification.",
+                    "quality_gate_cmd": quality_gate_cmd,
+                    "quality_gate_output": gate_output,
+                }
+        except subprocess.TimeoutExpired:
+            _log_decision(project_path, "QUALITY-GATE: TIMEOUT (120s)")
+            return {"action": "error", "message": "Quality gate timed out after 120s."}
+        except OSError as e:
+            _log_decision(project_path, f"QUALITY-GATE: OS ERROR — {e}")
+            return {"action": "error", "message": f"Quality gate command failed: {e}"}
+
     # Auto-run verify to get verifier config
     verify_result = cmd_verify()
     if "error" in verify_result:
@@ -1265,7 +1307,7 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
 
 
 def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
-    """VERIFY_WAIT: Validate verification output exists. Auto-finalize."""
+    """VERIFY_WAIT: Validate verification output exists and passes. Auto-finalize."""
     verify_file = project_path / "verification" / "result.md"
     if not verify_file.exists() or not verify_file.read_text().strip():
         return {
@@ -1274,6 +1316,29 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
             "output_dir": str(project_path / "verification"),
             "expected": ["result"],
         }
+
+    # Parse verdict — block finalize on FAIL
+    verification_content = verify_file.read_text().strip()
+    fail_match = re.search(r'"verdict"\s*:\s*"FAIL"', verification_content, re.IGNORECASE)
+    if fail_match:
+        _log_decision(project_path, "VERIFY: Verdict is FAIL — blocking finalize")
+        return {
+            "action": "error",
+            "message": "Verification verdict is FAIL. Fix issues and re-run verification.",
+            "verification_path": str(verify_file),
+        }
+
+    # Require explicit PASS verdict — don't accept ambiguous output
+    pass_match = re.search(r'"verdict"\s*:\s*"PASS"', verification_content, re.IGNORECASE)
+    if not pass_match:
+        _log_decision(project_path, "VERIFY: No PASS/FAIL verdict found — blocking finalize")
+        return {
+            "action": "error",
+            "message": "Verification output has no clear verdict. Must contain '\"verdict\": \"PASS\"' to proceed.",
+            "verification_path": str(verify_file),
+        }
+
+    _log_decision(project_path, "VERIFY: Verdict is PASS — proceeding to finalize")
 
     # Auto-run finalize
     finalize_result = cmd_finalize()

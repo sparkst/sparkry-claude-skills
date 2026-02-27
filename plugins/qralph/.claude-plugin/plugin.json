@@ -1,6 +1,6 @@
 {
   "name": "qralph",
-  "version": "6.1.0",
+  "version": "6.1.1",
   "description": "Deterministic multi-agent pipeline with state machine orchestration, enforcement hooks, quality gates, and fresh-context validation (QRALPH)",
   "author": {
     "name": "Sparkry.ai",

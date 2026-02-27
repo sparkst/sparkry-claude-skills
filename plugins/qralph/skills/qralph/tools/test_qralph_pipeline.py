@@ -937,5 +937,160 @@ class TestPlanAgentModelIsOpus:
         assert result["model"] == "opus"
 
 
+class TestCriticalAgents:
+    """Critical agents are always included regardless of template."""
+
+    def test_enforce_adds_missing_critical_agents(self):
+        agents = ["researcher"]
+        result = qralph_pipeline._enforce_critical_agents(agents)
+        for critical in qralph_pipeline.CRITICAL_AGENTS:
+            assert critical in result
+
+    def test_enforce_does_not_duplicate(self):
+        agents = ["researcher", "sde-iii", "architecture-advisor"]
+        result = qralph_pipeline._enforce_critical_agents(agents)
+        assert result.count("sde-iii") == 1
+        assert result.count("architecture-advisor") == 1
+
+    def test_enforce_preserves_order(self):
+        agents = ["researcher", "sde-iii"]
+        result = qralph_pipeline._enforce_critical_agents(agents)
+        assert result[0] == "researcher"
+        assert result[1] == "sde-iii"
+
+    def test_bug_fix_template_gets_critical_agents(self):
+        """bug-fix template only lists researcher + sde-iii, but critical agents must be added."""
+        template_agents = qralph_pipeline.TASK_TEMPLATES["bug-fix"]["plan_agents"]
+        result = qralph_pipeline._enforce_critical_agents(template_agents)
+        assert "architecture-advisor" in result
+
+    def test_all_templates_get_critical_agents(self):
+        """Every template must include all critical agents after enforcement."""
+        for name, template in qralph_pipeline.TASK_TEMPLATES.items():
+            result = qralph_pipeline._enforce_critical_agents(template["plan_agents"])
+            for critical in qralph_pipeline.CRITICAL_AGENTS:
+                assert critical in result, f"Template '{name}' missing critical agent '{critical}'"
+
+
+class TestVerifyVerdictEnforcement:
+    """Verification must contain explicit PASS verdict to proceed."""
+
+    def _make_state(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "verification").mkdir()
+        (project_path / "checkpoints").mkdir()
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "pipeline": {"sub_phase": "VERIFY_WAIT"},
+        }
+        return state, project_path, projects_dir
+
+    def test_fail_verdict_blocks_finalize(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+        verify_file = project_path / "verification" / "result.md"
+        verify_file.write_text('{"verdict": "FAIL", "issues": ["tests broken"]}')
+
+        result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert "FAIL" in result["message"]
+
+    def test_no_verdict_blocks_finalize(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+        verify_file = project_path / "verification" / "result.md"
+        verify_file.write_text("Everything looks great! All tests pass.")
+
+        result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert "No PASS/FAIL verdict" in result["message"] or "no clear verdict" in result["message"]
+
+    def test_pass_verdict_proceeds(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+        verify_file = project_path / "verification" / "result.md"
+        verify_file.write_text('{"verdict": "PASS", "criteria_results": []}')
+        # Write manifest.json so finalize can read it
+        (project_path / "manifest.json").write_text(json.dumps({"tasks": [{"id": "T-001", "summary": "test"}]}))
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "complete"
+
+
+class TestQualityGateEnforcement:
+    """Quality gate runs in pipeline after execution, before verification."""
+
+    def _make_state(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        (project_path / "checkpoints").mkdir()
+
+        manifest = {
+            "tasks": [{"id": "T-001", "summary": "test", "files": []}],
+            "parallel_groups": [["T-001"]],
+            "quality_gate_cmd": "echo 'tests pass'",
+            "target_directory": str(tmp_path),
+        }
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+        # Write execution output so collect passes
+        (project_path / "execution-outputs" / "T-001.md").write_text("Task done.")
+
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "EXECUTE",
+            "pipeline": {
+                "sub_phase": "EXEC_WAITING",
+                "execution_groups": [{"task_ids": ["T-001"], "agents": []}],
+                "current_group_index": 0,
+            },
+        }
+        return state, project_path, projects_dir
+
+    def test_quality_gate_failure_blocks_verify(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+
+        # Set quality gate to a failing command
+        manifest = json.loads((project_path / "manifest.json").read_text())
+        manifest["quality_gate_cmd"] = "exit 1"
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+
+        assert result["action"] == "error"
+        assert "Quality gate FAILED" in result["message"]
+
+    def test_quality_gate_success_proceeds_to_verify(self, tmp_path):
+        state, project_path, projects_dir = self._make_state(tmp_path)
+        pipeline = state["pipeline"]
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+
+        assert result["action"] == "spawn_agents"
+        # Should be spawning verifier
+        assert len(result["agents"]) == 1
+        assert result["agents"][0]["name"] == "verifier"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
