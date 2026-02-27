@@ -1,7 +1,7 @@
 {
   "name": "orchestration-workflow",
-  "version": "5.1.1",
-  "description": "Hierarchical sub-team orchestration with enforced PE overlay, quality gates, COE/5-Whys, pattern sweeps, fix-level control, fresh-context validation, session persistence, self-healing, and process monitoring (QRALPH)",
+  "version": "6.1.0",
+  "description": "Deterministic multi-agent pipeline with state machine orchestration, enforcement hooks, quality gates, and fresh-context validation (QRALPH)",
   "author": {
     "name": "Sparkry.ai",
     "email": "skills@sparkry.ai"

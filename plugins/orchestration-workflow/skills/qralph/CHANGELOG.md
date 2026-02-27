@@ -1,5 +1,197 @@
 # QRALPH Changelog
 
+## v6.1.0 (2026-02-26)
+
+### Pipeline-Driven Deterministic Workflow
+
+v6.0 had detailed orchestration instructions in SKILL.md that Claude consistently freelanced on — skipping agents, wrong models, summarizing outputs, blowing through gates. Root cause: Claude is a conversational agent making judgment calls, but QRALPH needs a dumb workflow executor. v6.1 fixes this with three enforcement layers.
+
+#### Layer 1: `cmd_next()` State Machine
+
+New `next [--confirm]` command returns exactly one action at a time. The pipeline validates the previous step completed correctly before advancing.
+
+- **Sub-phase state machine**: INIT → PLAN_WAITING → PLAN_REVIEW → EXEC_WAITING → VERIFY_WAIT → COMPLETE
+- **Gate confirmation**: `--confirm` flag required at INIT and PLAN_REVIEW gates
+- **Output validation**: `check_outputs` validates files exist and are non-empty before advancing
+- **Auto-advance**: PLAN_COLLECT, PLAN_FINAL, EXEC_NEXT, FINALIZE run internally
+- **Error recovery**: Returns `{"action": "error", "message": "..."}` on missing outputs
+
+#### Layer 2: Thin SKILL.md (~50 lines)
+
+Replaced the ~100 line SKILL.md with a stern preamble + simple loop: call `next`, do exactly what it says. Five non-negotiable rules prevent deviation.
+
+#### Layer 3: Enforcement Hooks
+
+- **`hook-validate-agent.py`** (SubagentStop): Validates spawned agents match pipeline expectations
+- **`hook-validate-stop.py`** (Stop): Blocks session exit if pipeline is mid-phase
+- **`hook-validate-write.py`** (PostToolUse/Write): Validates output file paths match expected directories
+- **`hooks.json`**: Hook configuration for plugin deployment
+
+#### Model Selection
+
+- Plan agents: `opus` (thinking work needs the best model, was `sonnet`)
+- Execute agents: `sonnet` (implementation, unchanged)
+- Verifier: `sonnet` (unchanged)
+
+#### New Files
+- `.qralph/tools/hook-validate-agent.py` — SubagentStop validation
+- `.qralph/tools/hook-validate-stop.py` — Stop validation
+- `.qralph/tools/hook-validate-write.py` — Write path validation
+- `.qralph/tools/hooks.json` — Hook configuration
+
+#### Modified Files
+- `qralph-pipeline.py` — `cmd_next()` state machine, `next` CLI subcommand, plan agents → opus
+- `test_qralph_pipeline.py` — 15 new tests for state machine transitions and model verification
+- `SKILL.md` — Rewritten to thin deterministic loop
+- `VERSION` — 6.0.0 → 6.1.0
+
+---
+
+## v6.0.0 (2026-02-26)
+
+### Breaking Change — Full Rewrite to Deterministic Pipeline
+
+v5.1 had a ~28% success rate. Root cause: the Python tools output JSON instructions but Claude had to interpret and execute 7+ non-deterministic steps between each Python call. v6.0 rewrites the entire system so Python does orchestration and Claude does thinking.
+
+#### Architecture: 3-Phase Pipeline
+
+```
+PLAN ──gate──> EXECUTE ──gate──> VERIFY
+```
+
+- **PLAN**: Script suggests template, generates agent prompts. Claude spawns agents mechanically, writes outputs, script computes execution manifest.
+- **EXECUTE**: Script computes parallel groups (file-overlap analysis). Claude spawns implementation agents per group.
+- **VERIFY**: Script generates verification prompt. One fresh-context agent validates all acceptance criteria.
+
+#### New Files
+- `qralph-pipeline.py` — Single entry point for all pipeline commands (~550 lines)
+- `qralph-config.py` — First-run setup, research tool detection (~130 lines)
+- `test_qralph_pipeline.py` — 62 tests covering templates, parallel groups, prompts, phase gating, resume
+
+#### Deleted (~9,600 lines removed)
+- `qralph-orchestrator.py` (3,163 lines) — replaced by qralph-pipeline.py
+- `qralph-subteam.py` (752 lines) — sub-team lead layer eliminated
+- `qralph-healer.py` (1,124 lines) — pipeline handles errors directly
+- `qralph-watchdog.py` (608 lines) — pipeline does its own checks
+- `pe-overlay.py` (1,229 lines) — PE ceremony removed
+- `codebase-nav.py` (533 lines) — not needed
+- `qralph-status.py` (387 lines) — pipeline has built-in status
+- All corresponding test files (~3,700 lines)
+- `qralph-team-lead.md`, `qralph-validator.md` agents
+- `.qralph/templates/` (DoD templates)
+
+#### Kept (with simplification)
+- `qralph-state.py` — Atomic writes, checksums, locking (updated phases)
+- `session-state.py` — Simplified for 3-phase model
+- `process-monitor.py` — Orphan cleanup (unchanged)
+- `qralph-version-check.py` — Version sync (unchanged)
+
+#### Key Improvements
+- **Template-based agent selection** replaces non-deterministic keyword matching
+- **Deterministic parallel groups** computed from file-overlap analysis
+- **Research tool detection** from `~/.claude/settings.json` enabled plugins
+- **Phase gating** enforced by script (can't execute without plan, can't verify without execute)
+- **Session recovery** via checkpoint files and `resume` command
+- **Quality gate detection** for npm, pytest, cargo, go, make projects
+
+---
+
+## v5.1.0 (2026-02-24)
+
+### Breaking Change — All PE Overlay Features Now Enforced
+
+v5.0 introduced PE overlay features as advisory. v5.1 makes them **blocking**. Sessions can no longer ignore gates, skip COE, bypass pattern sweeps, or finalize without validation.
+
+#### Enforcement Changes
+- **PE gates block phase transitions**: If `run_gate()` returns blockers, the `checkpoint` command fails with an error. No bypass.
+- **COE required before `remediate-done`**: Cannot mark tasks fixed without a COE analysis file. Returns error listing missing COE task IDs.
+- **Pattern sweep required before `remediate-done`**: Cannot mark tasks fixed without a pattern sweep result file. Returns error listing missing sweep task IDs.
+- **VALIDATING phase mandatory before `finalize`**: Coding-mode projects must produce `phase-outputs/VALIDATING-result.json` before finalize is allowed.
+- **Phase transitions tightened**: REVIEWING can only go to EXECUTING (not directly to COMPLETE). EXECUTING can only go to VALIDATING (not directly to COMPLETE). UAT goes to VALIDATING (not directly to COMPLETE).
+- **PE gate import failure is a blocker**: If `pe_overlay.py` can't be imported, `run_pe_gate()` returns a blocker instead of silently passing.
+
+#### New Artifacts
+- `pattern-sweeps/<task_id>.json` — persisted sweep results (checked by `remediate-done`)
+- `coe-analyses/<task_id>.json` — COE analysis files (checked by `remediate-done`)
+
+#### Test Updates
+- Version detection test updated for v5.1
+- Phase transition tests updated: REVIEWING→VALIDATING now blocked (must go through EXECUTING)
+- All 125 PE overlay tests pass, all 46 subteam tests pass
+
+---
+
+## v5.0.0 (2026-02-24)
+
+### New Features — PE Overlay Agent Architecture
+
+QRALPH v5.0 infuses Principal Engineer practices via a PE Overlay that runs at every phase transition, enforcing architectural consistency, deep root-cause analysis, and completion rigor.
+
+#### PE Overlay Gate (`pe-overlay.py`)
+- **Phase transition gates**: Deterministic Python checks run at every phase transition (INIT→DISCOVERING, DISCOVERING→REVIEWING, etc.)
+- **ADR loading and enforcement**: Loads Architecture Decision Records from `docs/adrs/`, checks agent findings against them, proposes new ADRs for architectural decisions
+- **DoD template system**: Auto-detects project type (webapp/api/library) and selects appropriate Definition of Done checklist. Testing and Security items are blockers.
+- **Requirements inference**: Detects implicit requirements from request text and technology stack (Stripe→test mode, Cloudflare→wrangler dev, etc.)
+- **Codebase navigation strategy**: Auto-selects ts-aware, polyglot, or grep-enhanced search strategy based on project structure
+
+#### COE / 5-Whys System
+- **Root cause analysis**: Before marking remediation tasks fixed, create COE analysis with structured 5-Whys
+- **Pattern scope identification**: COE analyses identify where else the same pattern exists in the codebase
+- **Validation**: COE structure validated (required fields, non-empty root cause and search patterns)
+
+#### Pattern Sweep
+- **Automated sweep**: After fixing a task, searches codebase for remaining instances of the same pattern
+- **Scope control**: File, directory, or repo-wide sweep
+- **Integration**: Uses `codebase-nav.py` adaptive search strategies
+
+#### Codebase Navigation (`codebase-nav.py`)
+- **Strategy detection**: ts-aware (TypeScript imports/exports), polyglot (multi-language), grep-enhanced (smart ripgrep)
+- **TypeScript features**: Import parsing, path alias resolution, dependency graph construction
+- **Ripgrep integration**: Fast search with JSON output, fallback to Python when rg unavailable
+
+#### Quality Gate Enhancement (7 criteria)
+- **Check 6**: ADR consistency — agent findings don't contradict accepted ADRs
+- **Check 7**: DoD template compliance — Testing and Security categories addressed
+- **pe-reviewer promoted to CRITICAL_AGENTS** (joins security-reviewer, architecture-advisor, sde-iii)
+- **Check 5 strengthened**: PE risk assessment now requires structured validation, not just keyword presence
+
+#### CLI Usability
+- **`init --request` alias**: `init` now accepts both positional and `--request` flag arguments, preventing the common Claude invocation error
+
+#### New Commands
+- `pe-gate --from-phase X --to-phase Y` — Run PE overlay gate check manually
+- `coe-analyze --task REM-NNN [--validate]` — Create or validate COE analysis
+- `pattern-sweep --task REM-NNN [--scope repo]` — Run pattern sweep for a task
+- `adr-check --approve NNN` — Approve a proposed ADR
+- `adr-list` — List all loaded ADRs
+
+### New Files
+- `.qralph/tools/pe-overlay.py` — Core PE gate logic (~600 lines)
+- `.qralph/tools/codebase-nav.py` — Adaptive codebase navigation (~300 lines)
+- `.qralph/tools/test_pe_overlay.py` — ~125 tests
+- `.qralph/tools/test_codebase_nav.py` — ~46 tests
+- `.qralph/templates/dod-webapp.md` — DoD for web applications
+- `.qralph/templates/dod-api.md` — DoD for API/backend services
+- `.qralph/templates/dod-library.md` — DoD for libraries/packages
+- `.claude/agents/pe-overlay.md` — PE overlay reasoning agent prompt
+
+### Modified Files
+- `qralph-orchestrator.py` — PE overlay import, gate hooks, 5 new commands, init --request alias, v5.0.0
+- `qralph-subteam.py` — Quality gate 5→7 criteria, pe-reviewer in CRITICAL_AGENTS, structured Check 5
+- `qralph-watchdog.py` — PE overlay health checks, new preconditions (coe_analysis_exists, adrs_loaded)
+- `qralph-state.py` — Extended state schema with pe_overlay, adrs, dod_template, coe_analyses defaults
+- `SKILL.md` — v5.0.0, new execution rules 13-16, PE Overlay section, new commands reference
+- `pe-reviewer.md` — ADR enforcement context
+
+### Backward Compatibility
+- All new state fields optional with empty/None defaults
+- v4.1.x projects load without error — PE gates gracefully skip when no ADRs/DoD exist
+- Quality gate checks 6-7 auto-pass when PE overlay data absent
+- Existing 5 quality gate checks unchanged
+
+### Test Results
+- ~600+ tests passing (125 pe-overlay + 46 codebase-nav + existing 450+)
+
 ## v4.1.4 (2026-02-18)
 
 ### Fixed — Finalize Remediation Gate

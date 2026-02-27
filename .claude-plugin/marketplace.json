@@ -64,10 +64,10 @@
     {
       "name": "orchestration-workflow",
       "source": "./plugins/orchestration-workflow",
-      "description": "Hierarchical sub-team orchestration with enforced PE overlay, COE/5-Whys, pattern sweeps, ADR management, quality gates, fix-level control, fresh-context validation, session persistence, self-contained TDD enforcement, version-check sync, and self-healing (QRALPH v5.1.1)",
-      "version": "5.1.1",
+      "description": "Deterministic multi-agent pipeline with state machine orchestration, enforcement hooks, quality gates, and fresh-context validation (QRALPH v6.1.0)",
+      "version": "6.1.0",
       "license": "MIT",
-      "keywords": ["orchestration", "multi-agent", "qralph", "sub-teams", "quality-gates", "self-healing", "pe-overlay", "coe", "pattern-sweep"],
+      "keywords": ["orchestration", "multi-agent", "qralph", "pipeline", "deterministic", "quality-gates", "enforcement-hooks"],
       "category": "orchestration",
       "tags": ["multi-agent", "sub-teams", "quality-gates", "self-healing", "validation", "fix-level", "pe-overlay", "coe", "adr"]
     },
