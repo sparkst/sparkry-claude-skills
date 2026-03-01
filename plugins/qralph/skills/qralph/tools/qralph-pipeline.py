@@ -106,7 +106,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     extract_learnings = None
     generate_learning_summary = None
 
-__version__ = "6.2.0"
+__version__ = "6.5.0"
 
 PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"

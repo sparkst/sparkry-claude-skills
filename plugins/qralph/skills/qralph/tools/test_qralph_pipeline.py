@@ -1929,7 +1929,7 @@ class TestIdeateStateMachine:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "template": "new-feature",
             "pipeline": {
                 "mode": "thorough",
@@ -2061,7 +2061,7 @@ class TestPersonaStateMachine:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "template": "new-feature",
             "pipeline": {
                 "mode": "thorough",
@@ -2269,7 +2269,7 @@ class TestConceptStateMachine:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "template": "new-feature",
             "pipeline": {
                 "mode": "thorough",
@@ -2392,7 +2392,7 @@ class TestSimplifyPhase:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "template": "new-feature",
             "estimated_sp": 5.0,
             "pipeline": {
@@ -2673,7 +2673,7 @@ class TestQualityLoopStateMachine:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "estimated_sp": estimated_sp,
             "pipeline": {
                 "mode": mode,
@@ -3197,7 +3197,7 @@ class TestPolishPhase:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "template": "research",
             "pipeline": {
                 "sub_phase": sub_phase,
@@ -3295,7 +3295,7 @@ class TestLearnPhase:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "estimated_sp": 5,
             "pipeline": {
                 "mode": "thorough",
@@ -3498,7 +3498,7 @@ class TestBacktrackToReplan:
             "agents": [],
             "heal_attempts": 0,
             "circuit_breakers": {"total_tokens": 0, "total_cost_usd": 0.0, "error_counts": {}},
-            "pipeline_version": "6.2.0",
+            "pipeline_version": "6.5.0",
             "template": "research",
             "pipeline": {
                 "sub_phase": "BACKTRACK_REPLAN",
