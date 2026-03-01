@@ -76,6 +76,12 @@ _nav_spec = importlib.util.spec_from_file_location("codebase_nav", _nav_path)
 codebase_nav = importlib.util.module_from_spec(_nav_spec)
 _nav_spec.loader.exec_module(codebase_nav)
 
+# Import shared registry (AGENT_REGISTRY, DOMAIN_KEYWORDS, classify_domains, score_capability)
+_registry_path = Path(__file__).parent / "qralph-registry.py"
+_registry_spec = importlib.util.spec_from_file_location("qralph_registry", _registry_path)
+qralph_registry = importlib.util.module_from_spec(_registry_spec)
+_registry_spec.loader.exec_module(qralph_registry)
+
 # Version
 VERSION = "5.1.0"
 
@@ -114,76 +120,9 @@ MODEL_COSTS = {
     "opus": 15.0,
 }
 
-# Domain keywords for request classification
-DOMAIN_KEYWORDS = {
-    "security": ["security", "auth", "authentication", "authorization", "encrypt",
-                  "token", "password", "vulnerability", "owasp", "xss", "injection",
-                  "csrf", "cors", "ssl", "tls", "secret", "credential"],
-    "frontend": ["ui", "ux", "page", "component", "form", "button", "modal",
-                  "dashboard", "layout", "responsive", "mobile", "css", "html",
-                  "react", "vue", "angular", "svelte", "tailwind", "design",
-                  "dark mode", "theme", "animation", "accessibility", "a11y"],
-    "backend": ["api", "endpoint", "server", "database", "query", "migration",
-                "rest", "graphql", "webhook", "middleware", "cron", "worker",
-                "microservice", "queue", "cache", "redis", "postgres", "sql"],
-    "architecture": ["architecture", "system design", "scalability", "pattern",
-                     "refactor", "restructure", "monolith", "modular", "dependency",
-                     "interface", "contract", "coupling", "cohesion"],
-    "testing": ["test", "qa", "validation", "coverage", "e2e", "unit test",
-                "integration test", "mock", "fixture", "assertion", "regression"],
-    "devops": ["deploy", "ci", "cd", "pipeline", "docker", "kubernetes",
-               "terraform", "infrastructure", "monitoring", "logging", "release"],
-    "content": ["write", "article", "blog", "content", "copy", "documentation",
-                "readme", "guide", "tutorial", "newsletter", "post"],
-    "research": ["research", "analyze", "compare", "investigate", "evaluate",
-                 "benchmark", "survey", "study", "report", "assessment"],
-    "strategy": ["strategy", "plan", "roadmap", "business", "market", "pricing",
-                 "growth", "acquisition", "retention", "monetization", "roi"],
-    "data": ["data", "analytics", "metrics", "dashboard", "chart", "visualization",
-             "etl", "pipeline", "warehouse", "reporting", "tracking"],
-    "performance": ["performance", "optimize", "speed", "latency", "throughput",
-                    "memory", "cpu", "profiling", "bottleneck", "benchmark"],
-    "compliance": ["compliance", "gdpr", "ccpa", "hipaa", "sox", "regulation",
-                   "privacy", "consent", "audit", "legal", "license"],
-}
-
-# Agent capabilities registry - maps agent types to their domains and model tiers
-AGENT_REGISTRY = {
-    # Core development agents
-    "security-reviewer": {"domains": ["security", "compliance"], "model": "sonnet", "category": "security"},
-    "architecture-advisor": {"domains": ["architecture", "backend", "performance"], "model": "sonnet", "category": "architecture"},
-    "sde-iii": {"domains": ["backend", "architecture", "testing"], "model": "sonnet", "category": "implementation"},
-    "requirements-analyst": {"domains": ["strategy", "architecture"], "model": "sonnet", "category": "planning"},
-    "ux-designer": {"domains": ["frontend", "data"], "model": "sonnet", "category": "design"},
-    "code-quality-auditor": {"domains": ["testing", "architecture"], "model": "haiku", "category": "quality"},
-    "pe-reviewer": {"domains": ["architecture", "security", "performance"], "model": "sonnet", "category": "quality"},
-    "pe-designer": {"domains": ["architecture", "backend"], "model": "sonnet", "category": "architecture"},
-    "test-writer": {"domains": ["testing"], "model": "sonnet", "category": "testing"},
-    "debugger": {"domains": ["backend", "testing", "performance"], "model": "sonnet", "category": "implementation"},
-    "perf-optimizer": {"domains": ["performance", "backend"], "model": "sonnet", "category": "performance"},
-    "integration-specialist": {"domains": ["backend", "devops", "architecture"], "model": "sonnet", "category": "integration"},
-    "api-schema": {"domains": ["backend", "architecture"], "model": "haiku", "category": "api"},
-    "migration-refactorer": {"domains": ["architecture", "backend"], "model": "sonnet", "category": "implementation"},
-    "validation-specialist": {"domains": ["testing", "quality"], "model": "sonnet", "category": "testing"},
-    "ux-tester": {"domains": ["frontend", "testing"], "model": "sonnet", "category": "testing"},
-    # Planning & strategy agents
-    "pm": {"domains": ["strategy", "research"], "model": "sonnet", "category": "planning"},
-    "strategic-advisor": {"domains": ["strategy", "research"], "model": "sonnet", "category": "strategy"},
-    "finance-consultant": {"domains": ["strategy", "data"], "model": "haiku", "category": "strategy"},
-    "legal-expert": {"domains": ["compliance", "strategy"], "model": "sonnet", "category": "compliance"},
-    "cos": {"domains": ["strategy"], "model": "opus", "category": "strategy"},
-    # Research agents
-    "research-director": {"domains": ["research"], "model": "sonnet", "category": "research"},
-    "fact-checker": {"domains": ["research", "content"], "model": "haiku", "category": "research"},
-    "source-evaluator": {"domains": ["research"], "model": "haiku", "category": "research"},
-    "industry-signal-scout": {"domains": ["research", "strategy"], "model": "sonnet", "category": "research"},
-    "dissent-moderator": {"domains": ["research", "strategy"], "model": "opus", "category": "research"},
-    # Content agents
-    "synthesis-writer": {"domains": ["content", "research"], "model": "opus", "category": "content"},
-    "docs-writer": {"domains": ["content"], "model": "haiku", "category": "content"},
-    # Operations agents
-    "release-manager": {"domains": ["devops"], "model": "haiku", "category": "devops"},
-}
+# Shared registry data (canonical definitions in qralph-registry.py)
+DOMAIN_KEYWORDS = qralph_registry.DOMAIN_KEYWORDS
+AGENT_REGISTRY = qralph_registry.AGENT_REGISTRY
 
 # Skill capabilities - maps skill names to their domains
 SKILL_REGISTRY = {
@@ -405,19 +344,7 @@ def check_control_commands(project_path: Path) -> Optional[str]:
 
 # ─── PLUGIN & SKILL DISCOVERY ───────────────────────────────────────────────
 
-def classify_domains(request: str) -> List[str]:
-    """Classify which domains a request touches."""
-    request_lower = request.lower()
-    domain_scores: Dict[str, int] = {}
-
-    for domain, keywords in DOMAIN_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw in request_lower)
-        if score > 0:
-            domain_scores[domain] = score
-
-    # Sort by score descending, return domain names
-    ranked = sorted(domain_scores.items(), key=lambda x: -x[1])
-    return [d for d, _ in ranked]
+classify_domains = qralph_registry.classify_domains
 
 
 def estimate_complexity(request: str, domains: List[str]) -> int:
@@ -730,33 +657,7 @@ def discover_plugins() -> List[Dict[str, Any]]:
     return plugins
 
 
-def score_capability(capability: Dict[str, Any], domains: List[str], request: str) -> float:
-    """Score a capability's relevance to the request (0.0 - 1.0)."""
-    score = 0.0
-    cap_name = capability.get("name", "")
-    cap_domains = capability.get("domains", [])
-    cap_description = capability.get("description", "")
-
-    # Domain overlap (primary signal)
-    if cap_domains and domains:
-        overlap = len(set(cap_domains) & set(domains))
-        score += (overlap / max(len(domains), 1)) * 0.6
-
-    # Name keyword match
-    request_lower = request.lower()
-    name_words = cap_name.replace("-", " ").replace("_", " ").lower().split()
-    name_matches = sum(1 for w in name_words if w in request_lower)
-    if name_words:
-        score += (name_matches / len(name_words)) * 0.25
-
-    # Description keyword match
-    if cap_description:
-        desc_words = cap_description.lower().split()
-        desc_matches = sum(1 for w in desc_words if w in request_lower)
-        if desc_words:
-            score += (desc_matches / len(desc_words)) * 0.15
-
-    return min(score, 1.0)
+score_capability = qralph_registry.score_capability
 
 
 def cmd_discover():
@@ -1098,12 +999,16 @@ def _cmd_select_agents_locked(custom_agents: Optional[list] = None, use_subteam:
             if len(agents) >= target_count:
                 break
 
-        # Ensure minimum of 3 - fill from top candidates if needed
-        if len(agents) < 3:
+        # Backfill to minimum of 1 agent — only from candidates above relevance floor.
+        # Relevance floor (0.15) prevents re-adding agents that scored too low during
+        # primary selection, avoiding the old "blind fill to 3" behaviour.
+        min_agents = 1
+        _RELEVANCE_FLOOR = 0.15
+        if len(agents) < min_agents:
             for c in candidates:
-                if c not in agents:
+                if c not in agents and c.get("relevance", 0) > _RELEVANCE_FLOOR:
                     agents.append(c)
-                if len(agents) >= 3:
+                if len(agents) >= min_agents:
                     break
 
     # Determine which skills are relevant for each agent
@@ -2483,12 +2388,17 @@ def _cmd_remediate_verify_locked():
             return output
         except OSError as e:
             log_decision(project_path, f"Quality gate error: {e}")
-            # Non-blocking — proceed if command can't be run (e.g., missing tool)
-            quality_gate_result = {"command": quality_gate_cmd, "error": str(e), "passed": None}
-            state["quality_gate_result"] = quality_gate_result
-            save_state(state)
+            return _error_result(f"Quality gate command could not run: {e}. Fix the issue and run remediate-verify again.")
 
     # All active-priority tasks resolved + quality gate passed — transition to COMPLETE
+    # Gate only runs in coding mode; in work/other modes quality_gate_result stays None (skip check).
+    if quality_gate_cmd and state.get("mode") == "coding":
+        if not quality_gate_result or quality_gate_result.get("passed") is not True:
+            passed_val = quality_gate_result.get("passed") if quality_gate_result else None
+            return _error_result(
+                f"Quality gate did not pass (passed={passed_val!r}). Fix the issue and run remediate-verify again."
+            )
+
     if not validate_phase_transition(state["phase"], "COMPLETE", state.get("mode", "coding")):
         return _error_result(f"Invalid phase transition: {state['phase']} -> COMPLETE")
 

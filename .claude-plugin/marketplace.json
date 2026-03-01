@@ -64,8 +64,8 @@
     {
       "name": "qralph",
       "source": "./plugins/qralph",
-      "description": "Deterministic multi-agent pipeline with state machine orchestration, enforcement hooks, quality gates, and fresh-context validation (QRALPH v6.2.0)",
-      "version": "6.2.0",
+      "description": "Full-lifecycle 10-phase multi-agent pipeline with adaptive quality loops, cross-project learning, and confidence scoring (QRALPH v6.5.0)",
+      "version": "6.5.0",
       "license": "MIT",
       "keywords": ["orchestration", "multi-agent", "qralph", "pipeline", "deterministic", "quality-gates", "enforcement-hooks"],
       "category": "orchestration",

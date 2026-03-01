@@ -28,6 +28,12 @@ _state_spec.loader.exec_module(qralph_state)
 
 safe_read_json = qralph_state.safe_read_json
 
+# Import shared registry for AGENT_REGISTRY
+_registry_path = Path(__file__).parent / "qralph-registry.py"
+_registry_spec = importlib.util.spec_from_file_location("qralph_registry", _registry_path)
+qralph_registry = importlib.util.module_from_spec(_registry_spec)
+_registry_spec.loader.exec_module(qralph_registry)
+
 # Constants
 PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"
@@ -117,12 +123,7 @@ def check_agent_health(state: dict, project_path: Path) -> List[Dict[str, Any]]:
         age_seconds = (datetime.now().timestamp() - mtime)
 
         # Determine timeout based on agent's model tier
-        from importlib.util import spec_from_file_location, module_from_spec
-        orch_path = Path(__file__).parent / "qralph-orchestrator.py"
-        orch_spec = spec_from_file_location("qralph_orchestrator_wd", orch_path)
-        orch_mod = module_from_spec(orch_spec)
-        orch_spec.loader.exec_module(orch_mod)
-        agent_info = orch_mod.AGENT_REGISTRY.get(agent_name, {})
+        agent_info = qralph_registry.AGENT_REGISTRY.get(agent_name, {})
         model = agent_info.get("model", "default")
         timeout = AGENT_TIMEOUTS.get(model, AGENT_TIMEOUTS["default"])
 

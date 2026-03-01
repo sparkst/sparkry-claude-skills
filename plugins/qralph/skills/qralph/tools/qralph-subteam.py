@@ -36,11 +36,11 @@ safe_write = qralph_state.safe_write
 safe_write_json = qralph_state.safe_write_json
 safe_read_json = qralph_state.safe_read_json
 
-# Import orchestrator for AGENT_REGISTRY, classify_domains, DOMAIN_KEYWORDS
-_orch_path = Path(__file__).parent / "qralph-orchestrator.py"
-_orch_spec = importlib.util.spec_from_file_location("qralph_orchestrator", _orch_path)
-qralph_orchestrator = importlib.util.module_from_spec(_orch_spec)
-_orch_spec.loader.exec_module(qralph_orchestrator)
+# Import shared registry for AGENT_REGISTRY, classify_domains, DOMAIN_KEYWORDS
+_registry_path = Path(__file__).parent / "qralph-registry.py"
+_registry_spec = importlib.util.spec_from_file_location("qralph_registry", _registry_path)
+qralph_registry = importlib.util.module_from_spec(_registry_spec)
+_registry_spec.loader.exec_module(qralph_registry)
 
 # Constants
 PROJECT_ROOT = Path.cwd()
@@ -113,7 +113,7 @@ def _cmd_create_subteam_locked(phase: str):
     # Build agent configs
     agent_configs = []
     for agent_type in agents:
-        info = qralph_orchestrator.AGENT_REGISTRY.get(agent_type, {})
+        info = qralph_registry.AGENT_REGISTRY.get(agent_type, {})
         agent_configs.append({
             "agent_type": agent_type,
             "model": info.get("model", "sonnet"),
@@ -342,7 +342,7 @@ def cmd_resume_subteam(phase: str):
 
     agent_configs = []
     for agent_type in missing_agents:
-        info = qralph_orchestrator.AGENT_REGISTRY.get(agent_type, {})
+        info = qralph_registry.AGENT_REGISTRY.get(agent_type, {})
         agent_configs.append({
             "agent_type": agent_type,
             "model": info.get("model", "sonnet"),
@@ -456,13 +456,13 @@ def cmd_quality_gate(phase: str):
 
     # Check 2: Every domain covered by findings
     request = state.get("request", "")
-    detected_domains = qralph_orchestrator.classify_domains(request)
+    detected_domains = qralph_registry.classify_domains(request)
     if detected_domains:
         # Read agent outputs to check domain coverage
         outputs_dir = project_path / "agent-outputs"
         covered_domains = set()
         for agent_name in agents_completed:
-            agent_info = qralph_orchestrator.AGENT_REGISTRY.get(agent_name, {})
+            agent_info = qralph_registry.AGENT_REGISTRY.get(agent_name, {})
             for domain in agent_info.get("domains", []):
                 if domain in detected_domains:
                     covered_domains.add(domain)

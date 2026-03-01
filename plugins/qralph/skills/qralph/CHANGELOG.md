@@ -1,5 +1,105 @@
 # QRALPH Changelog
 
+## v6.5.0 (2026-03-01)
+
+### Full-Lifecycle 10-Phase Pipeline
+
+v6.5.0 replaces the 3-phase pipeline (PLAN/EXECUTE/VERIFY) with a full-lifecycle 10-phase pipeline that covers ideation through learning.
+
+#### 10-Phase Pipeline
+```
+IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUALITY_LOOP → POLISH → VERIFY → LEARN
+```
+
+#### Two Operating Modes
+- **`--thorough`** (default): All 10 phases with adaptive quality loops and cross-project learning
+- **`--quick`**: Streamlined path skipping PERSONA, CONCEPT_REVIEW, SIMPLIFY, and LEARN phases
+
+#### 6 New Tools
+- **`plugin-detector`**: Auto-discovers installed Claude Code plugins and available MCP servers
+- **`persona-generator`**: Creates synthetic user personas for concept review and usability testing
+- **`quality-dashboard`**: Aggregates quality metrics across pipeline phases into a unified dashboard
+- **`confidence-scorer`**: Scores agent output confidence with calibrated thresholds per phase
+- **`requirements-tracer`**: Traces requirements through plan tasks, execution outputs, and verification
+- **`learning-capture`**: Captures cross-project learnings (patterns, anti-patterns, heuristics) for reuse
+
+#### Adaptive Quality Loop
+- Discovery/fix separation: first pass identifies all issues, second pass fixes them
+- Backtrack-to-replan mechanism: if quality loop discovers architectural issues, pipeline backtracks to PLAN
+- Configurable iteration limits with diminishing-returns detection
+
+#### Cross-Project Learning
+- `learning-capture` persists patterns and anti-patterns across QRALPH runs
+- Learnings are injected into PLAN and EXECUTE phases for subsequent projects
+- Automatic relevance scoring ensures only applicable learnings surface
+
+#### Test Suite
+- **350 tests** (up from ~160 in v6.2.0)
+- New test files: `test_confidence_scorer.py`, `test_learning_capture.py`, `test_persona_generator.py`, `test_plugin_detector.py`, `test_quality_dashboard.py`, `test_requirements_tracer.py`
+- Heavily expanded `test_qralph_pipeline.py` covering all 10 phases and mode switching
+
+#### Modified Files
+- `qralph-pipeline.py` — Complete rewrite: 10-phase state machine, --thorough/--quick modes, backtrack-to-replan
+- `qralph-state.py` — New phases added to VALID_PHASES
+- `test_qralph_pipeline.py` — Heavily expanded with 10-phase coverage
+- `SKILL.md` — Updated for 10-phase pipeline and new tool documentation
+
+#### New Files
+- `confidence-scorer.py` + `confidence_scorer.py` (import shim)
+- `learning-capture.py` + `learning_capture.py` (import shim)
+- `persona-generator.py` + `persona_generator.py` (import shim)
+- `plugin-detector.py` + `plugin_detector.py` (import shim)
+- `quality-dashboard.py` (no import shim)
+- `requirements-tracer.py` + `requirements_tracer.py` (import shim)
+
+---
+
+## v6.2.0 (2026-02-27)
+
+### Security & Bug Fixes from PE Review
+
+v6.1.1 was reviewed by a clean-context PE agent that found 23 issues (3 P0, 11 P1, 9 P2). v6.2.0 fixes the critical ones.
+
+#### Active Bugs Fixed (F-13, F-18)
+- **Filename mismatches**: Pipeline expected `verification/result.md` but agent was named `verifier` (wrote `verifier.md`). Fixed: `"name": "verifier"` → `"name": "result"`. Same issue for execution agents: `"name": "impl-T1"` → `"name": "T1"` to match `execution-outputs/{tid}.md`.
+- **Hook updated**: `hook-validate-agent.py` now expects `"result"` instead of `"verifier"` during VERIFY_WAIT.
+
+#### Security (F-01, F-02)
+- **Shell injection (F-01)**: Quality gate command was read from `manifest.json` (written by Claude) and passed to `subprocess.run(shell=True)`. Fixed: `detect_quality_gate()` is now recomputed at runtime from project structure, never read from manifest.
+- **Verdict regex bypass (F-02)**: The regex `"verdict"\s*:\s*"PASS"` could match anywhere in prose. New `_parse_verdict()` function: extracts JSON code blocks → `json.loads()` → checks `data["verdict"]`, with raw JSON and regex fallback. Used in both `_next_verify_wait` and `cmd_finalize`.
+
+#### Validation (F-03, F-06)
+- **Minimum output length (F-03)**: Agent outputs shorter than 100 chars are rejected with a named error. Checked in both `_next_plan_waiting` and `_next_exec_waiting`.
+- **Task schema validation (F-06)**: `_validate_tasks()` checks each task has `id`, `summary`, `files` (list), `acceptance_criteria` (non-empty list). Called in `cmd_plan_finalize`.
+
+#### Path Safety (F-15)
+- **Consistent `_safe_project_path()`**: Replaced 7 raw `Path(state["project_path"])` calls with `_safe_project_path(state)` wrapped in `try/except ValueError`. Functions: `cmd_plan_finalize`, `cmd_execute`, `cmd_execute_collect`, `cmd_verify`, `cmd_finalize`, `cmd_resume`, `cmd_status`.
+
+#### State (F-05, F-21)
+- **Pipeline phases in VALID_PHASES (F-05)**: Added `"PLAN"`, `"EXECUTE"`, `"VERIFY"` to `qralph-state.py` `VALID_PHASES`.
+- **Module `__version__` (F-21)**: Added `__version__ = "6.2.0"` at module level. Used in `_init_project` and CLI description.
+
+#### SKILL.md Improvements
+- **Rule 6**: "If blocked or confused, STOP and ask the user. Do not guess."
+- **define_tasks**: "Read EXISTING manifest.json, ADD tasks array (preserving all other fields), write back."
+- **error**: "If fix is unclear, show the error to the user and ask."
+
+#### Tests (~15 new)
+- `TestMinimumOutputLength` (3): Short output rejected, long output accepted (plan + exec)
+- `TestTaskValidation` (4): Missing id/summary/files/criteria rejected, valid passes
+- `TestVerdictParsing` (5): JSON block, raw JSON, no verdict, regex fallback, prose bypass
+- `TestQualityGateRecomputation` (1): Gate recomputed at runtime, not read from manifest
+
+#### Modified Files
+- `qralph-pipeline.py` — All 6 batches
+- `test_qralph_pipeline.py` — Batch 1 refs + Batch 6 new tests
+- `qralph-state.py` — VALID_PHASES
+- `hook-validate-agent.py` — verifier → result
+- `SKILL.md` — Rule 6, define_tasks, error improvements
+- `VERSION` — 6.2.0
+
+---
+
 ## v6.1.0 (2026-02-26)
 
 ### Pipeline-Driven Deterministic Workflow

@@ -1,10 +1,10 @@
-# QRALPH v6.2.0
+# QRALPH v6.5.0
 
-Deterministic multi-agent pipeline for Claude Code. Python does the orchestration. Claude does the thinking.
+Full-lifecycle multi-agent pipeline for Claude Code. Python does the orchestration. Claude does the thinking.
 
 ## What is QRALPH?
 
-QRALPH orchestrates a 3-phase pipeline (PLAN → EXECUTE → VERIFY) with multiple specialist agents analyzing your request from different perspectives before implementation. A state machine controls every transition — Claude can't skip steps, summarize outputs, or bypass gates.
+QRALPH orchestrates a 10-phase pipeline (IDEATE through LEARN) with multiple specialist agents analyzing your request from different perspectives before implementation. A state machine controls every transition -- Claude can't skip steps, summarize outputs, or bypass gates.
 
 ## Installation
 
@@ -18,42 +18,68 @@ QRALPH orchestrates a 3-phase pipeline (PLAN → EXECUTE → VERIFY) with multip
 ```bash
 /qralph "Add a logout button to the navbar"
 /qralph "Audit the authentication flow for security issues"
-/qralph "Create a hello world Node.js HTTP server with tests"
+/qralph --quick "Create a hello world Node.js HTTP server with tests"
 ```
 
 QRALPH handles everything: template selection, agent spawning, parallel execution groups, quality gates, fresh-context verification, and summary generation.
 
-## Architecture (v6.x)
+## Architecture (v6.5.0)
+
+### 10-Phase Pipeline
 
 ```
-PLAN ──gate──> EXECUTE ──gate──> VERIFY
+IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUALITY_LOOP → POLISH → VERIFY → LEARN
 ```
 
-- **PLAN**: Template-based agent selection → specialist analysis → execution manifest
-- **EXECUTE**: Parallel groups (file-overlap analysis) → implementation agents → quality gate
-- **VERIFY**: Fresh-context verification agent → PASS/FAIL verdict → SUMMARY.md
+### Two Operating Modes
+
+- **`--thorough`** (default): All 10 phases with adaptive quality loops and cross-project learning
+- **`--quick`**: Streamlined path skipping PERSONA, CONCEPT_REVIEW, SIMPLIFY, and LEARN phases
+
+### 6 New Tools (v6.5.0)
+
+| Tool | Purpose |
+|------|---------|
+| `plugin-detector` | Auto-discovers installed Claude Code plugins and MCP servers |
+| `persona-generator` | Creates synthetic user personas for concept review |
+| `quality-dashboard` | Aggregates quality metrics into a unified dashboard |
+| `confidence-scorer` | Scores agent output confidence with calibrated thresholds |
+| `requirements-tracer` | Traces requirements through plan, execution, and verification |
+| `learning-capture` | Captures cross-project learnings for reuse |
 
 ### Enforcement Layers
 
-1. **`cmd_next()` State Machine**: INIT → PLAN_WAITING → PLAN_REVIEW → EXEC_WAITING → VERIFY_WAIT → COMPLETE
-2. **Thin SKILL.md**: 6 non-negotiable rules + simple action loop
+1. **`cmd_next()` State Machine**: 10 phases with gate transitions and backtrack-to-replan
+2. **Thin SKILL.md**: Non-negotiable rules + simple action loop
 3. **Enforcement Hooks**: SubagentStop, Stop, and PostToolUse/Write validation
 
-## v6.2.0 — Security & Bug Fixes
+### Adaptive Quality Loop
 
-- **Filename mismatches fixed** (F-13, F-18): Agent names now match expected output paths
-- **Shell injection prevented** (F-01): Quality gate recomputed at runtime, never read from manifest
-- **Verdict bypass prevented** (F-02): Structured JSON parsing with `_parse_verdict()`
-- **Minimum output length** (F-03): Agent outputs < 100 chars rejected
-- **Task schema validation** (F-06): Tasks validated for required fields before execution
-- **Path safety** (F-15): Consistent `_safe_project_path()` across all commands
-- **Pipeline phases** (F-05): `PLAN`, `EXECUTE`, `VERIFY` added to state validation
+- Discovery/fix separation: first pass identifies issues, second pass fixes them
+- Backtrack-to-replan: architectural issues trigger pipeline backtrack to PLAN
+- Configurable iteration limits with diminishing-returns detection
+
+### Cross-Project Learning
+
+- Patterns and anti-patterns persist across QRALPH runs
+- Learnings injected into PLAN and EXECUTE phases
+- Automatic relevance scoring ensures only applicable learnings surface
+
+## v6.5.0 Highlights
+
+- Full-lifecycle 10-phase pipeline (up from 3 phases)
+- Two operating modes: `--thorough` (default) and `--quick`
+- 6 new specialist tools
+- Adaptive quality loop with discovery/fix separation
+- Backtrack-to-replan mechanism for architectural issues
+- Cross-project learning system
+- 350 tests (up from ~160)
 
 ## Test Suite
 
-119 tests:
+350 tests:
 ```bash
-python3 -m pytest skills/qralph/tools/test_qralph_pipeline.py -v
+python3 -m pytest skills/qralph/tools/ -v
 ```
 
 ## License
