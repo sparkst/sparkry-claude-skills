@@ -1,4 +1,4 @@
-# QRALPH v6.5.0
+# QRALPH v6.6.0
 
 Full-lifecycle multi-agent pipeline for Claude Code. Python does the orchestration. Claude does the thinking.
 
@@ -23,7 +23,7 @@ QRALPH orchestrates a 10-phase pipeline (IDEATE through LEARN) with multiple spe
 
 QRALPH handles everything: template selection, agent spawning, parallel execution groups, quality gates, fresh-context verification, and summary generation.
 
-## Architecture (v6.5.0)
+## Architecture (v6.6.0)
 
 ### 10-Phase Pipeline
 
@@ -36,7 +36,7 @@ IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUAL
 - **`--thorough`** (default): All 10 phases with adaptive quality loops and cross-project learning
 - **`--quick`**: Streamlined path skipping PERSONA, CONCEPT_REVIEW, SIMPLIFY, and LEARN phases
 
-### 6 New Tools (v6.5.0)
+### 6 New Tools (v6.5.0+)
 
 | Tool | Purpose |
 |------|---------|
@@ -64,6 +64,12 @@ IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUAL
 - Patterns and anti-patterns persist across QRALPH runs
 - Learnings injected into PLAN and EXECUTE phases
 - Automatic relevance scoring ensures only applicable learnings surface
+
+## v6.6.0 Highlights
+
+- **Exclusive mode enforcement**: QRALPH owns the session — Claude cannot invoke other skills from the outer loop
+- Rule #8: never leave the pipeline loop to invoke other workflows
+- Enforcement hooks wired into Claude Code settings (previously defined but not loaded)
 
 ## v6.5.0 Highlights
 

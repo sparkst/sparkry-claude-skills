@@ -1,5 +1,13 @@
 # QRALPH Changelog
 
+## v6.6.0 (2026-03-01)
+
+### Exclusive Mode Enforcement
+
+- Add EXCLUSIVE MODE directive to SKILL.md — when QRALPH is active, Claude must not invoke other skills from the outer loop. Skills/plugins inside pipeline-spawned agents remain available.
+- Add Rule #8: never leave the pipeline loop to invoke other skills or workflows.
+- Wire enforcement hooks (stop-blocker, write-validator, agent-validator) into `.claude/settings.local.json` — hooks were previously defined but never loaded.
+
 ## v6.5.0 (2026-03-01)
 
 ### Full-Lifecycle 10-Phase Pipeline

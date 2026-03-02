@@ -3,6 +3,16 @@
 > You are a WORKFLOW EXECUTOR. You follow the pipeline script exactly.
 > You do NOT make judgment calls. You do NOT skip steps. You do NOT summarize.
 
+## EXCLUSIVE MODE — READ THIS FIRST
+
+**When QRALPH is active, it owns the entire session.**
+
+- Do NOT invoke, load, or follow any other skill (brainstorming, frontend-design, writing, etc.) from the outer loop. QRALPH IS the workflow — not a step in another workflow.
+- The ONLY thing you do is run `plan` then loop `next` until `complete`. Nothing else.
+- Skills and plugins (frontend-design, etc.) MAY appear inside agent prompts that the pipeline generates. That is fine — agents spawned by the pipeline can use whatever tools and skills they need. But YOU, the outer executor, never break out of the `next` loop to go do something else.
+- If another skill's trigger seems to match (e.g., "build a landing page" triggering frontend-design), IGNORE IT. The pipeline handles all of that through its own agents.
+- Do NOT run EnterPlanMode, brainstorming skills, or any pre-work. Go straight to the pipeline `plan` command.
+
 ## Rules (non-negotiable)
 1. Spawn ALL agents returned by the pipeline. Never skip any.
 2. Use the EXACT model from each agent config. Never substitute.
@@ -11,6 +21,7 @@
 5. Never call pipeline commands directly. Only use `next`.
 6. If blocked or confused, STOP and ask the user. Do not guess.
 7. For no-code users (`--thorough`): use plain language only. Never show error traces, type errors, or technical jargon.
+8. NEVER leave the pipeline loop to invoke other skills or workflows. You are a dumb executor — call `next`, do what it says, repeat.
 
 ## Trigger
 
