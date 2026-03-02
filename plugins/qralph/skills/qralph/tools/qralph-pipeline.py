@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.2 Pipeline — deterministic multi-agent orchestration.
+QRALPH v6.6.1 Pipeline — deterministic multi-agent orchestration, idea to production.
 
-3-phase pipeline: PLAN → EXECUTE → VERIFY
+Full pipeline: IDEATE → PERSONA → CONCEPT → PLAN → EXECUTE → SIMPLIFY →
+               QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
 Python does the orchestration. Claude does the thinking.
 
 Commands:
@@ -23,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime
@@ -106,19 +108,84 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     extract_learnings = None
     generate_learning_summary = None
 
-__version__ = "6.6.0"
+__version__ = "6.6.1"
 
 PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"
 PROJECTS_DIR = QRALPH_DIR / "projects"
 STATE_FILE = QRALPH_DIR / "current-project.json"
+# Session lock uses __file__-relative path to match hooks (immune to CWD changes)
+SESSION_LOCK = Path(__file__).resolve().parent.parent / "active-session.lock"
+
+
+def _acquire_session_lock() -> None:
+    """Create session lock file atomically. Hooks use this to know QRALPH is active.
+
+    Uses O_CREAT|O_EXCL for atomic creation to prevent TOCTOU races between
+    concurrent sessions. If an existing lock is present, checks whether the
+    locked PID is still alive. A dead PID (stale lock) is silently removed
+    before retrying. A live PID raises RuntimeError.
+    """
+    lock_payload = json.dumps({
+        "pid": os.getpid(),
+        "started_at": datetime.now().isoformat(),
+    }).encode()
+
+    for _attempt in range(2):
+        try:
+            fd = os.open(str(SESSION_LOCK), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                os.write(fd, lock_payload)
+            finally:
+                os.close(fd)
+            return
+        except FileExistsError:
+            _maybe_clear_stale_lock()  # removes stale or raises RuntimeError
+
+    # Final fallback: overwrite (should rarely reach here)
+    SESSION_LOCK.write_text(lock_payload.decode())
+
+
+def _maybe_clear_stale_lock() -> None:
+    """Remove session lock if the owning PID is dead. Raise if alive."""
+    try:
+        lock_data = json.loads(SESSION_LOCK.read_text())
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        SESSION_LOCK.unlink(missing_ok=True)
+        return
+
+    pid = lock_data.get("pid")
+    if not isinstance(pid, int):
+        SESSION_LOCK.unlink(missing_ok=True)
+        return
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        SESSION_LOCK.unlink(missing_ok=True)
+        return
+    except PermissionError:
+        pass  # PID exists but we can't signal it — treat as live
+
+    started_at = lock_data.get("started_at", "unknown time")
+    raise RuntimeError(
+        f"Another QRALPH session (PID {pid}, started {started_at}) is already running. "
+        "Wait for it to complete, or use /clear to start fresh."
+    )
+
+
+def _release_session_lock() -> None:
+    """Remove session lock file. Hooks will silently allow everything."""
+    SESSION_LOCK.unlink(missing_ok=True)
 
 # Minimum length for agent output to be considered valid (not a stub/error)
 MIN_AGENT_OUTPUT_LENGTH = 100
 
 # Pipeline phases
 PHASES = ["IDEATE", "PERSONA", "CONCEPT_REVIEW", "PLAN", "EXECUTE",
-          "SIMPLIFY", "QUALITY_LOOP", "POLISH", "VERIFY", "LEARN", "COMPLETE"]
+          "SIMPLIFY", "QUALITY_LOOP", "POLISH", "VERIFY",
+          "DEPLOY", "SMOKE",  # v7.0: idea-to-production
+          "LEARN", "COMPLETE"]
 
 # Max concurrent worktree agents
 MAX_PARALLEL_AGENTS = 4
@@ -941,6 +1008,42 @@ _NPM_SCRIPT_PRIORITY = [
 ]
 
 
+_UNSUPPORTED_SHELL_OPS = re.compile(r'[|;]|>>?|<<|`|\$\(')
+
+
+def _run_shell_chain(cmd: str, cwd: str, timeout: int = 120) -> tuple[int, str]:
+    """Run a '&&'-chained command string without invoking a shell.
+
+    Splits cmd on ' && ' and executes each sub-command sequentially via
+    shlex.split() + shell=False. Aborts on the first non-zero exit code,
+    mirroring && semantics. Returns (returncode, combined_output).
+
+    Only supports '&&' chains of simple commands. Pipes, redirects, semicolons,
+    and other shell operators are rejected with ValueError.
+
+    Raises ValueError if cmd contains unsupported shell operators.
+    Raises subprocess.TimeoutExpired if any single sub-command exceeds timeout.
+    Raises OSError if a sub-command binary is not found.
+    """
+    if _UNSUPPORTED_SHELL_OPS.search(cmd):
+        raise ValueError(
+            f"_run_shell_chain does not support shell operators (|, ;, >, etc.) in: {cmd!r}"
+        )
+    MAX_OUTPUT = 2000
+    sub_commands = [part.strip() for part in cmd.split(" && ")]
+    combined_output = []
+    for sub_cmd in sub_commands:
+        args = shlex.split(sub_cmd)
+        result = subprocess.run(
+            args, shell=False, cwd=cwd,
+            capture_output=True, text=True, timeout=timeout,
+        )
+        combined_output.append(result.stdout + result.stderr)
+        if result.returncode != 0:
+            return result.returncode, "".join(combined_output)[-MAX_OUTPUT:]
+    return 0, "".join(combined_output)[-MAX_OUTPUT:]
+
+
 def _detect_quality_gate_in(directory: Path) -> dict:
     """Try to detect a quality gate rooted at *directory*. Returns {} on miss."""
     pkg_json = directory / "package.json"
@@ -1344,6 +1447,9 @@ def cmd_plan(request: str, target_dir: Optional[str] = None, mode: str = "thorou
     request = _sanitize_request(request)
     state = _init_project(request, target_dir=target_dir)
     project_path = Path(state["project_path"])
+
+    # Acquire session lock — hooks use this to enforce deterministic flow
+    _acquire_session_lock()
 
     # Set starting phase based on mode
     if mode == "thorough":
@@ -1952,8 +2058,9 @@ def cmd_finalize() -> dict:
     if not state:
         return {"error": "No active project."}
 
-    if state.get("phase") != "VERIFY":
-        return {"error": f"Cannot finalize in phase {state.get('phase')}. Must be in VERIFY."}
+    allowed_finalize_phases = {"VERIFY", "DEPLOY", "SMOKE", "LEARN"}
+    if state.get("phase") not in allowed_finalize_phases:
+        return {"error": f"Cannot finalize in phase {state.get('phase')}. Must be in one of: {', '.join(sorted(allowed_finalize_phases))}."}
 
     try:
         project_path = _safe_project_path(state)
@@ -2038,6 +2145,9 @@ def cmd_finalize() -> dict:
     _log_decision(project_path, "FINALIZE: Project marked COMPLETE")
     _save_checkpoint(project_path, state)
 
+    # Release session lock — hooks will silently allow everything in non-QRALPH sessions
+    _release_session_lock()
+
     return {
         "status": "complete",
         "project_id": state["project_id"],
@@ -2056,6 +2166,11 @@ def cmd_resume() -> dict:
         project_path = _safe_project_path(state)
     except ValueError as e:
         return {"error": str(e)}
+
+    # Re-acquire session lock for resumed sessions (hooks need it)
+    if state.get("phase") != "COMPLETE":
+        _acquire_session_lock()
+
     phase = state.get("phase", "PLAN")
 
     # Determine next action based on phase
@@ -2123,10 +2238,117 @@ VALID_SUB_PHASES = {
     "QUALITY_DISCOVERY", "QUALITY_FIX", "QUALITY_DASHBOARD",
     "POLISH_RUN", "POLISH_WAITING", "POLISH_REVIEW",
     "VERIFY_WAIT",
+    "DEPLOY_PREFLIGHT", "DEPLOY_GATE", "DEPLOY_RUN",
+    "SMOKE_GENERATE", "SMOKE_WAIT", "SMOKE_VERDICT", "SMOKE_FAILURE_GATE",
     "LEARN_CAPTURE", "LEARN_COMPLETE",
     "BACKTRACK_REPLAN",
     "COMPLETE",
 }
+
+# Retry limits for infinite-loop prevention
+MAX_QUALITY_GATE_RETRIES = 3
+MAX_VERIFY_RETRIES = 3
+
+
+def _handle_retry_or_escalate(
+    state: dict,
+    pipeline: dict,
+    project_path: Path,
+    *,
+    counter_key: str,
+    max_retries: int,
+    log_prefix: str,
+    escalation_type: str,
+    escalation_options: list[dict],
+    escalation_message: str,
+    error_message: str,
+    technical_detail: str = "",
+    extra_error_fields: dict | None = None,
+) -> dict:
+    """Increment a retry counter and return error or escalation response.
+
+    Shared logic for quality-gate and verify retry limits. Returns an error
+    dict on retries below the limit, or an escalate_to_user dict at the limit.
+    """
+    retries = pipeline.get(counter_key, 0) + 1
+    pipeline[counter_key] = retries
+    _save_pipeline_state(state, pipeline, project_path)
+    _log_decision(project_path, f"{log_prefix}: Failure #{retries} of {max_retries}")
+
+    if retries >= max_retries:
+        _log_decision(project_path, f"{log_prefix}: Retry limit reached — escalating to user")
+        mode = pipeline.get("mode", "thorough")
+        result = {
+            "action": "escalate_to_user",
+            "escalation_type": escalation_type,
+            "retry_count": retries,
+            "options": escalation_options,
+            "message": escalation_message,
+        }
+        if mode != "thorough":
+            result["technical_detail"] = technical_detail
+        return result
+
+    error_response = {
+        "action": "error",
+        "message": error_message,
+        "retry_count": retries,
+        "retries_remaining": max_retries - retries,
+    }
+    if extra_error_fields:
+        error_response.update(extra_error_fields)
+    return error_response
+
+
+# ─── Deploy Intent Detection ─────────────────────────────────────────────────
+
+# Explicit = user said "deploy to X" -> skip gate, auto-deploy
+DEPLOY_EXPLICIT = [
+    "deploy to", "deploy on", "deploy it to", "ship to",
+    "push to prod", "put it live", "go live on",
+]
+
+# Implicit = deployment mentioned but not a direct command -> show gate
+# Note: explicit phrases also match implicit (checked first), so no overlap needed
+DEPLOY_IMPLICIT = [
+    "deploy", "ship it", "go live",
+    "put it on", "launch it", "release to",
+]
+
+
+def _has_explicit_deploy(request: str) -> bool:
+    """Returns True if user explicitly commanded deployment (skip gate)."""
+    lower = request.lower()
+    return any(phrase in lower for phrase in DEPLOY_EXPLICIT)
+
+
+def _has_deploy_intent(request: str) -> bool:
+    """Returns True if deployment is part of the request at all (explicit or implicit)."""
+    lower = request.lower()
+    return (any(phrase in lower for phrase in DEPLOY_EXPLICIT)
+            or any(phrase in lower for phrase in DEPLOY_IMPLICIT))
+
+
+_PHASES_QUICK = ["PLAN", "EXECUTE", "SIMPLIFY", "VERIFY", "DEPLOY", "SMOKE", "LEARN", "COMPLETE"]
+_PHASES_THOROUGH = PHASES  # all 13
+
+
+def _build_phase_progress(state: dict, pipeline: dict) -> dict:
+    """Compute phase_progress metadata for cmd_next() responses."""
+    mode = pipeline.get("mode", "thorough")
+    active_phases = _PHASES_QUICK if mode == "quick" else _PHASES_THOROUGH
+    current_phase = state.get("phase", "PLAN")
+    sub_phase = pipeline.get("sub_phase", "")
+    try:
+        phase_index = active_phases.index(current_phase) + 1
+    except ValueError:
+        phase_index = 1
+    return {
+        "current_phase": current_phase,
+        "phase_index": phase_index,
+        "total_phases": len(active_phases),
+        "sub_phase": sub_phase,
+    }
 
 
 def cmd_next(confirm: bool = False) -> dict:
@@ -2141,6 +2363,18 @@ def cmd_next(confirm: bool = False) -> dict:
         return {"action": "error", "message": str(e)}
     pipeline = state.get("pipeline", {})
     sub_phase = pipeline.get("sub_phase", "INIT")
+
+    result = _dispatch_next(sub_phase, state, pipeline, project_path, confirm)
+
+    # Inject phase_progress into non-error responses
+    if result.get("action") != "error":
+        result["phase_progress"] = _build_phase_progress(state, pipeline)
+
+    return result
+
+
+def _dispatch_next(sub_phase: str, state: dict, pipeline: dict, project_path: Path, confirm: bool) -> dict:
+    """Inner dispatch — routes to sub-phase handlers."""
 
     # --- IDEATE phase handlers ---
     if sub_phase == "IDEATE_BRAINSTORM":
@@ -2196,6 +2430,37 @@ def cmd_next(confirm: bool = False) -> dict:
 
     elif sub_phase == "VERIFY_WAIT":
         return _next_verify_wait(state, pipeline, project_path)
+
+    # --- DEPLOY phase handlers ---
+    elif sub_phase == "DEPLOY_PREFLIGHT":
+        return _next_deploy_preflight(state, pipeline, project_path)
+    elif sub_phase == "DEPLOY_GATE":
+        return _next_deploy_gate(state, pipeline, project_path, confirm)
+    elif sub_phase == "DEPLOY_RUN":
+        return _next_deploy_run(state, pipeline, project_path)
+
+    # --- SMOKE phase handlers ---
+    elif sub_phase == "SMOKE_GENERATE":
+        return _next_smoke_generate(state, pipeline, project_path)
+    elif sub_phase == "SMOKE_WAIT":
+        return _next_smoke_wait(state, pipeline, project_path)
+    elif sub_phase == "SMOKE_VERDICT":
+        return _next_smoke_verdict(state, pipeline, project_path)
+    elif sub_phase == "SMOKE_FAILURE_GATE":
+        # Two-call gate: first call shows failures, second (--confirm) advances
+        if not confirm:
+            pipeline["awaiting_confirmation"] = "confirm_smoke_failures"
+            _save_pipeline_state(state, pipeline, project_path)
+            return {
+                "action": "smoke_failure",
+                "message": "Smoke test failures detected. Review SMOKE-REPORT.md and confirm to accept and continue.",
+                "smoke_report": str(project_path / "SMOKE-REPORT.md"),
+            }
+        if pipeline.get("awaiting_confirmation") != "confirm_smoke_failures":
+            return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to review smoke failures."}
+        del pipeline["awaiting_confirmation"]
+        _log_decision(project_path, "SMOKE: User accepted smoke failures — advancing to LEARN")
+        return _advance_to_learn(state, pipeline, project_path)
 
     # --- BACKTRACK handler ---
     elif sub_phase == "BACKTRACK_REPLAN":
@@ -2257,11 +2522,16 @@ def _next_ideate_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
 def _next_ideate_review(state: dict, pipeline: dict, project_path: Path, confirm: bool) -> dict:
     """IDEATE_REVIEW: Confirmation gate — if confirmed, advance to PERSONA phase."""
     if not confirm:
+        pipeline["awaiting_confirmation"] = "confirm_ideation"
+        _save_pipeline_state(state, pipeline, project_path)
         return {
             "action": "confirm_ideation",
             "message": "Please review IDEATION.md and confirm to proceed.",
             "phase": "IDEATE",
         }
+    if pipeline.get("awaiting_confirmation") != "confirm_ideation":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to see IDEATION.md."}
+    del pipeline["awaiting_confirmation"]
     state["phase"] = "PERSONA"
     pipeline["sub_phase"] = "PERSONA_GEN"
     _save_pipeline_state(state, pipeline, project_path)
@@ -2312,11 +2582,16 @@ def _next_persona_gen(state: dict, pipeline: dict, project_path: Path) -> dict:
 def _next_persona_review(state: dict, pipeline: dict, project_path: Path, confirm: bool) -> dict:
     """PERSONA_REVIEW: Confirmation gate — if confirmed, advance to CONCEPT_REVIEW phase."""
     if not confirm:
+        pipeline["awaiting_confirmation"] = "confirm_personas"
+        _save_pipeline_state(state, pipeline, project_path)
         return {
             "action": "confirm_personas",
             "message": "Please review the generated personas and confirm to proceed.",
             "phase": "PERSONA",
         }
+    if pipeline.get("awaiting_confirmation") != "confirm_personas":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to see personas."}
+    del pipeline["awaiting_confirmation"]
     state["phase"] = "CONCEPT_REVIEW"
     pipeline["sub_phase"] = "CONCEPT_SPAWN"
     _save_pipeline_state(state, pipeline, project_path)
@@ -2382,11 +2657,16 @@ def _next_concept_waiting(state: dict, pipeline: dict, project_path: Path) -> di
 def _next_concept_review(state: dict, pipeline: dict, project_path: Path, confirm: bool) -> dict:
     """CONCEPT_REVIEW: Confirmation gate — if confirmed, advance to PLAN phase (INIT sub-phase)."""
     if not confirm:
+        pipeline["awaiting_confirmation"] = "confirm_concept"
+        _save_pipeline_state(state, pipeline, project_path)
         return {
             "action": "confirm_concept",
             "message": "Please review CONCEPT-SYNTHESIS.md and confirm to proceed.",
             "phase": "CONCEPT_REVIEW",
         }
+    if pipeline.get("awaiting_confirmation") != "confirm_concept":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to see CONCEPT-SYNTHESIS.md."}
+    del pipeline["awaiting_confirmation"]
     state["phase"] = "PLAN"
     pipeline["sub_phase"] = "INIT"
     _save_pipeline_state(state, pipeline, project_path)
@@ -2409,6 +2689,8 @@ def _next_init(state: dict, pipeline: dict, project_path: Path, confirm: bool) -
     output_dir = str(project_path / "agent-outputs")
 
     if not confirm:
+        pipeline["awaiting_confirmation"] = "confirm_template"
+        _save_pipeline_state(state, pipeline, project_path)
         return {
             "action": "confirm_template",
             "template": state.get("template", ""),
@@ -2416,6 +2698,10 @@ def _next_init(state: dict, pipeline: dict, project_path: Path, confirm: bool) -
             "agents": [{"name": a["name"], "model": a["model"]} for a in agents],
             "project_path": str(project_path),
         }
+
+    if pipeline.get("awaiting_confirmation") != "confirm_template":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to see template."}
+    del pipeline["awaiting_confirmation"]
 
     # --confirm: advance to PLAN_WAITING, return spawn_agents
     pipeline["sub_phase"] = "PLAN_WAITING"
@@ -2483,6 +2769,8 @@ def _next_plan_review(state: dict, pipeline: dict, project_path: Path, confirm: 
     tasks = manifest.get("tasks", [])
 
     if not confirm:
+        pipeline["awaiting_confirmation"] = "confirm_plan"
+        _save_pipeline_state(state, pipeline, project_path)
         result = {
             "action": "confirm_plan",
             "plan_path": str(plan_path),
@@ -2494,6 +2782,10 @@ def _next_plan_review(state: dict, pipeline: dict, project_path: Path, confirm: 
         if warnings:
             result["warnings"] = warnings
         return result
+
+    if pipeline.get("awaiting_confirmation") != "confirm_plan":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to see PLAN.md."}
+    del pipeline["awaiting_confirmation"]
 
     if not tasks:
         return {"action": "error", "message": "No tasks defined in manifest.json. Define tasks before confirming."}
@@ -2607,30 +2899,57 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
         quality_gate_cwd = quality_gate.get("cwd", str(PROJECT_ROOT)) if isinstance(quality_gate, dict) else str(PROJECT_ROOT)
     if quality_gate_cmd:
         _log_decision(project_path, f"QUALITY-GATE: Running '{quality_gate_cmd}' in {quality_gate_cwd}")
+        gate_failed = False
+        gate_output = ""
+        gate_error_message = ""
         try:
-            gate_result = subprocess.run(
-                quality_gate_cmd, shell=True, cwd=quality_gate_cwd,
-                capture_output=True, text=True, timeout=120,
+            gate_returncode, gate_output = _run_shell_chain(
+                quality_gate_cmd, quality_gate_cwd, timeout=120,
             )
-            gate_passed = gate_result.returncode == 0
-            gate_output = (gate_result.stdout + gate_result.stderr)[-2000:]  # last 2000 chars
-            _log_decision(project_path, f"QUALITY-GATE: {'PASSED' if gate_passed else 'FAILED'} (exit {gate_result.returncode})")
+            gate_passed = gate_returncode == 0
+            _log_decision(project_path, f"QUALITY-GATE: {'PASSED' if gate_passed else 'FAILED'} (exit {gate_returncode})")
             if not gate_passed:
-                return {
-                    "action": "error",
-                    "message": f"Quality gate FAILED (exit {gate_result.returncode}). Fix issues before verification.",
-                    "quality_gate_cmd": quality_gate_cmd,
-                    "quality_gate_output": gate_output,
-                }
+                gate_failed = True
+                gate_error_message = f"Quality gate FAILED (exit {gate_returncode}). Fix issues before verification."
         except subprocess.TimeoutExpired:
             _log_decision(project_path, "QUALITY-GATE: TIMEOUT (120s)")
-            return {"action": "error", "message": "Quality gate timed out after 120s."}
+            gate_failed = True
+            gate_error_message = "Quality gate timed out after 120s."
         except OSError as e:
             _log_decision(project_path, f"QUALITY-GATE: OS ERROR — {e}")
-            return {"action": "error", "message": f"Quality gate command failed: {e}"}
+            gate_failed = True
+            gate_error_message = f"Quality gate command failed: {e}"
         except Exception as e:
             _log_decision(project_path, f"QUALITY-GATE: UNEXPECTED ERROR — {e}")
-            return {"action": "error", "message": f"Quality gate raised unexpected error: {e}"}
+            gate_failed = True
+            gate_error_message = f"Quality gate raised unexpected error: {e}"
+
+        if gate_failed:
+            return _handle_retry_or_escalate(
+                state, pipeline, project_path,
+                counter_key="quality_gate_retries",
+                max_retries=MAX_QUALITY_GATE_RETRIES,
+                log_prefix="QUALITY-GATE",
+                escalation_type="quality_gate_retry_limit",
+                escalation_options=[
+                    {"id": "skip", "label": "Skip the quality check and continue to the next step"},
+                    {"id": "abort", "label": "Stop the pipeline here"},
+                ],
+                escalation_message=(
+                    "The automated checks have failed 3 times in a row. "
+                    "The code may have a deeper issue that automatic fixes cannot resolve. "
+                    "You can skip the checks and continue anyway, or stop here."
+                ),
+                error_message=gate_error_message,
+                technical_detail=gate_output,
+                extra_error_fields={
+                    "quality_gate_cmd": quality_gate_cmd,
+                    "quality_gate_output": gate_output,
+                },
+            )
+
+        # Gate passed — reset retry counter
+        pipeline["quality_gate_retries"] = 0
 
     # Transition to SIMPLIFY phase instead of directly to VERIFY
     state["phase"] = "SIMPLIFY"
@@ -2700,8 +3019,10 @@ def _next_simplify_waiting(state: dict, pipeline: dict, project_path: Path) -> d
         # Quick mode: skip quality loop, go directly to VERIFY
         _log_decision(project_path, "SIMPLIFY: Quick mode — skipping quality loop, advancing to VERIFY")
 
-        # Auto-run verify to get verifier config
+        # Save to disk before cmd_verify() reloads state
         state["phase"] = "VERIFY"
+        _save_pipeline_state(state, pipeline, project_path)
+
         verify_result = cmd_verify()
         if "error" in verify_result:
             return {"action": "error", "message": verify_result["error"]}
@@ -3172,8 +3493,9 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
 
     # Check for CLEAN verdict in report or pipeline state
     if "CLEAN" in report_content or verdict == "CLEAN":
-        # Advance to VERIFY
+        # Advance to VERIFY — save to disk before cmd_verify() reloads state
         state["phase"] = "VERIFY"
+        _save_pipeline_state(state, pipeline, project_path)
 
         # Auto-run verify to get verifier config
         verify_result = cmd_verify()
@@ -3197,6 +3519,7 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
 
     # Issues found — escalate (provide report for human review, still advance)
     state["phase"] = "VERIFY"
+    _save_pipeline_state(state, pipeline, project_path)
     verify_result = cmd_verify()
     if "error" in verify_result:
         return {"action": "error", "message": verify_result["error"]}
@@ -3233,62 +3556,78 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
     verification_content = verify_file.read_text().strip()
     verdict = _parse_verdict(verification_content)
 
+    verify_blocked = False
+    block_reason = ""
+    block_detail: dict = {}
+
     if verdict == "FAIL":
         _log_decision(project_path, "VERIFY: Verdict is FAIL — blocking finalize")
-        return {
-            "action": "error",
-            "message": "Verification verdict is FAIL. Fix issues and re-run verification.",
-            "verification_path": str(verify_file),
-        }
+        verify_blocked = True
+        block_reason = "Verification verdict is FAIL. Fix issues and re-run verification."
+        block_detail = {"verification_path": str(verify_file)}
 
-    if verdict != "PASS":
+    elif verdict != "PASS":
         _log_decision(project_path, "VERIFY: No PASS/FAIL verdict found — blocking finalize")
-        return {
-            "action": "error",
-            "message": "Verification output has no clear verdict. Must contain '\"verdict\": \"PASS\"' to proceed.",
-            "verification_path": str(verify_file),
-        }
+        verify_blocked = True
+        block_reason = "Verification output has no clear verdict. Must contain '\"verdict\": \"PASS\"' to proceed."
+        block_detail = {"verification_path": str(verify_file)}
 
-    # Validate per-criterion results against manifest
-    manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
-    criteria_results = _parse_criteria_results(verification_content)
-    is_valid, missing, failed = _validate_criteria_results(
-        criteria_results, manifest.get("tasks", [])
-    )
-    if not is_valid:
-        parts = []
-        if missing:
-            parts.append(f"missing results for {', '.join(missing)}")
-        if failed:
-            parts.append(f"failed criteria: {', '.join(failed)}")
-        reason = "; ".join(parts)
-        _log_decision(project_path, f"VERIFY: Criteria validation failed — {reason}")
-        return {
-            "action": "error",
-            "message": f"Verification criteria incomplete or failed: {reason}. Fix and re-run verification.",
-            "verification_path": str(verify_file),
-            "missing_criteria": missing,
-            "failed_criteria": failed,
-        }
+    else:
+        # Validate per-criterion results against manifest
+        manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
+        criteria_results = _parse_criteria_results(verification_content)
+        is_valid, missing, failed = _validate_criteria_results(
+            criteria_results, manifest.get("tasks", [])
+        )
+        if not is_valid:
+            parts = []
+            if missing:
+                parts.append(f"missing results for {', '.join(missing)}")
+            if failed:
+                parts.append(f"failed criteria: {', '.join(failed)}")
+            reason = "; ".join(parts)
+            _log_decision(project_path, f"VERIFY: Criteria validation failed — {reason}")
+            verify_blocked = True
+            block_reason = f"Verification criteria incomplete or failed: {reason}. Fix and re-run verification."
+            block_detail = {
+                "verification_path": str(verify_file),
+                "missing_criteria": missing,
+                "failed_criteria": failed,
+            }
 
-    _log_decision(project_path, "VERIFY: Verdict is PASS and all criteria validated — proceeding to finalize")
+    if verify_blocked:
+        return _handle_retry_or_escalate(
+            state, pipeline, project_path,
+            counter_key="verify_retries",
+            max_retries=MAX_VERIFY_RETRIES,
+            log_prefix="VERIFY",
+            escalation_type="verify_retry_limit",
+            escalation_options=[
+                {"id": "accept", "label": "Accept the current state and continue to deployment"},
+                {"id": "back_to_polish", "label": "Go back for more fixes (return to POLISH phase)"},
+                {"id": "abort", "label": "Stop the pipeline here"},
+            ],
+            escalation_message=(
+                "The verification check has failed 3 times. "
+                "The project may need more work, or the checks may need to be adjusted. "
+                "You can go back for more fixes, accept the current state and continue, or stop here."
+            ),
+            error_message=block_reason,
+            technical_detail=block_reason,
+            extra_error_fields=block_detail,
+        )
 
-    # Auto-run finalize
-    finalize_result = cmd_finalize()
-    if "error" in finalize_result:
-        return {"action": "error", "message": finalize_result["error"]}
+    # Verification passed — reset retry counter
+    pipeline["verify_retries"] = 0
+    _log_decision(project_path, "VERIFY: Verdict is PASS and all criteria validated — advancing to DEPLOY")
 
-    # Reload state — cmd_finalize modified it on disk
-    state = qralph_state.load_state()
-    pipeline = state.get("pipeline", {})
-    pipeline["sub_phase"] = "COMPLETE"
+    # Advance to DEPLOY phase (v7.0: idea-to-production)
+    state["phase"] = "DEPLOY"
+    pipeline["sub_phase"] = "DEPLOY_PREFLIGHT"
     _save_pipeline_state(state, pipeline, project_path)
-    _log_decision(project_path, "NEXT: Verification complete, project finalized")
 
-    return {
-        "action": "complete",
-        "summary_path": finalize_result.get("summary_path", str(project_path / "SUMMARY.md")),
-    }
+    # Auto-advance into DEPLOY_PREFLIGHT immediately
+    return _next_deploy_preflight(state, pipeline, project_path)
 
 
 def generate_verify_prompt_v2(manifest: dict, mode: str, has_playwright: bool) -> str:
@@ -3501,6 +3840,475 @@ def _next_learn_complete(state: dict, pipeline: dict, project_path: Path) -> dic
         "action": "complete",
         "summary_path": finalize_result.get("summary_path", str(project_path / "SUMMARY.md")),
         "learning_summary_path": str(summary_path),
+    }
+
+
+def _set_phase_learn(state: dict, pipeline: dict, project_path: Path) -> None:
+    """Set pipeline state to LEARN_CAPTURE and save checkpoint."""
+    state["phase"] = "LEARN"
+    pipeline["sub_phase"] = "LEARN_CAPTURE"
+    _save_pipeline_state(state, pipeline, project_path)
+
+
+def _advance_to_learn(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """Advance pipeline to LEARN_CAPTURE phase and return its first action."""
+    _set_phase_learn(state, pipeline, project_path)
+    return _next_learn_capture(state, pipeline, project_path)
+
+
+# ─── DEPLOY Phase ────────────────────────────────────────────────────────────
+
+
+def _detect_deploy_command(project_path: Path, state: dict) -> dict:
+    """Detect deploy command and target from project configuration."""
+    target_dir = state.get("target_directory", str(PROJECT_ROOT))
+    search_roots = [target_dir, str(PROJECT_ROOT)]
+
+    def _find_config(*patterns: str) -> Optional[Path]:
+        """Search roots for the first matching config file."""
+        for root in search_roots:
+            for pattern in patterns:
+                matches = list(Path(root).glob(pattern))
+                if matches:
+                    return matches[0]
+        return None
+
+    # Cloudflare Workers
+    match = _find_config("**/wrangler.toml", "**/wrangler.jsonc")
+    if match:
+        return {
+            "platform": "cloudflare-workers",
+            "deploy_cmd": "npx wrangler deploy",
+            "deploy_dir": str(match.parent),
+            "config_file": str(match),
+        }
+
+    # Vercel
+    match = _find_config("**/vercel.json")
+    if match:
+        return {
+            "platform": "vercel",
+            "deploy_cmd": "npx vercel --prod",
+            "deploy_dir": str(match.parent),
+            "config_file": str(match),
+        }
+
+    # package.json with deploy script
+    for root in search_roots:
+        for pkg_path in Path(root).glob("**/package.json"):
+            try:
+                pkg = json.loads(pkg_path.read_text())
+                if "deploy" in pkg.get("scripts", {}):
+                    return {
+                        "platform": "npm-script",
+                        "deploy_cmd": "npm run deploy",
+                        "deploy_dir": str(pkg_path.parent),
+                        "config_file": str(pkg_path),
+                    }
+            except (json.JSONDecodeError, OSError):
+                continue
+
+    return {"platform": "unknown", "deploy_cmd": "", "deploy_dir": "", "config_file": ""}
+
+
+def _generate_preflight_checklist(state: dict, deploy_info: dict) -> list[str]:
+    """Generate pre-deploy checklist items from project config."""
+    checklist = []
+    config_file = deploy_info.get("config_file", "")
+    platform = deploy_info.get("platform", "unknown")
+
+    if platform == "cloudflare-workers" and config_file:
+        try:
+            content = Path(config_file).read_text()
+            # Check for placeholder KV namespace IDs
+            if "placeholder" in content.lower():
+                checklist.append("Replace placeholder KV namespace ID in wrangler.toml")
+            # Check for secrets referenced
+            secrets = re.findall(r'#.*secret.*?:\s*(\w+)', content, re.IGNORECASE)
+            if not secrets:
+                # Check for common secret patterns in bindings
+                for secret_name in ["RESEND_API_KEY", "TURNSTILE_SECRET_KEY", "API_KEY", "SECRET_KEY"]:
+                    if secret_name in content:
+                        checklist.append(f"Ensure secret '{secret_name}' is set via: npx wrangler secret put {secret_name}")
+        except OSError:
+            pass
+
+    if platform == "vercel":
+        checklist.append("Ensure environment variables are configured in Vercel dashboard")
+
+    # Check for placeholder URLs in deploy directory
+    deploy_dir = deploy_info.get("deploy_dir", "")
+    if deploy_dir:
+        wrangler_path = Path(deploy_dir) / "wrangler.toml"
+        if wrangler_path.exists():
+            wrangler_content = wrangler_path.read_text()
+            if "example.com" in wrangler_content:
+                checklist.append("Update SITE_URL from example.com to actual domain")
+            if "0x00" in wrangler_content:
+                checklist.append("Update TURNSTILE_SITE_KEY from placeholder to actual key")
+
+    if not checklist:
+        checklist.append("Review deployment configuration before proceeding")
+
+    return checklist
+
+
+def _extract_live_url(deploy_output: str, platform: str) -> str:
+    """Extract live URL from deploy command output."""
+    platform_patterns = {
+        "cloudflare-workers": [
+            r'(https://[^\s]+\.workers\.dev[^\s]*)',
+            r'(https://[^\s]+\.[a-z]{2,}[^\s]*)',  # custom domains
+        ],
+        "vercel": [
+            r'(https://[^\s]+\.vercel\.app[^\s]*)',
+        ],
+    }
+
+    for pattern in platform_patterns.get(platform, []):
+        match = re.search(pattern, deploy_output)
+        if match:
+            return match.group(1)
+
+    # Generic URL extraction
+    match = re.search(r'(https://[^\s]+)', deploy_output)
+    return match.group(1) if match else ""
+
+
+def _next_deploy_preflight(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """DEPLOY_PREFLIGHT: Check deploy intent, detect deploy command, generate checklist."""
+    request = state.get("request", "")
+
+    # No deploy intent at all → skip DEPLOY and SMOKE, go to LEARN
+    if not _has_deploy_intent(request):
+        _log_decision(project_path, "DEPLOY: No deploy intent in request — skipping to LEARN")
+        return _advance_to_learn(state, pipeline, project_path)
+
+    # Detect deploy command
+    deploy_info = _detect_deploy_command(project_path, state)
+    pipeline["deploy_info"] = deploy_info
+
+    if not deploy_info.get("deploy_cmd"):
+        _log_decision(project_path, "DEPLOY: No deploy command detected — asking user")
+        # Keep sub_phase as DEPLOY_PREFLIGHT so retry works after user fixes config
+        _save_pipeline_state(state, pipeline, project_path)
+        return {
+            "action": "error",
+            "message": "Could not detect deployment configuration. No wrangler.toml, vercel.json, or 'deploy' npm script found. Add deployment config or skip deployment.",
+        }
+
+    # Generate checklist
+    checklist = _generate_preflight_checklist(state, deploy_info)
+    pipeline["deploy_checklist"] = checklist
+
+    # Explicit deploy → skip gate, go straight to DEPLOY_RUN
+    if _has_explicit_deploy(request):
+        _log_decision(project_path, f"DEPLOY: Explicit deploy intent — auto-deploying via '{deploy_info['deploy_cmd']}'")
+        pipeline["sub_phase"] = "DEPLOY_RUN"
+        _save_pipeline_state(state, pipeline, project_path)
+        return _next_deploy_run(state, pipeline, project_path)
+
+    # Implicit deploy → show gate
+    pipeline["sub_phase"] = "DEPLOY_GATE"
+    _save_pipeline_state(state, pipeline, project_path)
+    return _next_deploy_gate(state, pipeline, project_path, confirm=False)
+
+
+def _next_deploy_gate(state: dict, pipeline: dict, project_path: Path, confirm: bool = False) -> dict:
+    """DEPLOY_GATE: Confirm deployment with user."""
+    deploy_info = pipeline.get("deploy_info", {})
+    checklist = pipeline.get("deploy_checklist", [])
+
+    if not confirm:
+        pipeline["awaiting_confirmation"] = "confirm_deploy"
+        _save_pipeline_state(state, pipeline, project_path)
+        return {
+            "action": "confirm_deploy",
+            "platform": deploy_info.get("platform", "unknown"),
+            "deploy_cmd": deploy_info.get("deploy_cmd", ""),
+            "checklist": checklist,
+            "message": "Ready to deploy. Review the checklist and confirm when ready.",
+        }
+
+    if pipeline.get("awaiting_confirmation") != "confirm_deploy":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to see deploy checklist."}
+    del pipeline["awaiting_confirmation"]
+
+    _log_decision(project_path, "DEPLOY: User confirmed deployment")
+    pipeline["sub_phase"] = "DEPLOY_RUN"
+    _save_pipeline_state(state, pipeline, project_path)
+    return _next_deploy_run(state, pipeline, project_path)
+
+
+def _next_deploy_run(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """DEPLOY_RUN: Execute deployment command, capture output, extract live URL."""
+    deploy_info = pipeline.get("deploy_info", {})
+    deploy_cmd = deploy_info.get("deploy_cmd", "")
+
+    if not deploy_cmd:
+        return {"action": "error", "message": "No deploy command configured."}
+
+    _log_decision(project_path, f"DEPLOY: Running '{deploy_cmd}'")
+
+    # Run deploy command (shell=False for safety, cwd handles directory)
+    try:
+        result = subprocess.run(
+            shlex.split(deploy_cmd),
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+            cwd=deploy_info.get("deploy_dir", str(PROJECT_ROOT)),
+        )
+        deploy_output = result.stdout + "\n" + result.stderr
+        deploy_exit_code = result.returncode
+    except subprocess.TimeoutExpired:
+        deploy_output = "Deployment timed out after 300 seconds."
+        deploy_exit_code = 1
+    except Exception as e:
+        deploy_output = f"Deployment failed: {e}"
+        deploy_exit_code = 1
+
+    # Build deploy report
+    report_path = project_path / "DEPLOY-REPORT.md"
+    report = (
+        f"# Deploy Report\n\n"
+        f"**Command:** `{deploy_cmd}`\n"
+        f"**Exit Code:** {deploy_exit_code}\n"
+        f"**Timestamp:** {datetime.now().isoformat()}\n\n"
+        f"## Output\n\n```\n{deploy_output.strip()}\n```\n"
+    )
+
+    if deploy_exit_code != 0:
+        report += "\n## Status: FAILED\n"
+        qralph_state.safe_write(report_path, report)
+        _log_decision(project_path, f"DEPLOY: Deployment FAILED (exit {deploy_exit_code})")
+
+        # Reset to DEPLOY_PREFLIGHT so next call re-detects config after user fixes issues
+        pipeline["sub_phase"] = "DEPLOY_PREFLIGHT"
+        pipeline.pop("deploy_info", None)
+        _save_pipeline_state(state, pipeline, project_path)
+
+        return {
+            "action": "error",
+            "message": (
+                f"Deployment failed (exit code {deploy_exit_code}). "
+                "Fix the issue, then call next to retry. "
+                "Review DEPLOY-REPORT.md for details."
+            ),
+            "deploy_report": str(report_path),
+            "deploy_output": deploy_output.strip()[-500:],
+        }
+
+    # Extract live URL
+    platform = deploy_info.get("platform", "unknown")
+    live_url = _extract_live_url(deploy_output, platform)
+    pipeline["live_url"] = live_url
+
+    report += "\n## Status: SUCCESS\n"
+    if live_url:
+        report += f"**Live URL:** {live_url}\n"
+    qralph_state.safe_write(report_path, report)
+    _log_decision(project_path, f"DEPLOY: Deployment SUCCESS — live at {live_url or 'URL not detected'}")
+
+    # Advance to SMOKE
+    state["phase"] = "SMOKE"
+    pipeline["sub_phase"] = "SMOKE_GENERATE"
+    _save_pipeline_state(state, pipeline, project_path)
+
+    return _next_smoke_generate(state, pipeline, project_path)
+
+
+# ─── SMOKE Phase ─────────────────────────────────────────────────────────────
+
+
+def _generate_smoke_agents(manifest: dict, live_url: str, state: dict) -> list[dict]:
+    """Generate parallel smoke test agents from acceptance criteria."""
+    tasks = manifest.get("tasks", [])
+    request = state.get("request", "")
+
+    # Categorize acceptance criteria for parallel agents
+    category_keywords = {
+        "pages": ["get /", "html", "page", "landing", "theme", "headline", "form", "input", "button"],
+        "api": ["post ", "api", "subscribe", "email", "returns {"],
+        "security": ["security", "csp", "hsts", "cors", "header"],
+        "seo": ["robots", "sitemap", "seo", "meta"],
+        "errors": ["404", "error", "unknown", "invalid"],
+    }
+    categories: dict[str, list[str]] = {cat: [] for cat in category_keywords}
+
+    for task in tasks:
+        for ac in task.get("acceptance_criteria", []):
+            ac_lower = ac.lower()
+            label = f"[{task['id']}] {ac}"
+            matched = False
+            for cat, keywords in category_keywords.items():
+                if any(kw in ac_lower for kw in keywords):
+                    categories[cat].append(label)
+                    matched = True
+                    break
+            if not matched:
+                categories["pages"].append(label)
+
+    agents = []
+    for cat, criteria in categories.items():
+        if not criteria:
+            continue
+        criteria_text = "\n".join(f"- {c}" for c in criteria)
+        agents.append({
+            "name": f"smoke-{cat}",
+            "model": "haiku",
+            "prompt": (
+                f"You are a production smoke test agent. Your job is to verify the LIVE deployment works.\n\n"
+                f"## Live URL\n{live_url}\n\n"
+                f"## Original Request\n{request}\n\n"
+                f"## Criteria to Verify\n{criteria_text}\n\n"
+                f"## Rules\n"
+                f"- Use WebFetch for GET requests to verify page content and headers.\n"
+                f"- Use Bash with curl for POST requests, HEAD requests, or when you need specific headers.\n"
+                f"- For each criterion, report PASS or FAIL with evidence (HTTP status, response snippet).\n"
+                f"- Do NOT read source code. You are testing the LIVE deployed site.\n"
+                f"- Be fast — check what's checkable via HTTP. Skip criteria that require browser JS execution.\n"
+                f"- For criteria that need JavaScript (form submission, loading states), mark as SKIP with reason.\n\n"
+                f"## Output Format\n"
+                f"Report each criterion as:\n"
+                f"- **PASS** [T-NNN] criterion text — evidence\n"
+                f"- **FAIL** [T-NNN] criterion text — what went wrong\n"
+                f"- **SKIP** [T-NNN] criterion text — why (e.g., requires browser JS)\n\n"
+                f"End with a summary line: `SMOKE VERDICT: X passed, Y failed, Z skipped`\n"
+            ),
+        })
+
+    return agents
+
+
+def _next_smoke_generate(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """SMOKE_GENERATE: Generate parallel smoke test agents."""
+    live_url = pipeline.get("live_url", "")
+
+    if not live_url:
+        _log_decision(project_path, "SMOKE: No live URL detected — skipping smoke tests, advancing to LEARN")
+        return _advance_to_learn(state, pipeline, project_path)
+
+    manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
+    agents = _generate_smoke_agents(manifest, live_url, state)
+
+    if not agents:
+        _log_decision(project_path, "SMOKE: No smoke agents generated — advancing to LEARN")
+        return _advance_to_learn(state, pipeline, project_path)
+
+    pipeline["smoke_agents"] = [a["name"] for a in agents]
+    pipeline["sub_phase"] = "SMOKE_WAIT"
+    _save_pipeline_state(state, pipeline, project_path)
+    _log_decision(project_path, f"SMOKE: Spawning {len(agents)} parallel smoke test agents against {live_url}")
+
+    smoke_dir = project_path / "smoke-tests"
+    smoke_dir.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "action": "spawn_agents",
+        "agents": agents,
+        "output_dir": str(smoke_dir),
+        "phase": "SMOKE",
+        "parallel": True,
+        "live_url": live_url,
+    }
+
+
+def _next_smoke_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """SMOKE_WAIT: Validate smoke test outputs exist."""
+    smoke_dir = project_path / "smoke-tests"
+    expected = pipeline.get("smoke_agents", [])
+    missing = []
+
+    for name in expected:
+        output_file = smoke_dir / f"{name}.md"
+        if not output_file.exists() or not output_file.read_text().strip():
+            missing.append(name)
+
+    if missing:
+        return {
+            "action": "error",
+            "message": f"Missing smoke test outputs: {', '.join(missing)}",
+            "output_dir": str(smoke_dir),
+            "expected": expected,
+        }
+
+    pipeline["sub_phase"] = "SMOKE_VERDICT"
+    _save_pipeline_state(state, pipeline, project_path)
+    return _next_smoke_verdict(state, pipeline, project_path)
+
+
+def _next_smoke_verdict(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """SMOKE_VERDICT: Aggregate smoke test results. PASS → LEARN, FAIL → show to user."""
+    smoke_dir = project_path / "smoke-tests"
+    expected = pipeline.get("smoke_agents", [])
+    live_url = pipeline.get("live_url", "")
+
+    total_pass = 0
+    total_fail = 0
+    total_skip = 0
+    all_results = []
+    failures = []
+
+    for name in expected:
+        output_file = smoke_dir / f"{name}.md"
+        content = output_file.read_text().strip()
+        all_results.append(f"## {name}\n\n{content}\n")
+
+        passes = len(re.findall(r'\*\*PASS\*\*', content))
+        fails = len(re.findall(r'\*\*FAIL\*\*', content))
+        skips = len(re.findall(r'\*\*SKIP\*\*', content))
+        total_pass += passes
+        total_fail += fails
+        total_skip += skips
+
+        if fails > 0:
+            # Extract failure lines
+            for line in content.split("\n"):
+                if "**FAIL**" in line:
+                    failures.append(f"[{name}] {line.strip()}")
+
+    # Write smoke report
+    report = (
+        f"# Smoke Test Report\n\n"
+        f"**Live URL:** {live_url}\n"
+        f"**Timestamp:** {datetime.now().isoformat()}\n"
+        f"**Result:** {total_pass} passed, {total_fail} failed, {total_skip} skipped\n\n"
+    ) + "\n".join(all_results)
+
+    report_path = project_path / "SMOKE-REPORT.md"
+    qralph_state.safe_write(report_path, report)
+
+    if total_fail > 0:
+        _log_decision(project_path, f"SMOKE: {total_fail} failures detected — showing to user")
+        # Stay on SMOKE phase but mark sub_phase so pipeline can advance after user decides
+        pipeline["sub_phase"] = "SMOKE_FAILURE_GATE"
+        _save_pipeline_state(state, pipeline, project_path)
+        return {
+            "action": "smoke_failure",
+            "live_url": live_url,
+            "passed": total_pass,
+            "failed": total_fail,
+            "skipped": total_skip,
+            "failures": failures,
+            "smoke_report": str(report_path),
+            "message": f"Smoke tests found {total_fail} failure(s). Review and decide: fix + redeploy, or accept and continue.",
+        }
+
+    _log_decision(project_path, f"SMOKE: All checks passed ({total_pass} pass, {total_skip} skip) — advancing to LEARN")
+
+    # All passed -- checkpoint to LEARN (next call enters LEARN_CAPTURE)
+    _set_phase_learn(state, pipeline, project_path)
+
+    return {
+        "action": "smoke_results",
+        "live_url": live_url,
+        "passed": total_pass,
+        "failed": 0,
+        "skipped": total_skip,
+        "smoke_report": str(report_path),
+        "message": f"Production smoke tests passed! {total_pass} checks verified against {live_url}.",
     }
 
 

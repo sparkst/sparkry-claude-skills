@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
-"""Stop hook: Block session exit if pipeline is mid-phase with missing outputs."""
+"""Stop hook: Block session exit if QRALPH pipeline is mid-phase."""
 
+import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
-
-import importlib.util
 
 _state_path = Path(__file__).parent / "qralph-state.py"
 _state_spec = importlib.util.spec_from_file_location("qralph_state", _state_path)
 qralph_state = importlib.util.module_from_spec(_state_spec)
 _state_spec.loader.exec_module(qralph_state)
 
-# Prevent infinite loop: if this hook already ran once, allow stop
+SESSION_LOCK = Path(__file__).parent.parent / "active-session.lock"
 STOP_HOOK_ENV = "QRALPH_STOP_HOOK_ACTIVE"
 
 
 def main():
+    # No session lock = QRALPH is not running in this session → allow
+    if not SESSION_LOCK.exists():
+        return
+
+    # Prevent infinite loop: if this hook already ran once, allow stop
     if os.environ.get(STOP_HOOK_ENV):
         print(json.dumps({"decision": "allow"}))
         return
@@ -40,18 +44,13 @@ def main():
     # Set env var to prevent infinite loop on second pass
     os.environ[STOP_HOOK_ENV] = "1"
 
-    phase_descriptions = {
-        "INIT": "template confirmation pending",
-        "PLAN_WAITING": "plan agent outputs not yet collected",
-        "PLAN_REVIEW": "plan review pending",
-        "EXEC_WAITING": "execution outputs not yet collected",
-        "VERIFY_WAIT": "verification output not yet collected",
-    }
-
-    desc = phase_descriptions.get(sub_phase, sub_phase)
     print(json.dumps({
         "decision": "block",
-        "reason": f"QRALPH pipeline is in phase '{sub_phase}' ({desc}). Call 'python3 .qralph/tools/qralph-pipeline.py next' to continue.",
+        "reason": (
+            f"QRALPH is still working (phase: {sub_phase}). "
+            "Call 'python3 .qralph/tools/qralph-pipeline.py next' to continue. "
+            "If you need to start over, use /clear to begin a new session."
+        ),
     }))
 
 

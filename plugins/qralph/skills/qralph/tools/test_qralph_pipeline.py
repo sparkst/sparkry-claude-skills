@@ -5,6 +5,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -76,6 +77,22 @@ class TestSuggestTemplate:
         assert template == "bug-fix"
         assert len(scores) > 1
         assert scores["bug-fix"] >= max(v for k, v in scores.items() if k != "bug-fix")
+
+
+# ─── Version Sync Tests ────────────────────────────────────────────────────
+
+class TestVersionSync:
+    """VERSION file and __version__ constant must be in sync."""
+
+    def test_version_file_matches_module_version(self):
+        """REQ-VERSION-SYNC: .qralph/VERSION must equal qralph_pipeline.__version__."""
+        version_file = Path(__file__).resolve().parent.parent / "VERSION"
+        file_version = version_file.read_text().strip()
+        assert file_version == qralph_pipeline.__version__, (
+            f"VERSION file ({file_version!r}) is out of sync with "
+            f"__version__ ({qralph_pipeline.__version__!r}). "
+            "Update .qralph/VERSION when bumping __version__."
+        )
 
 
 # ─── Parallel Group Computation Tests ───────────────────────────────────────
@@ -372,6 +389,78 @@ class TestDetectQualityGate:
             assert gate == {}
 
 
+# ─── Shell Chain Tests ─────────────────────────────────────────────────────
+
+class TestRunShellChain:
+    """REQ-SHELL-CHAIN: _run_shell_chain runs commands without shell=True."""
+
+    def test_single_command(self):
+        """REQ-SHELL-CHAIN-1: Single command runs without shell."""
+        rc, output = qralph_pipeline._run_shell_chain("echo hello", "/tmp", timeout=10)
+        assert rc == 0
+        assert "hello" in output
+
+    def test_chained_commands_run_sequentially(self):
+        """REQ-SHELL-CHAIN-2: Chained commands both execute."""
+        rc, output = qralph_pipeline._run_shell_chain("echo A && echo B", "/tmp", timeout=10)
+        assert rc == 0
+        assert "A" in output
+        assert "B" in output
+
+    def test_chain_aborts_on_first_failure(self):
+        """REQ-SHELL-CHAIN-3: Chain stops at first non-zero exit."""
+        rc, output = qralph_pipeline._run_shell_chain("false && echo SHOULD_NOT_RUN", "/tmp", timeout=10)
+        assert rc != 0
+        assert "SHOULD_NOT_RUN" not in output
+
+    def test_oserror_on_missing_binary(self):
+        """REQ-SHELL-CHAIN-4: OSError propagates for missing binary."""
+        with pytest.raises(OSError):
+            qralph_pipeline._run_shell_chain("nonexistent_binary_xyz_qralph", "/tmp", timeout=5)
+
+    def test_output_truncated_to_2000_chars(self):
+        """REQ-SHELL-CHAIN-5: Output is capped at 2000 characters."""
+        # python3 prints 3000 'x' chars — output should be truncated
+        cmd = "python3 -c \"print('x' * 3000)\""
+        rc, output = qralph_pipeline._run_shell_chain(cmd, "/tmp", timeout=10)
+        assert rc == 0
+        assert len(output) <= 2000
+
+    def test_timeout_propagates(self):
+        """REQ-SHELL-CHAIN-6: TimeoutExpired propagates to caller."""
+        with pytest.raises(subprocess.TimeoutExpired):
+            qralph_pipeline._run_shell_chain("sleep 10", "/tmp", timeout=1)
+
+    def test_shell_injection_is_rejected(self, tmp_path):
+        """REQ-SHELL-CHAIN-7: Shell metacharacters are rejected."""
+        marker = tmp_path / "injection_test"
+        marker.write_text("safe")
+        cmd = f"echo $(rm {marker})"
+        with pytest.raises(ValueError, match="does not support shell operators"):
+            qralph_pipeline._run_shell_chain(cmd, "/tmp", timeout=5)
+        assert marker.exists(), "Shell injection removed the marker file!"
+
+    def test_rejects_pipe(self):
+        """REQ-SHELL-CHAIN-8: Pipe operator is rejected."""
+        with pytest.raises(ValueError, match="does not support shell operators"):
+            qralph_pipeline._run_shell_chain("echo hello | grep hello", "/tmp", timeout=5)
+
+    def test_rejects_semicolon(self):
+        """REQ-SHELL-CHAIN-9: Semicolon operator is rejected."""
+        with pytest.raises(ValueError, match="does not support shell operators"):
+            qralph_pipeline._run_shell_chain("echo a; echo b", "/tmp", timeout=5)
+
+    def test_rejects_redirect(self):
+        """REQ-SHELL-CHAIN-10: Redirect operator is rejected."""
+        with pytest.raises(ValueError, match="does not support shell operators"):
+            qralph_pipeline._run_shell_chain("echo hello > /tmp/out.txt", "/tmp", timeout=5)
+
+    def test_rejects_backtick(self):
+        """REQ-SHELL-CHAIN-11: Backtick substitution is rejected."""
+        with pytest.raises(ValueError, match="does not support shell operators"):
+            qralph_pipeline._run_shell_chain("echo `whoami`", "/tmp", timeout=5)
+
+
 # ─── Project ID / Slug Tests ────────────────────────────────────────────────
 
 class TestProjectHelpers:
@@ -472,8 +561,9 @@ class TestResume:
             "request": "test",
             "template": "bug-fix",
         }
-        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
-            with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir), \
+             mock.patch.object(qralph_pipeline, '_acquire_session_lock'), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
                 result = qralph_pipeline.cmd_resume()
                 assert result["phase"] == "EXECUTE"
                 assert result["has_manifest"] is True
@@ -779,6 +869,7 @@ class TestCmdNext:
 
     def test_init_confirm_returns_spawn_agents(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="INIT")
+        state["pipeline"]["awaiting_confirmation"] = "confirm_template"
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
             with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
                 with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
@@ -830,6 +921,7 @@ class TestCmdNext:
 
     def test_plan_review_confirm_no_tasks_returns_error(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="PLAN_REVIEW")
+        state["pipeline"]["awaiting_confirmation"] = "confirm_plan"
         manifest = {"tasks": []}
         (project_path / "manifest.json").write_text(json.dumps(manifest))
 
@@ -841,6 +933,7 @@ class TestCmdNext:
 
     def test_plan_review_confirm_starts_execution(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path, sub_phase="PLAN_REVIEW")
+        state["pipeline"]["awaiting_confirmation"] = "confirm_plan"
         manifest = {"tasks": [{"id": "T1", "summary": "Do it", "files": ["a.ts"], "acceptance_criteria": ["works"]}]}
         (project_path / "manifest.json").write_text(json.dumps(manifest))
 
@@ -916,14 +1009,11 @@ class TestCmdNext:
 
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir):
             with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state):
-                with mock.patch.object(qralph_pipeline, 'cmd_finalize', return_value={
-                    "status": "complete", "summary_path": str(project_path / "SUMMARY.md"),
-                }):
-                    with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
-                        with mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
-                            result = qralph_pipeline.cmd_next(confirm=False)
-                            assert result["action"] == "complete"
-                            assert "SUMMARY.md" in result["summary_path"]
+                with mock.patch.object(qralph_pipeline.qralph_state, 'save_state'):
+                    with mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
+                        result = qralph_pipeline.cmd_next(confirm=False)
+                        # VERIFY passes → DEPLOY_PREFLIGHT → no deploy intent → LEARN
+                        assert result["action"] == "learn_complete"
 
     def test_no_project_returns_error(self):
         with mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value={}):
@@ -1044,7 +1134,8 @@ class TestVerifyVerdictEnforcement:
              mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
              mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
             result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
-        assert result["action"] == "complete"
+        # VERIFY passes → DEPLOY_PREFLIGHT → no deploy intent → LEARN
+        assert result["action"] == "learn_complete"
 
 
 class TestQualityGateEnforcement:
@@ -1094,7 +1185,7 @@ class TestQualityGateEnforcement:
         manifest = {
             "tasks": [{"id": "T-001", "summary": "test", "files": []}],
             "parallel_groups": [["T-001"]],
-            "quality_gate_cmd": "exit 1",
+            "quality_gate_cmd": "false",
             "target_directory": str(tmp_path),
         }
         (project_path / "manifest.json").write_text(json.dumps(manifest))
@@ -1136,6 +1227,250 @@ class TestQualityGateEnforcement:
         # Should be spawning simplifier (SIMPLIFY phase inserted before VERIFY)
         assert len(result["agents"]) == 1
         assert result["agents"][0]["name"] == "simplifier"
+
+
+class TestQualityGateRetryLimit:
+    """REQ-QG-RETRY: Quality gate failure increments retry counter; escalates after 3."""
+
+    def _make_state(self, tmp_path, retries=0, mode="thorough"):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "checkpoints").mkdir()
+
+        manifest = {
+            "tasks": [{"id": "T-001", "summary": "test", "files": []}],
+            "parallel_groups": [["T-001"]],
+            "quality_gate_cmd": "false",
+        }
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+        (project_path / "execution-outputs" / "T-001.md").write_text("x" * 200)
+
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "EXECUTE",
+            "pipeline": {
+                "sub_phase": "EXEC_WAITING",
+                "execution_groups": [{"task_ids": ["T-001"], "agents": []}],
+                "current_group_index": 0,
+                "quality_gate_retries": retries,
+                "mode": mode,
+            },
+        }
+        return state, project_path, projects_dir
+
+    def test_first_failure_increments_to_1(self, tmp_path):
+        """REQ-QG-RETRY-1: First failure sets counter to 1."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=0)
+        pipeline = state["pipeline"]
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert pipeline["quality_gate_retries"] == 1
+        assert result["retry_count"] == 1
+        assert result["retries_remaining"] == 2
+
+    def test_third_failure_escalates(self, tmp_path):
+        """REQ-QG-RETRY-3: Third failure returns escalate_to_user."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2)
+        pipeline = state["pipeline"]
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert result["action"] == "escalate_to_user"
+        assert result["escalation_type"] == "quality_gate_retry_limit"
+        assert result["retry_count"] == 3
+        option_ids = [o["id"] for o in result["options"]]
+        assert "skip" in option_ids
+        assert "abort" in option_ids
+
+    def test_thorough_mode_omits_technical_detail(self, tmp_path):
+        """REQ-QG-RETRY-4: Thorough mode hides raw test output."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2, mode="thorough")
+        pipeline = state["pipeline"]
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert result["action"] == "escalate_to_user"
+        assert "technical_detail" not in result
+
+    def test_quick_mode_includes_technical_detail(self, tmp_path):
+        """REQ-QG-RETRY-5: Quick mode includes test output."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2, mode="quick")
+        pipeline = state["pipeline"]
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert result["action"] == "escalate_to_user"
+        assert "technical_detail" in result
+
+    def test_counter_resets_on_success(self, tmp_path):
+        """REQ-QG-RETRY-6: Counter resets to 0 on passing gate."""
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "checkpoints").mkdir()
+        manifest = {
+            "tasks": [{"id": "T-001", "summary": "test", "files": []}],
+            "parallel_groups": [["T-001"]],
+            "quality_gate_cmd": "echo ok",
+        }
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+        (project_path / "execution-outputs" / "T-001.md").write_text("x" * 200)
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "EXECUTE",
+            "pipeline": {
+                "sub_phase": "EXEC_WAITING",
+                "execution_groups": [{"task_ids": ["T-001"], "agents": []}],
+                "current_group_index": 0,
+                "quality_gate_retries": 2,
+                "mode": "thorough",
+            },
+        }
+        pipeline = state["pipeline"]
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert pipeline["quality_gate_retries"] == 0
+
+    def test_missing_counter_defaults_to_zero(self, tmp_path):
+        """REQ-QG-RETRY-7: Missing key starts at 0."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=0)
+        del state["pipeline"]["quality_gate_retries"]
+        pipeline = state["pipeline"]
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+            result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert pipeline["quality_gate_retries"] == 1
+
+
+class TestVerifyRetryLimit:
+    """REQ-VR-RETRY: Verification failures increment retry counter; escalate after 3."""
+
+    def _make_state(self, tmp_path, retries=0, mode="thorough"):
+        projects_dir = tmp_path / "projects"
+        project_path = projects_dir / "001-test"
+        project_path.mkdir(parents=True)
+        (project_path / "verification").mkdir()
+        (project_path / "checkpoints").mkdir()
+        (project_path / "manifest.json").write_text(json.dumps({"tasks": []}))
+
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "pipeline": {
+                "sub_phase": "VERIFY_WAIT",
+                "verify_retries": retries,
+                "mode": mode,
+            },
+        }
+        return state, project_path, projects_dir
+
+    def test_fail_verdict_increments_counter(self, tmp_path):
+        """REQ-VR-RETRY-1: FAIL verdict increments counter."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=0)
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text('{"verdict": "FAIL"}')
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert pipeline["verify_retries"] == 1
+        assert result["retry_count"] == 1
+        assert result["retries_remaining"] == 2
+
+    def test_ambiguous_verdict_increments_counter(self, tmp_path):
+        """REQ-VR-RETRY-2: Ambiguous verdict increments counter."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=0)
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text("Looks good to me.")
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert pipeline["verify_retries"] == 1
+
+    def test_third_failure_escalates(self, tmp_path):
+        """REQ-VR-RETRY-3: Third failure returns escalate_to_user."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2)
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text('{"verdict": "FAIL"}')
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "escalate_to_user"
+        assert result["escalation_type"] == "verify_retry_limit"
+        assert result["retry_count"] == 3
+        option_ids = [o["id"] for o in result["options"]]
+        assert "accept" in option_ids
+        assert "back_to_polish" in option_ids
+        assert "abort" in option_ids
+
+    def test_thorough_mode_omits_technical_detail(self, tmp_path):
+        """REQ-VR-RETRY-4: Thorough mode hides block reason."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2, mode="thorough")
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text('{"verdict": "FAIL"}')
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "escalate_to_user"
+        assert "technical_detail" not in result
+
+    def test_quick_mode_includes_technical_detail(self, tmp_path):
+        """REQ-VR-RETRY-5: Quick mode includes block reason."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2, mode="quick")
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text('{"verdict": "FAIL"}')
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "escalate_to_user"
+        assert "technical_detail" in result
+
+    def test_counter_resets_on_pass(self, tmp_path):
+        """REQ-VR-RETRY-6: Counter resets to 0 on PASS."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=2)
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text('{"verdict": "PASS"}')
+        with mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+             mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert pipeline["verify_retries"] == 0
+
+    def test_missing_counter_defaults_to_zero(self, tmp_path):
+        """REQ-VR-RETRY-7: Missing key starts at 0."""
+        state, project_path, projects_dir = self._make_state(tmp_path, retries=0)
+        del state["pipeline"]["verify_retries"]
+        pipeline = state["pipeline"]
+        (project_path / "verification" / "result.md").write_text('{"verdict": "FAIL"}')
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+        assert result["action"] == "error"
+        assert pipeline["verify_retries"] == 1
 
 
 class TestMinimumOutputLength:
@@ -1755,7 +2090,8 @@ class TestV2Phases:
     def test_phases_order_preserved(self):
         """V2 phases should maintain correct ordering."""
         expected_order = ["IDEATE", "PERSONA", "CONCEPT_REVIEW", "PLAN", "EXECUTE",
-                         "SIMPLIFY", "QUALITY_LOOP", "POLISH", "VERIFY", "LEARN", "COMPLETE"]
+                         "SIMPLIFY", "QUALITY_LOOP", "POLISH", "VERIFY",
+                         "DEPLOY", "SMOKE", "LEARN", "COMPLETE"]
         for i, phase in enumerate(expected_order):
             assert qp.PHASES.index(phase) == i, f"Phase {phase} not at expected index {i}"
 
@@ -1771,6 +2107,7 @@ class TestModeFlag:
         kwargs = {"mode": mode} if mode is not None else {}
 
         with mock.patch.object(qp, "PROJECTS_DIR", projects_dir), \
+             mock.patch.object(qp, "_acquire_session_lock"), \
              mock.patch.object(qp.qralph_config, "load_config", return_value=mock_config):
             return qp.cmd_plan("build a landing page", **kwargs)
 
@@ -2028,6 +2365,7 @@ class TestIdeateStateMachine:
     def test_ideate_review_confirmed_advances_to_persona(self, tmp_path):
         """Confirming ideation should advance to PERSONA phase."""
         state, project_path, projects_dir = self._make_ideate_state(tmp_path, sub_phase="IDEATE_REVIEW")
+        state["pipeline"]["awaiting_confirmation"] = "confirm_ideation"
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir), \
              mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
              mock.patch.object(qralph_pipeline.qralph_state, 'save_state'), \
@@ -2153,6 +2491,7 @@ class TestPersonaStateMachine:
     def test_persona_review_confirmed_advances(self, tmp_path):
         """Confirming personas should advance to CONCEPT_REVIEW phase."""
         state, project_path, projects_dir = self._make_persona_state(tmp_path, sub_phase="PERSONA_REVIEW")
+        state["pipeline"]["awaiting_confirmation"] = "confirm_personas"
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir), \
              mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
              mock.patch.object(qralph_pipeline.qralph_state, 'save_state'), \
@@ -2343,6 +2682,7 @@ class TestConceptStateMachine:
     def test_concept_review_confirmed_advances_to_plan(self, tmp_path):
         state, project_path, projects_dir = self._make_concept_state(tmp_path, sub_phase="CONCEPT_REVIEW")
         state["pipeline"]["concept_agents"] = []
+        state["pipeline"]["awaiting_confirmation"] = "confirm_concept"
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', projects_dir), \
              mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
              mock.patch.object(qralph_pipeline.qralph_state, 'save_state'), \
@@ -3525,6 +3865,115 @@ class TestBacktrackToReplan:
             assert result["action"] in ("backtrack_replan", "advance_phase")
             # Should increment replan_count
             assert state["pipeline"]["quality_loop"]["replan_count"] >= 1
+
+
+# ─── Phase Progress Metadata Tests (P2-6) ────────────────────────────────────
+
+class TestPhaseProgress:
+    """Tests for _build_phase_progress helper."""
+
+    def test_thorough_plan_phase(self):
+        state = {"phase": "PLAN"}
+        pipeline = {"mode": "thorough", "sub_phase": "PLAN_WAITING"}
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["current_phase"] == "PLAN"
+        assert result["phase_index"] == 4  # IDEATE, PERSONA, CONCEPT_REVIEW, PLAN
+        assert result["total_phases"] == 13
+        assert result["sub_phase"] == "PLAN_WAITING"
+
+    def test_quick_plan_phase(self):
+        state = {"phase": "PLAN"}
+        pipeline = {"mode": "quick", "sub_phase": "INIT"}
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["phase_index"] == 1  # PLAN is first in quick
+        assert result["total_phases"] == 8
+
+    def test_thorough_execute_phase(self):
+        state = {"phase": "EXECUTE"}
+        pipeline = {"mode": "thorough", "sub_phase": "EXEC_WAITING"}
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["phase_index"] == 5
+        assert result["total_phases"] == 13
+
+    def test_quick_verify_phase(self):
+        state = {"phase": "VERIFY"}
+        pipeline = {"mode": "quick", "sub_phase": "VERIFY_WAIT"}
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["phase_index"] == 4  # PLAN, EXECUTE, SIMPLIFY, VERIFY
+        assert result["total_phases"] == 8
+
+    def test_unknown_phase_defaults_to_1(self):
+        state = {"phase": "NONEXISTENT"}
+        pipeline = {"mode": "thorough", "sub_phase": ""}
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["phase_index"] == 1
+
+    def test_default_mode_is_thorough(self):
+        state = {"phase": "PLAN"}
+        pipeline = {"sub_phase": "INIT"}  # no mode key
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["total_phases"] == 13
+
+    def test_complete_phase(self):
+        state = {"phase": "COMPLETE"}
+        pipeline = {"mode": "thorough", "sub_phase": "COMPLETE"}
+        result = qralph_pipeline._build_phase_progress(state, pipeline)
+        assert result["phase_index"] == 13
+        assert result["total_phases"] == 13
+
+
+# ─── Session Lock Tests (P2-7) ───────────────────────────────────────────────
+
+class TestAcquireSessionLock:
+    """Tests for _acquire_session_lock and _maybe_clear_stale_lock."""
+
+    def test_creates_lock_when_none_exists(self, tmp_path):
+        lock_file = tmp_path / "active-session.lock"
+        with mock.patch.object(qralph_pipeline, 'SESSION_LOCK', lock_file):
+            qralph_pipeline._acquire_session_lock()
+            assert lock_file.exists()
+            data = json.loads(lock_file.read_text())
+            assert data["pid"] == os.getpid()
+
+    def test_overwrites_stale_lock_dead_pid(self, tmp_path):
+        lock_file = tmp_path / "active-session.lock"
+        lock_file.write_text(json.dumps({"pid": 999999999, "started_at": "old"}))
+        with mock.patch.object(qralph_pipeline, 'SESSION_LOCK', lock_file):
+            qralph_pipeline._acquire_session_lock()
+            data = json.loads(lock_file.read_text())
+            assert data["pid"] == os.getpid()
+
+    def test_raises_on_live_pid(self, tmp_path):
+        lock_file = tmp_path / "active-session.lock"
+        lock_file.write_text(json.dumps({"pid": os.getpid(), "started_at": "now"}))
+        with mock.patch.object(qralph_pipeline, 'SESSION_LOCK', lock_file):
+            with pytest.raises(RuntimeError, match="Another QRALPH session"):
+                qralph_pipeline._acquire_session_lock()
+
+    def test_clears_corrupt_lock(self, tmp_path):
+        lock_file = tmp_path / "active-session.lock"
+        lock_file.write_text("not json!")
+        with mock.patch.object(qralph_pipeline, 'SESSION_LOCK', lock_file):
+            qralph_pipeline._acquire_session_lock()
+            assert lock_file.exists()
+            data = json.loads(lock_file.read_text())
+            assert data["pid"] == os.getpid()
+
+    def test_clears_lock_missing_pid(self, tmp_path):
+        lock_file = tmp_path / "active-session.lock"
+        lock_file.write_text(json.dumps({"started_at": "now"}))
+        with mock.patch.object(qralph_pipeline, 'SESSION_LOCK', lock_file):
+            qralph_pipeline._acquire_session_lock()
+            data = json.loads(lock_file.read_text())
+            assert data["pid"] == os.getpid()
+
+    def test_clears_lock_non_int_pid(self, tmp_path):
+        lock_file = tmp_path / "active-session.lock"
+        lock_file.write_text(json.dumps({"pid": "abc", "started_at": "now"}))
+        with mock.patch.object(qralph_pipeline, 'SESSION_LOCK', lock_file):
+            qralph_pipeline._acquire_session_lock()
+            data = json.loads(lock_file.read_text())
+            assert data["pid"] == os.getpid()
 
 
 if __name__ == "__main__":

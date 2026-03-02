@@ -205,6 +205,21 @@ def validate_request(request: str) -> bool:
     return len(request.strip()) >= 3
 
 
+def _check_pipeline_version_guard():
+    """Return an error message if the current project was created by pipeline v6+."""
+    state = load_state()
+    if not state:
+        return None
+    pipeline_version = state.get("pipeline_version", "")
+    if isinstance(pipeline_version, str) and pipeline_version.startswith("6."):
+        return (
+            f"This project was created by QRALPH pipeline v{pipeline_version}. "
+            "Use 'python3 .qralph/tools/qralph-pipeline.py' instead of the orchestrator. "
+            "The orchestrator (v5.x) is not compatible with pipeline v6.x projects."
+        )
+    return None
+
+
 def _error_result(message: str) -> dict:
     """Create and print a consistent error result dict."""
     result = {"status": "error", "error": message}
@@ -3010,6 +3025,13 @@ def main():
     subparsers.add_parser("adr-list", help="List all loaded ADRs")
 
     args = parser.parse_args()
+
+    # Deprecation guard: refuse to run on pipeline v6+ projects (status is read-only, exempt)
+    if args.command != "status":
+        guard_error = _check_pipeline_version_guard()
+        if guard_error:
+            print(json.dumps({"status": "error", "error": guard_error}))
+            sys.exit(1)
 
     if args.command == "init":
         request = args.request_flag or args.request
