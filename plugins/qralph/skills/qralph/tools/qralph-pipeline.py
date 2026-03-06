@@ -27,9 +27,10 @@ import re
 import shlex
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+import atexit
 
 # Import shared state module
 import importlib.util
@@ -108,7 +109,21 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     extract_learnings = None
     generate_learning_summary = None
 
-__version__ = "6.6.1"
+# Import self-healing rules (optional — may not exist yet)
+try:
+    _sh_path = Path(__file__).parent / "self-healing.py"
+    _sh_spec = importlib.util.spec_from_file_location("self_healing", _sh_path)
+    _self_healing = importlib.util.module_from_spec(_sh_spec)
+    _sh_spec.loader.exec_module(_self_healing)
+    match_heal_condition = _self_healing.match_condition
+    is_heal_on_cooldown_fn = _self_healing.is_heal_on_cooldown
+    learn_heal_counters = _self_healing.learn_update_counters
+except (ImportError, FileNotFoundError, AttributeError, OSError):
+    match_heal_condition = None
+    is_heal_on_cooldown_fn = None
+    learn_heal_counters = None
+
+__version__ = "6.6.2"
 
 PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"
@@ -178,6 +193,22 @@ def _release_session_lock() -> None:
     """Remove session lock file. Hooks will silently allow everything."""
     SESSION_LOCK.unlink(missing_ok=True)
 
+atexit.register(_release_session_lock)
+
+
+def _pipeline_shutdown(state: dict, project_path: Path) -> str:
+    """Release session lock, record shutdown timestamp, clear spawned agents.
+
+    Returns the shutdown ISO timestamp.
+    """
+    _release_session_lock()
+    shutdown_at = datetime.now().isoformat()
+    pipeline = state.setdefault("pipeline", {})
+    pipeline["shutdown_at"] = shutdown_at
+    if "_spawned_agents" in pipeline:
+        pipeline["_spawned_agents"] = {}
+    return shutdown_at
+
 # Minimum length for agent output to be considered valid (not a stub/error)
 MIN_AGENT_OUTPUT_LENGTH = 100
 
@@ -189,6 +220,93 @@ PHASES = ["IDEATE", "PERSONA", "CONCEPT_REVIEW", "PLAN", "EXECUTE",
 
 # Max concurrent worktree agents
 MAX_PARALLEL_AGENTS = 4
+
+# Agent wait timeouts by model tier (seconds)
+MAX_AGENT_WAIT_BY_MODEL = {
+    "haiku": 180,
+    "sonnet": 400,
+    "opus": 900,
+    "default": 400,
+}
+
+
+def _resolve_agent_output(output_dir: Path, agent_name: str, min_length: int = 100) -> tuple[Optional[Path], str]:
+    """Resolve agent output file with priority: .respawn.md > .md > .hung.md.
+    Returns (path, content) — content is empty string if nothing found or too short.
+    """
+    suffixes = [".respawn.md", ".md", ".hung.md"]
+    for suffix in suffixes:
+        candidate = output_dir / f"{agent_name}{suffix}"
+        if candidate.exists():
+            content = candidate.read_text(encoding="utf-8").strip()
+            if content and len(content) >= min_length:
+                return candidate, content
+    return None, ""
+
+
+def _record_agent_start(agent_name: str, agent_timing: dict) -> None:
+    """Record agent start time using setdefault (write-once)."""
+    agent_timing.setdefault("agent_start_times", {}).setdefault(
+        agent_name, datetime.now().isoformat()
+    )
+    agent_timing.setdefault("respawn_counts", {}).setdefault(agent_name, 0)
+
+
+def _check_agent_timeout(
+    agent_timing: dict, agent_name: str, model: str,
+    output_dir: Path, project_path: Path,
+) -> Optional[dict]:
+    """Check if an agent has timed out. Returns action dict or None.
+
+    - None: agent still within timeout window
+    - {"action": "respawn_agent", ...}: first timeout, re-spawn
+    - {"action": "escalate_to_user", ...}: already re-spawned, escalate
+    """
+    start_str = agent_timing.get("agent_start_times", {}).get(agent_name)
+    if not start_str:
+        return None
+
+    try:
+        started = datetime.fromisoformat(start_str)
+    except (ValueError, TypeError):
+        return None
+
+    timeout = MAX_AGENT_WAIT_BY_MODEL.get(model, MAX_AGENT_WAIT_BY_MODEL["default"])
+    elapsed = (datetime.now() - started).total_seconds()
+
+    if elapsed < timeout:
+        return None
+
+    respawn_count = agent_timing.get("respawn_counts", {}).get(agent_name, 0)
+
+    if respawn_count < 1:
+        # First timeout — rename existing output to .hung.md, trigger re-spawn
+        original = output_dir / f"{agent_name}.md"
+        hung = output_dir / f"{agent_name}.hung.md"
+        if original.exists() and not hung.exists():
+            original.rename(hung)
+        agent_timing["respawn_counts"][agent_name] = respawn_count + 1
+        agent_timing["agent_start_times"][agent_name] = datetime.now().isoformat()
+        return {
+            "action": "respawn_agent",
+            "agent_name": agent_name,
+            "model": model,
+            "elapsed_seconds": int(elapsed),
+            "output_file": f"{agent_name}.respawn.md",
+        }
+
+    return {
+        "action": "escalate_to_user",
+        "escalation_type": "agent_timeout",
+        "agent_name": agent_name,
+        "elapsed_seconds": int(elapsed),
+        "message": (
+            f"Agent '{agent_name}' timed out after {int(elapsed)}s "
+            f"(limit: {timeout}s, model: {model}). "
+            f"Re-spawn already attempted. Manual intervention required."
+        ),
+    }
+
 
 # ─── Task Templates ─────────────────────────────────────────────────────────
 
@@ -1008,7 +1126,31 @@ _NPM_SCRIPT_PRIORITY = [
 ]
 
 
+_LINTER_CONFIGS = {
+    ".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml",
+    "eslint.config.js", "eslint.config.mjs", "eslint.config.ts",
+    "biome.json", "biome.jsonc", ".prettierrc", ".prettierrc.json",
+}
+
 _UNSUPPORTED_SHELL_OPS = re.compile(r'[|;]|>>?|<<|`|\$\(')
+
+
+def _is_safe_gate_cwd(cwd: str) -> bool:
+    """Check that a CWD path is contained within PROJECT_ROOT."""
+    try:
+        resolved = Path(cwd).resolve()
+        proj_root = PROJECT_ROOT.resolve()
+        return str(resolved).startswith(str(proj_root) + os.sep) or resolved == proj_root
+    except (OSError, ValueError):
+        return False
+
+
+def _check_linter_effective(directory: Path) -> bool:
+    """Check if a linter config exists in the directory."""
+    for config_name in _LINTER_CONFIGS:
+        if (directory / config_name).exists():
+            return True
+    return False
 
 
 def _run_shell_chain(cmd: str, cwd: str, timeout: int = 120) -> tuple[int, str]:
@@ -1072,26 +1214,40 @@ def _detect_quality_gate_in(directory: Path) -> dict:
     return {}
 
 
-def detect_quality_gate() -> dict:
+def detect_quality_gate(site_dir: str | None = None) -> dict:
     """Detect project test infrastructure and return quality gate info.
 
-    Scans PROJECT_ROOT first, then one level of subdirectories so that projects
-    living under e.g. projects/029-hello-world-server/ are found.
+    Args:
+        site_dir: Optional explicit site directory to scan first.
+                  Must be contained within PROJECT_ROOT.
 
-    Returns a dict with ``cmd`` and ``cwd`` fields, or an empty dict when
-    nothing is detected.  Callers must use gate.get("cmd") and gate.get("cwd").
+    Returns dict with cmd, cwd, and effective fields.
     """
-    # Check the repo root first
+    if site_dir:
+        resolved = Path(site_dir).resolve()
+        proj_root = PROJECT_ROOT.resolve()
+        if not (str(resolved).startswith(str(proj_root) + os.sep) or resolved == proj_root):
+            return {}
+        result = _detect_quality_gate_in(resolved)
+        if result:
+            result["effective"] = _check_linter_effective(resolved)
+            return result
+
     result = _detect_quality_gate_in(PROJECT_ROOT)
     if result:
+        result["effective"] = _check_linter_effective(PROJECT_ROOT)
         return result
 
-    # Scan one level of subdirectories (skip hidden dirs)
     try:
         for subdir in sorted(PROJECT_ROOT.iterdir()):
             if subdir.is_dir() and not subdir.name.startswith("."):
-                result = _detect_quality_gate_in(subdir)
+                resolved_sub = subdir.resolve()
+                proj_root = PROJECT_ROOT.resolve()
+                if not str(resolved_sub).startswith(str(proj_root) + os.sep):
+                    continue
+                result = _detect_quality_gate_in(resolved_sub)
                 if result:
+                    result["effective"] = _check_linter_effective(resolved_sub)
                     return result
     except OSError:
         pass
@@ -1450,39 +1606,105 @@ def cmd_plan(request: str, target_dir: Optional[str] = None, mode: str = "thorou
 
     # Acquire session lock — hooks use this to enforce deterministic flow
     _acquire_session_lock()
+    try:
 
-    # Set starting phase based on mode
-    if mode == "thorough":
-        state["phase"] = "IDEATE"
-        starting_sub_phase = "IDEATE_BRAINSTORM"
-    else:
-        state["phase"] = "PLAN"
-        starting_sub_phase = "INIT"
+        # Set starting phase based on mode
+        if mode == "thorough":
+            state["phase"] = "IDEATE"
+            starting_sub_phase = "IDEATE_BRAINSTORM"
+        else:
+            state["phase"] = "PLAN"
+            starting_sub_phase = "INIT"
 
-    # Story-point estimate — must happen before agent generation
-    estimated_sp = estimate_story_points(request)
-    _log_decision(project_path, f"SP-ESTIMATE: {estimated_sp} for '{request[:80]}'")
+        # Story-point estimate — must happen before agent generation
+        estimated_sp = estimate_story_points(request)
+        _log_decision(project_path, f"SP-ESTIMATE: {estimated_sp} for '{request[:80]}'")
 
-    # Adaptive cost budget
-    budget = calculate_adaptive_budget(estimated_sp, mode)
-    state["circuit_breakers"]["budget_usd"] = budget
-    _log_decision(project_path, f"BUDGET: ${budget} (SP={estimated_sp}, mode={mode})")
+        # Adaptive cost budget
+        budget = calculate_adaptive_budget(estimated_sp, mode)
+        state["circuit_breakers"]["budget_usd"] = budget
+        _log_decision(project_path, f"BUDGET: ${budget} (SP={estimated_sp}, mode={mode})")
 
-    # Re-initialize project dirs with correct mode (quick skips personas/concept-reviews)
-    init_project_directory(str(project_path), mode=mode)
+        # Re-initialize project dirs with correct mode (quick skips personas/concept-reviews)
+        init_project_directory(str(project_path), mode=mode)
 
-    # Suggest template (used by both paths for metadata)
-    suggested, scores = suggest_template(request)
-    template = TASK_TEMPLATES[suggested]
+        # Suggest template (used by both paths for metadata)
+        suggested, scores = suggest_template(request)
+        template = TASK_TEMPLATES[suggested]
 
-    # ── Fast-track: trivial tasks skip multi-agent planning ──────────────────
-    if estimated_sp < 0.2:
-        agent_config = generate_plan_agent_prompt(
-            "sde-iii", request, str(project_path), config
-        )
-        agents = [agent_config]
+        # ── Fast-track: trivial tasks skip multi-agent planning ──────────────────
+        if estimated_sp < 0.2:
+            agent_config = generate_plan_agent_prompt(
+                "sde-iii", request, str(project_path), config
+            )
+            agents = [agent_config]
 
-        state["agents"] = [agent_config["name"]]
+            state["agents"] = [agent_config["name"]]
+            state["template"] = suggested
+            state["estimated_sp"] = estimated_sp
+            state["pipeline"] = {
+                "mode": mode,
+                "sub_phase": starting_sub_phase,
+                "plan_agents": agents,
+                "execution_groups": [],
+                "current_group_index": 0,
+                "single_agent_mode": True,
+            }
+            with qralph_state.exclusive_state_lock():
+                qralph_state.save_state(state)
+
+            _save_checkpoint(project_path, state)
+            _log_decision(
+                project_path,
+                f"PLAN: Fast-track (SP={estimated_sp} < 0.2, mode={mode}) — single sde-iii agent, "
+                f"template='{suggested}'"
+            )
+
+            return {
+                "status": "plan_ready",
+                "project_id": state["project_id"],
+                "project_path": str(project_path),
+                "phase": state["phase"],
+                "suggested_template": suggested,
+                "template_description": template["description"],
+                "all_templates": {k: v["description"] for k, v in TASK_TEMPLATES.items()},
+                "scores": scores,
+                "agents": agents,
+                "estimated_sp": estimated_sp,
+                "fast_track": True,
+                "pipeline": state["pipeline"],
+                "research_config": config.get("research_tools", {}),
+            }
+
+        # ── Full multi-agent planning path ───────────────────────────────────────
+        # 1. Start from template agents, enforce mandatory critical agents.
+        # 2. Classify request domains and prune agents with zero domain overlap.
+        #    This removes ux-designer from backend requests, security-reviewer
+        #    from UI-only requests, and architecture-advisor for SP < 0.5.
+        request_domains = _classify_request_domains(request)
+        base_agent_types = _enforce_critical_agents(template["plan_agents"])
+        plan_agent_types = _filter_agents_by_relevance(base_agent_types, request_domains, estimated_sp)
+
+        # In thorough mode, load IDEATION.md and CONCEPT-SYNTHESIS.md for plan agent context
+        ideation_md = ""
+        concept_md = ""
+        if mode == "thorough":
+            ideation_path = project_path / "IDEATION.md"
+            concept_path = project_path / "CONCEPT-SYNTHESIS.md"
+            if ideation_path.exists():
+                ideation_md = ideation_path.read_text().strip()
+            if concept_path.exists():
+                concept_md = concept_path.read_text().strip()
+
+        agents = []
+        for agent_type in plan_agent_types:
+            agent_config = generate_plan_agent_prompt(
+                agent_type, request, str(project_path), config,
+                mode=mode, ideation_md=ideation_md, concept_md=concept_md,
+            )
+            agents.append(agent_config)
+
+        state["agents"] = [a["name"] for a in agents]
         state["template"] = suggested
         state["estimated_sp"] = estimated_sp
         state["pipeline"] = {
@@ -1491,7 +1713,7 @@ def cmd_plan(request: str, target_dir: Optional[str] = None, mode: str = "thorou
             "plan_agents": agents,
             "execution_groups": [],
             "current_group_index": 0,
-            "single_agent_mode": True,
+            "single_agent_mode": False,
         }
         with qralph_state.exclusive_state_lock():
             qralph_state.save_state(state)
@@ -1499,8 +1721,8 @@ def cmd_plan(request: str, target_dir: Optional[str] = None, mode: str = "thorou
         _save_checkpoint(project_path, state)
         _log_decision(
             project_path,
-            f"PLAN: Fast-track (SP={estimated_sp} < 0.2, mode={mode}) — single sde-iii agent, "
-            f"template='{suggested}'"
+            f"PLAN: Template '{suggested}' suggested (SP={estimated_sp}, mode={mode}, "
+            f"domains={request_domains}, agents={plan_agent_types}, scores: {scores})"
         )
 
         return {
@@ -1514,75 +1736,13 @@ def cmd_plan(request: str, target_dir: Optional[str] = None, mode: str = "thorou
             "scores": scores,
             "agents": agents,
             "estimated_sp": estimated_sp,
-            "fast_track": True,
+            "fast_track": False,
             "pipeline": state["pipeline"],
             "research_config": config.get("research_tools", {}),
         }
-
-    # ── Full multi-agent planning path ───────────────────────────────────────
-    # 1. Start from template agents, enforce mandatory critical agents.
-    # 2. Classify request domains and prune agents with zero domain overlap.
-    #    This removes ux-designer from backend requests, security-reviewer
-    #    from UI-only requests, and architecture-advisor for SP < 0.5.
-    request_domains = _classify_request_domains(request)
-    base_agent_types = _enforce_critical_agents(template["plan_agents"])
-    plan_agent_types = _filter_agents_by_relevance(base_agent_types, request_domains, estimated_sp)
-
-    # In thorough mode, load IDEATION.md and CONCEPT-SYNTHESIS.md for plan agent context
-    ideation_md = ""
-    concept_md = ""
-    if mode == "thorough":
-        ideation_path = project_path / "IDEATION.md"
-        concept_path = project_path / "CONCEPT-SYNTHESIS.md"
-        if ideation_path.exists():
-            ideation_md = ideation_path.read_text().strip()
-        if concept_path.exists():
-            concept_md = concept_path.read_text().strip()
-
-    agents = []
-    for agent_type in plan_agent_types:
-        agent_config = generate_plan_agent_prompt(
-            agent_type, request, str(project_path), config,
-            mode=mode, ideation_md=ideation_md, concept_md=concept_md,
-        )
-        agents.append(agent_config)
-
-    state["agents"] = [a["name"] for a in agents]
-    state["template"] = suggested
-    state["estimated_sp"] = estimated_sp
-    state["pipeline"] = {
-        "mode": mode,
-        "sub_phase": starting_sub_phase,
-        "plan_agents": agents,
-        "execution_groups": [],
-        "current_group_index": 0,
-        "single_agent_mode": False,
-    }
-    with qralph_state.exclusive_state_lock():
-        qralph_state.save_state(state)
-
-    _save_checkpoint(project_path, state)
-    _log_decision(
-        project_path,
-        f"PLAN: Template '{suggested}' suggested (SP={estimated_sp}, mode={mode}, "
-        f"domains={request_domains}, agents={plan_agent_types}, scores: {scores})"
-    )
-
-    return {
-        "status": "plan_ready",
-        "project_id": state["project_id"],
-        "project_path": str(project_path),
-        "phase": state["phase"],
-        "suggested_template": suggested,
-        "template_description": template["description"],
-        "all_templates": {k: v["description"] for k, v in TASK_TEMPLATES.items()},
-        "scores": scores,
-        "agents": agents,
-        "estimated_sp": estimated_sp,
-        "fast_track": False,
-        "pipeline": state["pipeline"],
-        "research_config": config.get("research_tools", {}),
-    }
+    except BaseException:
+        _release_session_lock()
+        raise
 
 
 def cmd_plan_collect() -> dict:
@@ -2052,6 +2212,55 @@ def cmd_verify() -> dict:
     }
 
 
+def _compute_evidence_metrics(project_path: Path, state: dict, pipeline: dict) -> dict:
+    """Scan agent-outputs/ and compute evidence quality metrics for SUMMARY.md."""
+    outputs_dir = project_path / "agent-outputs"
+    total_agents = 0
+    agents_with_output = 0
+    total_words = 0
+    agent_status: dict = {}
+
+    if outputs_dir.exists():
+        md_files = list(outputs_dir.glob("*.md"))
+        total_agents = len(md_files)
+        for md_file in md_files:
+            agent_name = md_file.stem
+            try:
+                content = md_file.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            words = len(content.split())
+            if words > 0:
+                agents_with_output += 1
+                total_words += words
+                agent_status[agent_name] = {"words": words, "status": "present"}
+            else:
+                agent_status[agent_name] = {"words": 0, "status": "empty"}
+
+    eqs = round(agents_with_output / max(total_agents, 1) * 100)
+
+    if eqs >= 80:
+        confidence = "HIGH"
+    elif eqs >= 50:
+        confidence = "MEDIUM"
+    elif eqs >= 20:
+        confidence = "LOW"
+    else:
+        confidence = "HOLLOW RUN"
+
+    quality_loop_rounds = pipeline.get("quality_loop", {}).get("rounds_history", [])
+
+    return {
+        "agents_with_output": agents_with_output,
+        "total_agents": total_agents,
+        "total_words": total_words,
+        "agent_status": agent_status,
+        "eqs": eqs,
+        "confidence": confidence,
+        "quality_loop_rounds": quality_loop_rounds,
+    }
+
+
 def cmd_finalize() -> dict:
     """Write SUMMARY.md, mark COMPLETE."""
     state = qralph_state.load_state()
@@ -2105,6 +2314,10 @@ def cmd_finalize() -> dict:
             "failed_criteria": failed,
         }
 
+    # Compute evidence metrics from agent-outputs/ on disk
+    pipeline = state.get("pipeline", {})
+    em = _compute_evidence_metrics(project_path, state, pipeline)
+
     # Build SUMMARY.md
     summary = f"# Project Summary: {state.get('request', '')}\n\n"
     summary += f"**Project ID**: {state['project_id']}\n"
@@ -2125,6 +2338,12 @@ def cmd_finalize() -> dict:
     if agents:
         summary += f"## Agents Used\n\n{', '.join(agents)}\n\n"
 
+    # Evidence Quality
+    summary += "## Evidence Quality\n\n"
+    summary += f"- **Agents with output**: {em['agents_with_output']} / {em['total_agents']}\n"
+    summary += f"- **Total output words**: {em['total_words']:,}\n"
+    summary += f"- **Evidence Quality Score**: {em['eqs']}/100 ({em['confidence']})\n\n"
+
     # Verification
     summary += f"## Verification\n\n{verification_content}\n\n"
 
@@ -2132,21 +2351,27 @@ def cmd_finalize() -> dict:
     if manifest.get("quality_gate_cmd"):
         summary += f"## Quality Gate\n\n```\n{manifest['quality_gate_cmd']}\n```\n"
 
-    summary_path = project_path / "SUMMARY.md"
-    qralph_state.safe_write(summary_path, summary)
-
-    # Mark COMPLETE
+    # Mark COMPLETE before shutdown so state is saved correctly
     with qralph_state.exclusive_state_lock():
         state = qralph_state.load_state()
         state["phase"] = "COMPLETE"
         state["completed_at"] = datetime.now().isoformat()
         qralph_state.save_state(state)
 
+    # Perform deterministic shutdown: release lock, record timestamp, clear agents
+    shutdown_at = _pipeline_shutdown(state, project_path)
+
+    # Lifecycle section — reflects actual shutdown state
+    summary += "## Lifecycle\n\n"
+    summary += "- Pipeline cleanup: completed\n"
+    summary += "- Session lock: released\n"
+    summary += f"- Completed at: {shutdown_at}\n"
+
+    summary_path = project_path / "SUMMARY.md"
+    qralph_state.safe_write(summary_path, summary)
+
     _log_decision(project_path, "FINALIZE: Project marked COMPLETE")
     _save_checkpoint(project_path, state)
-
-    # Release session lock — hooks will silently allow everything in non-QRALPH sessions
-    _release_session_lock()
 
     return {
         "status": "complete",
@@ -2170,35 +2395,39 @@ def cmd_resume() -> dict:
     # Re-acquire session lock for resumed sessions (hooks need it)
     if state.get("phase") != "COMPLETE":
         _acquire_session_lock()
+    try:
 
-    phase = state.get("phase", "PLAN")
+        phase = state.get("phase", "PLAN")
 
-    # Determine next action based on phase
-    next_actions = {
-        "PLAN": "Run plan-collect if agents have reported. Otherwise spawn plan agents.",
-        "EXECUTE": "Run execute if tasks are ready. Check execution-outputs/ for progress.",
-        "VERIFY": "Run verify to generate verification agent. Check verification/result.md.",
-        "COMPLETE": "Project is complete. Review SUMMARY.md.",
-    }
+        # Determine next action based on phase
+        next_actions = {
+            "PLAN": "Run plan-collect if agents have reported. Otherwise spawn plan agents.",
+            "EXECUTE": "Run execute if tasks are ready. Check execution-outputs/ for progress.",
+            "VERIFY": "Run verify to generate verification agent. Check verification/result.md.",
+            "COMPLETE": "Project is complete. Review SUMMARY.md.",
+        }
 
-    # Check what exists
-    has_manifest = (project_path / "manifest.json").exists()
-    has_plan = (project_path / "PLAN.md").exists()
-    agent_outputs = list((project_path / "agent-outputs").glob("*.md")) if (project_path / "agent-outputs").exists() else []
-    exec_outputs = list((project_path / "execution-outputs").glob("*.md")) if (project_path / "execution-outputs").exists() else []
+        # Check what exists
+        has_manifest = (project_path / "manifest.json").exists()
+        has_plan = (project_path / "PLAN.md").exists()
+        agent_outputs = list((project_path / "agent-outputs").glob("*.md")) if (project_path / "agent-outputs").exists() else []
+        exec_outputs = list((project_path / "execution-outputs").glob("*.md")) if (project_path / "execution-outputs").exists() else []
 
-    return {
-        "status": "resumable",
-        "project_id": state["project_id"],
-        "request": state.get("request", ""),
-        "phase": phase,
-        "next_action": next_actions.get(phase, "Unknown phase"),
-        "has_manifest": has_manifest,
-        "has_plan": has_plan,
-        "agent_outputs_count": len(agent_outputs),
-        "execution_outputs_count": len(exec_outputs),
-        "template": state.get("template", ""),
-    }
+        return {
+            "status": "resumable",
+            "project_id": state["project_id"],
+            "request": state.get("request", ""),
+            "phase": phase,
+            "next_action": next_actions.get(phase, "Unknown phase"),
+            "has_manifest": has_manifest,
+            "has_plan": has_plan,
+            "agent_outputs_count": len(agent_outputs),
+            "execution_outputs_count": len(exec_outputs),
+            "template": state.get("template", ""),
+        }
+    except BaseException:
+        _release_session_lock()
+        raise
 
 
 def cmd_status() -> dict:
@@ -2364,6 +2593,50 @@ def cmd_next(confirm: bool = False) -> dict:
     pipeline = state.get("pipeline", {})
     sub_phase = pipeline.get("sub_phase", "INIT")
 
+    # --- Gap 3: Staleness detection ---
+    # If we're in a WAITING sub-phase and last_activity_at is >30min old,
+    # the orchestrator likely died mid-session. Fast-forward agent timeouts
+    # so the watchdog fires immediately, or escalate directly.
+    STALE_THRESHOLD_SECONDS = 1800  # 30 minutes
+    last_activity = pipeline.get("last_activity_at")
+    if last_activity and sub_phase.endswith("_WAITING"):
+        try:
+            last_dt = datetime.fromisoformat(last_activity)
+            elapsed = (datetime.now() - last_dt).total_seconds()
+            if elapsed > STALE_THRESHOLD_SECONDS:
+                heal_suggestion = None
+                if match_heal_condition is not None:
+                    heal_suggestion = match_heal_condition("session_stale", {
+                        "elapsed_seconds": elapsed,
+                        "sub_phase": sub_phase,
+                    })
+                # Backdate all agent start times so watchdog fires immediately
+                agent_timing = pipeline.get("agent_timing", {})
+                if agent_timing:
+                    backdated = (datetime.now() - timedelta(hours=2)).isoformat()
+                    for agent_name in agent_timing:
+                        agent_timing[agent_name]["started_at"] = backdated
+                    pipeline["agent_timing"] = agent_timing
+                    pipeline["last_activity_at"] = datetime.now().isoformat()
+                    qralph_state.save_state(state)
+                    # Fall through to normal dispatch — watchdog will fire
+                else:
+                    # No agents tracked — escalate directly
+                    return {
+                        "action": "escalate_to_user",
+                        "message": (
+                            f"The pipeline has been inactive for {int(elapsed // 60)} minutes "
+                            f"in {sub_phase}. This suggests the previous session ended unexpectedly."
+                        ),
+                        "options": [
+                            "Resume from current state",
+                            "Start this phase over",
+                        ],
+                        "heal_suggestion": heal_suggestion,
+                    }
+        except (ValueError, TypeError):
+            pass  # Malformed timestamp — proceed normally
+
     result = _dispatch_next(sub_phase, state, pipeline, project_path, confirm)
 
     # Inject phase_progress into non-error responses
@@ -2417,6 +2690,10 @@ def _dispatch_next(sub_phase: str, state: dict, pipeline: dict, project_path: Pa
         return _next_quality_discovery(state, pipeline, project_path)
     elif sub_phase == "QUALITY_FIX":
         return _next_quality_fix(state, pipeline, project_path)
+    elif sub_phase == "QUALITY_REVERIFY":
+        return _next_quality_reverify(state, pipeline, project_path)
+    elif sub_phase == "QUALITY_REVERIFY_WAITING":
+        return _next_quality_reverify_waiting(state, pipeline, project_path)
     elif sub_phase == "QUALITY_DASHBOARD":
         return _next_quality_dashboard(state, pipeline, project_path)
 
@@ -2490,8 +2767,11 @@ def _next_ideate_brainstorm(state: dict, pipeline: dict, project_path: Path) -> 
     # Generate brainstormer agent
     prompt = generate_ideate_prompt(state["request"], detected)
     agent = {"name": "brainstormer", "model": "opus", "prompt": prompt}
+    pipeline.setdefault("_spawned_agents", {})[agent["name"]] = agent
 
     pipeline["sub_phase"] = "IDEATE_WAITING"
+    _record_agent_start("brainstormer", pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}}))
+    pipeline["last_activity_at"] = datetime.now().isoformat()
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, f"IDEATE: Brainstorm started, detected {len(detected)} plugins")
 
@@ -2501,8 +2781,23 @@ def _next_ideate_brainstorm(state: dict, pipeline: dict, project_path: Path) -> 
 def _next_ideate_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     """IDEATE_WAITING: Check brainstormer output, copy to IDEATION.md, advance to IDEATE_REVIEW."""
     output_dir = project_path / "agent-outputs"
-    output_path = output_dir / "brainstormer.md"
-    if not output_path.exists() or output_path.stat().st_size < MIN_AGENT_OUTPUT_LENGTH:
+    output_path, brainstorm_content = _resolve_agent_output(output_dir, "brainstormer", MIN_AGENT_OUTPUT_LENGTH)
+    if not output_path:
+        timeout_result = _check_agent_timeout(
+            pipeline.get("agent_timing", {}), "brainstormer", "opus",
+            output_dir, project_path,
+        )
+        if timeout_result:
+            if timeout_result["action"] == "respawn_agent":
+                spawned = pipeline.get("_spawned_agents", {}).get("brainstormer")
+                if spawned:
+                    timeout_result["agent"] = spawned
+                    timeout_result["output_dir"] = str(output_dir)
+            elif timeout_result["action"] == "escalate_to_user" and match_heal_condition:
+                heal = match_heal_condition("agent_timeout", timeout_result)
+                if heal:
+                    timeout_result["heal_suggestion"] = heal
+            return timeout_result
         return {
             "action": "error",
             "message": "Brainstormer output not found or too short. Write agent output to agent-outputs/brainstormer.md and call next again.",
@@ -2510,7 +2805,7 @@ def _next_ideate_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
 
     # Copy to IDEATION.md
     ideation_path = project_path / "IDEATION.md"
-    ideation_path.write_text(output_path.read_text())
+    ideation_path.write_text(brainstorm_content)
 
     pipeline["sub_phase"] = "IDEATE_REVIEW"
     _save_pipeline_state(state, pipeline, project_path)
@@ -2613,7 +2908,13 @@ def _next_concept_spawn(state: dict, pipeline: dict, project_path: Path) -> dict
     )
 
     pipeline["concept_agents"] = [a["name"] for a in agents]
+    for a in agents:
+        pipeline.setdefault("_spawned_agents", {})[a["name"]] = a
     pipeline["sub_phase"] = "CONCEPT_WAITING"
+    agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
+    for a in agents:
+        _record_agent_start(a["name"], agent_timing)
+    pipeline["last_activity_at"] = datetime.now().isoformat()
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, f"CONCEPT: Spawning {len(agents)} concept review agents")
 
@@ -2628,13 +2929,30 @@ def _next_concept_waiting(state: dict, pipeline: dict, project_path: Path) -> di
     reviews: dict[str, str] = {}
     missing = []
     for name in expected:
-        output_file = output_dir / f"{name}.md"
-        if output_file.exists() and len(output_file.read_text().strip()) >= MIN_AGENT_OUTPUT_LENGTH:
-            reviews[name] = output_file.read_text().strip()
+        resolved_path, content = _resolve_agent_output(output_dir, name, MIN_AGENT_OUTPUT_LENGTH)
+        if resolved_path and content:
+            reviews[name] = content
         else:
             missing.append(name)
 
     if missing:
+        # Check for agent timeouts before returning error
+        for agent_name in missing:
+            timeout_result = _check_agent_timeout(
+                pipeline.get("agent_timing", {}), agent_name, "sonnet",
+                output_dir, project_path,
+            )
+            if timeout_result:
+                if timeout_result["action"] == "respawn_agent":
+                    spawned = pipeline.get("_spawned_agents", {}).get(agent_name)
+                    if spawned:
+                        timeout_result["agent"] = spawned
+                        timeout_result["output_dir"] = str(output_dir)
+                elif timeout_result["action"] == "escalate_to_user" and match_heal_condition:
+                    heal = match_heal_condition("agent_timeout", timeout_result)
+                    if heal:
+                        timeout_result["heal_suggestion"] = heal
+                return timeout_result
         return {
             "action": "error",
             "message": f"Missing concept review outputs: {', '.join(missing)}",
@@ -2705,6 +3023,11 @@ def _next_init(state: dict, pipeline: dict, project_path: Path, confirm: bool) -
 
     # --confirm: advance to PLAN_WAITING, return spawn_agents
     pipeline["sub_phase"] = "PLAN_WAITING"
+    agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
+    for a in agents:
+        _record_agent_start(a["name"], agent_timing)
+        pipeline.setdefault("_spawned_agents", {})[a["name"]] = a
+    pipeline["last_activity_at"] = datetime.now().isoformat()
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, "NEXT: Template confirmed, spawning plan agents")
 
@@ -2721,27 +3044,37 @@ def _next_plan_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     outputs_dir = project_path / "agent-outputs"
 
     missing = []
-    too_short = []
+    # Build model lookup from plan_agents config (opus agents need longer timeout)
+    agent_models = {a["name"]: a.get("model", "sonnet") for a in pipeline.get("plan_agents", [])}
     for name in expected:
-        output_file = outputs_dir / f"{name}.md"
-        if not output_file.exists() or not output_file.read_text().strip():
+        resolved_path, content = _resolve_agent_output(outputs_dir, name, MIN_AGENT_OUTPUT_LENGTH)
+        if not resolved_path:
             missing.append(name)
-        elif len(output_file.read_text().strip()) < MIN_AGENT_OUTPUT_LENGTH:
-            too_short.append(name)
 
     if missing:
+        # Check for agent timeouts before returning error
+        for agent_name in missing:
+            timeout_result = _check_agent_timeout(
+                pipeline.get("agent_timing", {}), agent_name,
+                agent_models.get(agent_name, "sonnet"),
+                outputs_dir, project_path,
+            )
+            if timeout_result:
+                if timeout_result["action"] == "respawn_agent":
+                    spawned = pipeline.get("_spawned_agents", {}).get(agent_name)
+                    if spawned:
+                        timeout_result["agent"] = spawned
+                        timeout_result["output_dir"] = str(outputs_dir)
+                elif timeout_result["action"] == "escalate_to_user" and match_heal_condition:
+                    heal = match_heal_condition("agent_timeout", timeout_result)
+                    if heal:
+                        timeout_result["heal_suggestion"] = heal
+                return timeout_result
         return {
             "action": "error",
             "message": f"Missing outputs: {', '.join(missing)}",
             "output_dir": str(outputs_dir),
             "expected": expected,
-        }
-
-    if too_short:
-        return {
-            "action": "error",
-            "message": f"Agent output too short (< {MIN_AGENT_OUTPUT_LENGTH} chars): {', '.join(too_short)}",
-            "output_dir": str(outputs_dir),
         }
 
     # All outputs present — auto-run plan-collect
@@ -2810,10 +3143,15 @@ def _next_plan_review(state: dict, pipeline: dict, project_path: Path, confirm: 
     pipeline["execution_groups"] = groups
     pipeline["current_group_index"] = 0
     pipeline["sub_phase"] = "EXEC_WAITING"
+    first_group = groups[0]
+    agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
+    for a in first_group.get("agents", []):
+        _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
+        pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
+    pipeline["last_activity_at"] = datetime.now().isoformat()
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, f"NEXT: Plan finalized, {len(groups)} execution groups ready")
 
-    first_group = groups[0]
     return {
         "action": "spawn_agents",
         "agents": first_group.get("agents", []),
@@ -2834,15 +3172,29 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     expected_ids = current_group.get("task_ids", [])
 
     missing = []
-    too_short = []
     for tid in expected_ids:
-        output_file = outputs_dir / f"{tid}.md"
-        if not output_file.exists() or not output_file.read_text().strip():
+        resolved_path, content = _resolve_agent_output(outputs_dir, tid, MIN_AGENT_OUTPUT_LENGTH)
+        if not resolved_path:
             missing.append(tid)
-        elif len(output_file.read_text().strip()) < MIN_AGENT_OUTPUT_LENGTH:
-            too_short.append(tid)
 
     if missing:
+        # Check for agent timeouts before returning error
+        for agent_name in missing:
+            timeout_result = _check_agent_timeout(
+                pipeline.get("agent_timing", {}), agent_name, "sonnet",
+                outputs_dir, project_path,
+            )
+            if timeout_result:
+                if timeout_result["action"] == "respawn_agent":
+                    spawned = pipeline.get("_spawned_agents", {}).get(agent_name)
+                    if spawned:
+                        timeout_result["agent"] = spawned
+                        timeout_result["output_dir"] = str(outputs_dir)
+                elif timeout_result["action"] == "escalate_to_user" and match_heal_condition:
+                    heal = match_heal_condition("agent_timeout", timeout_result)
+                    if heal:
+                        timeout_result["heal_suggestion"] = heal
+                return timeout_result
         return {
             "action": "error",
             "message": f"Missing outputs: {', '.join(missing)}",
@@ -2850,22 +3202,20 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             "expected": expected_ids,
         }
 
-    if too_short:
-        return {
-            "action": "error",
-            "message": f"Agent output too short (< {MIN_AGENT_OUTPUT_LENGTH} chars): {', '.join(too_short)}",
-            "output_dir": str(outputs_dir),
-        }
-
     # Current group complete — check if more groups
     next_idx = idx + 1
     if next_idx < len(groups):
         pipeline["current_group_index"] = next_idx
         pipeline["sub_phase"] = "EXEC_WAITING"
+        next_group = groups[next_idx]
+        agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
+        for a in next_group.get("agents", []):
+            _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
+            pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
+        pipeline["last_activity_at"] = datetime.now().isoformat()
         _save_pipeline_state(state, pipeline, project_path)
         _log_decision(project_path, f"NEXT: Group {idx + 1}/{len(groups)} complete, spawning group {next_idx + 1}")
 
-        next_group = groups[next_idx]
         return {
             "action": "spawn_agents",
             "agents": next_group.get("agents", []),
@@ -2897,7 +3247,17 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
         quality_gate = detect_quality_gate()
         quality_gate_cmd = quality_gate.get("cmd", "") if isinstance(quality_gate, dict) else quality_gate
         quality_gate_cwd = quality_gate.get("cwd", str(PROJECT_ROOT)) if isinstance(quality_gate, dict) else str(PROJECT_ROOT)
+        # I1: Log GATE_INEFFECTIVE warning when linter config is missing
+        if isinstance(quality_gate, dict) and not quality_gate.get("effective", True):
+            _log_decision(project_path, "GATE_INEFFECTIVE: Lint gate is a no-op — no linter config found")
+            pipeline.setdefault("gate_warnings", []).append({
+                "type": "GATE_INEFFECTIVE",
+                "message": "Lint gate has no linter configured",
+            })
     if quality_gate_cmd:
+        if not _is_safe_gate_cwd(quality_gate_cwd):
+            _log_decision(project_path, f"QUALITY-GATE: CWD '{quality_gate_cwd}' failed containment, using PROJECT_ROOT")
+            quality_gate_cwd = str(PROJECT_ROOT)
         _log_decision(project_path, f"QUALITY-GATE: Running '{quality_gate_cmd}' in {quality_gate_cwd}")
         gate_failed = False
         gate_output = ""
@@ -2992,8 +3352,11 @@ def _next_simplify_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     )
 
     agent = {"name": "simplifier", "model": "sonnet", "prompt": prompt}
+    pipeline.setdefault("_spawned_agents", {})[agent["name"]] = agent
 
     pipeline["sub_phase"] = "SIMPLIFY_WAITING"
+    _record_agent_start("simplifier", pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}}))
+    pipeline["last_activity_at"] = datetime.now().isoformat()
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, f"SIMPLIFY: Spawning simplifier agent for {len(changed_files)} files")
 
@@ -3006,8 +3369,25 @@ def _next_simplify_run(state: dict, pipeline: dict, project_path: Path) -> dict:
 
 def _next_simplify_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     """SIMPLIFY_WAITING: Check simplifier output, then advance based on mode."""
-    output_file = project_path / "execution-outputs" / "simplifier.md"
-    if not output_file.exists() or len(output_file.read_text().strip()) < MIN_AGENT_OUTPUT_LENGTH:
+    output_path, simplifier_content = _resolve_agent_output(
+        project_path / "execution-outputs", "simplifier", MIN_AGENT_OUTPUT_LENGTH
+    )
+    if not output_path:
+        timeout_result = _check_agent_timeout(
+            pipeline.get("agent_timing", {}), "simplifier", "sonnet",
+            project_path / "execution-outputs", project_path,
+        )
+        if timeout_result:
+            if timeout_result["action"] == "respawn_agent":
+                spawned = pipeline.get("_spawned_agents", {}).get("simplifier")
+                if spawned:
+                    timeout_result["agent"] = spawned
+                    timeout_result["output_dir"] = str(project_path / "execution-outputs")
+            elif timeout_result["action"] == "escalate_to_user" and match_heal_condition:
+                heal = match_heal_condition("agent_timeout", timeout_result)
+                if heal:
+                    timeout_result["heal_suggestion"] = heal
+            return timeout_result
         return {
             "action": "error",
             "message": "Missing or too short simplifier output. Write to execution-outputs/simplifier.md and call next again.",
@@ -3184,10 +3564,9 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
     output_dir = project_path / "agent-outputs"
 
     for agent_name in active_agents:
-        output_file = output_dir / f"quality-round-{round_num}-{agent_name}.md"
-        if output_file.exists():
-            content = output_file.read_text()
-        else:
+        file_stem = f"quality-round-{round_num}-{agent_name}"
+        resolved_path, content = _resolve_agent_output(output_dir, file_stem, min_length=1)
+        if not content:
             content = ""
 
         if parse_findings:
@@ -3219,9 +3598,14 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
     }
     ql["rounds_history"].append(round_result)
 
-    # Determine convergence
+    # Determine convergence (pass previous round findings for regression detection)
+    prev_findings = []
+    history = pipeline.get("quality_loop", {}).get("rounds_history", [])
+    if len(history) >= 2:
+        prev_round = history[-2]  # -1 is current (just appended), -2 is previous
+        prev_findings = prev_round.get("findings", [])
     if check_convergence:
-        conv = check_convergence(all_findings)
+        conv = check_convergence(all_findings, prev_findings=prev_findings)
     else:
         conv = {"converged": len(all_findings) == 0, "p0_count": 0, "p1_count": 0, "p2_count": 0, "total": len(all_findings)}
 
@@ -3233,8 +3617,15 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
     p0_count = conv.get("p0_count", 0)
     replan_count = ql.get("replan_count", 0)
 
-    if should_backtrack and should_backtrack(round_num, p0_count, replan_count):
+    est_sp = pipeline.get("manifest", {}).get("estimated_sp", 5.0)
+    if should_backtrack and should_backtrack(round_num, p0_count, replan_count, estimated_sp=est_sp):
         dashboard_action = "backtrack"
+    elif conv.get("regressed") and round_num >= 3:
+        # P0 count increased with truly NEW findings at round 3+ — replan
+        dashboard_action = "backtrack"
+    elif conv.get("stagnant"):
+        # Same P0+P1 count (>=3) as previous round — stop spinning
+        dashboard_action = "max_rounds"
     elif conv["converged"]:
         # Zero P0 and zero P1 — fully converged
         if consensus.get("consensus"):
@@ -3253,7 +3644,13 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
     ql["_dashboard_action"] = dashboard_action
     ql["_current_findings"] = all_findings
 
-    pipeline["sub_phase"] = "QUALITY_DASHBOARD"
+    # Route to QUALITY_REVERIFY when continuing with P0/P1 findings so each
+    # finding is independently confirmed as fixed before the next discovery round.
+    p0_p1_findings = [f for f in all_findings if f.get("severity") in ("P0", "P1")]
+    if dashboard_action == "continue" and p0_p1_findings:
+        pipeline["sub_phase"] = "QUALITY_REVERIFY"
+    else:
+        pipeline["sub_phase"] = "QUALITY_DASHBOARD"
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, f"QUALITY_FIX: Round {round_num} — {len(all_findings)} findings, action={dashboard_action}")
 
@@ -3264,6 +3661,151 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
         "p0_count": p0_count,
         "p1_count": conv.get("p1_count", 0),
         "dashboard_action": dashboard_action,
+    }
+
+
+def _next_quality_reverify(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """QUALITY_REVERIFY: Spawn a targeted verifier agent to confirm each P0/P1 fix."""
+    ql = pipeline.get("quality_loop", {})
+    rounds_history = ql.get("rounds_history", [])
+
+    # The current round's findings were just appended by QUALITY_FIX
+    prev_findings = rounds_history[-1]["findings"] if rounds_history else []
+    p0_p1_findings = [f for f in prev_findings if f.get("severity") in ("P0", "P1")]
+
+    if not p0_p1_findings:
+        # No P0/P1 to verify — skip straight to dashboard
+        pipeline["sub_phase"] = "QUALITY_DASHBOARD"
+        _save_pipeline_state(state, pipeline, project_path)
+        _log_decision(project_path, "QUALITY_REVERIFY: No P0/P1 findings — skipping to QUALITY_DASHBOARD")
+        return _next_quality_dashboard(state, pipeline, project_path)
+
+    # Build a targeted verification prompt listing every P0/P1 finding
+    finding_lines = []
+    for f in p0_p1_findings:
+        fid = f.get("id", "UNKNOWN")
+        severity = f.get("severity", "P?")
+        title = f.get("title", f.get("raw", "no title"))
+        location = f.get("location", "")
+        loc_hint = f" (at {location})" if location else ""
+        finding_lines.append(f"- [{severity}] {fid}: {title}{loc_hint}")
+    findings_block = "\n".join(finding_lines)
+
+    round_num = ql.get("round", 1)
+
+    project_files_hint = ""
+    manifest_path = project_path / "manifest.json"
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        file_list = list(dict.fromkeys(
+            fpath
+            for task in manifest.get("tasks", [])
+            for fpath in task.get("files", [])
+        ))
+        if file_list:
+            project_files_hint = "\n## Project Files to Check\n" + "\n".join(f"- {p}" for p in file_list) + "\n"
+    verifier_prompt = (
+        "You are a verification agent. Your ONLY job is to check whether specific findings "
+        "from a previous quality review have been fixed in the code.\n\n"
+        "## Findings to Verify\n"
+        f"{findings_block}\n"
+        f"{project_files_hint}\n"
+        "## Instructions\n"
+        "For EACH finding listed above:\n"
+        "1. Read the referenced files in the codebase.\n"
+        "2. Look for concrete evidence that the fix was applied "
+        "(changed code, added checks, removed problematic patterns).\n"
+        "3. Report one of exactly two verdicts per finding:\n"
+        "   - `RESOLVED: <finding-id>` — the fix is present in the code\n"
+        "   - `UNRESOLVED: <finding-id>` — no fix evidence found\n\n"
+        "## Output Format\n"
+        "List one verdict per line in the form:\n"
+        "```\n"
+        "RESOLVED: <finding-id>\n"
+        "UNRESOLVED: <finding-id>\n"
+        "```\n"
+        "Do NOT skip any finding. Every finding must have a verdict.\n"
+    )
+
+    output_file = f"quality-reverify-round-{round_num}.md"
+    pipeline["sub_phase"] = "QUALITY_REVERIFY_WAITING"
+    _save_pipeline_state(state, pipeline, project_path)
+    _log_decision(
+        project_path,
+        f"QUALITY_REVERIFY: Round {round_num} — spawning verifier for {len(p0_p1_findings)} P0/P1 findings",
+    )
+
+    return {
+        "action": "spawn_agents",
+        "agents": [
+            {
+                "name": "quality-verifier",
+                "model": "haiku",
+                "prompt": verifier_prompt,
+                "output_file": output_file,
+            }
+        ],
+        "phase": "QUALITY_LOOP",
+        "output_dir": str(project_path / "agent-outputs"),
+    }
+
+
+def _next_quality_reverify_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """QUALITY_REVERIFY_WAITING: Collect verifier output and update finding statuses."""
+    ql = pipeline.get("quality_loop", {})
+    round_num = ql.get("round", 1)
+    output_dir = project_path / "agent-outputs"
+    output_file_stem = f"quality-reverify-round-{round_num}"
+
+    _, content = _resolve_agent_output(output_dir, output_file_stem, min_length=1)
+
+    rounds_history = ql.get("rounds_history", [])
+    prev_findings = rounds_history[-1]["findings"] if rounds_history else []
+    p0_p1_findings = [f for f in prev_findings if f.get("severity") in ("P0", "P1")]
+
+    # Parse RESOLVED / UNRESOLVED verdicts from verifier output
+    resolved_ids: set[str] = set()
+    unresolved_ids: set[str] = set()
+    if content:
+        for line in content.splitlines():
+            line = line.strip()
+            if line.upper().startswith("RESOLVED:"):
+                fid = line.split(":", 1)[1].strip()
+                resolved_ids.add(fid)
+            elif line.upper().startswith("UNRESOLVED:"):
+                fid = line.split(":", 1)[1].strip()
+                unresolved_ids.add(fid)
+
+    # Mark findings with their verification status
+    for f in prev_findings:
+        fid = f.get("id", "")
+        if fid in resolved_ids:
+            f["reverify_status"] = "resolved"
+        elif fid in unresolved_ids:
+            f["reverify_status"] = "unresolved"
+
+    # Collect unresolved P0/P1 findings
+    still_unresolved = [
+        f for f in p0_p1_findings
+        if f.get("reverify_status") != "resolved"
+    ]
+
+    ql["reverify_unresolved"] = still_unresolved
+
+    pipeline["sub_phase"] = "QUALITY_DASHBOARD"
+    _save_pipeline_state(state, pipeline, project_path)
+    _log_decision(
+        project_path,
+        f"QUALITY_REVERIFY_WAITING: Round {round_num} — "
+        f"{len(p0_p1_findings) - len(still_unresolved)}/{len(p0_p1_findings)} P0/P1 resolved",
+    )
+
+    return {
+        "action": "quality_reverify_complete",
+        "round": round_num,
+        "resolved_count": len(p0_p1_findings) - len(still_unresolved),
+        "unresolved_count": len(still_unresolved),
+        "unresolved_findings": still_unresolved,
     }
 
 
@@ -3293,7 +3835,7 @@ def _next_quality_dashboard(state: dict, pipeline: dict, project_path: Path) -> 
     reports_dir.mkdir(parents=True, exist_ok=True)
     (reports_dir / f"round-{round_num}.md").write_text(dashboard_md)
 
-    if dashboard_action in ("converged", "early_terminate", "max_rounds"):
+    if dashboard_action in ("converged", "early_terminate"):
         # Advance to POLISH (POLISH_RUN sub-phase)
         state["phase"] = "POLISH"
         pipeline["sub_phase"] = "POLISH_RUN"
@@ -3306,6 +3848,59 @@ def _next_quality_dashboard(state: dict, pipeline: dict, project_path: Path) -> 
             "sub_phase": "POLISH_RUN",
             "dashboard": dashboard_md,
             "reason": dashboard_action,
+        }
+
+    if dashboard_action == "max_rounds":
+        # Check for remaining P0 findings — if any, escalate to user instead of bypassing to POLISH
+        rounds_history = ql.get("rounds_history", [])
+        last_round_findings = rounds_history[-1]["findings"] if rounds_history else []
+        p0_findings = [
+            f for f in last_round_findings
+            if "P0" in str(f.get("severity", "")).upper()
+            or "critical" in str(f.get("severity", "")).lower()
+            or "P0" in str(f.get("priority", "")).upper()
+        ]
+
+        if p0_findings:
+            finding_lines = []
+            for f in p0_findings:
+                fid = f.get("id", "UNKNOWN")
+                title = f.get("title", f.get("raw", "No description"))
+                agent = f.get("agent", "unknown agent")
+                finding_lines.append(f"- [{fid}] {title} (found by {agent})")
+            findings_text = "\n".join(finding_lines)
+            message = (
+                f"Maximum quality rounds ({max_rounds}) reached, but {len(p0_findings)} critical (P0) "
+                f"finding(s) remain unresolved:\n\n{findings_text}\n\n"
+                "These issues may affect the correctness or security of the project."
+            )
+            _log_decision(project_path, f"QUALITY_DASHBOARD: max_rounds with {len(p0_findings)} P0 findings — escalating to user")
+            return {
+                "action": "escalate_to_user",
+                "escalation_type": "max_quality_rounds_p0_remaining",
+                "message": message,
+                "p0_findings": p0_findings,
+                "p0_count": len(p0_findings),
+                "dashboard": dashboard_md,
+                "options": [
+                    {"id": "accept", "label": "Accept and continue to polish"},
+                    {"id": "retry", "label": "Retry quality loop"},
+                    {"id": "abort", "label": "Abort project"},
+                ],
+            }
+
+        # No P0 findings — only P1/P2 remain, safe to advance to POLISH
+        state["phase"] = "POLISH"
+        pipeline["sub_phase"] = "POLISH_RUN"
+        _save_pipeline_state(state, pipeline, project_path)
+        _log_decision(project_path, "QUALITY_DASHBOARD: max_rounds — no P0 findings, advancing to POLISH")
+
+        return {
+            "action": "advance",
+            "phase": "POLISH",
+            "sub_phase": "POLISH_RUN",
+            "dashboard": dashboard_md,
+            "reason": "max_rounds",
         }
 
     if dashboard_action == "backtrack":
@@ -3414,6 +4009,11 @@ def _next_polish_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     ]
 
     pipeline["sub_phase"] = "POLISH_WAITING"
+    agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
+    for a in agents:
+        _record_agent_start(a["name"], agent_timing)
+        pipeline.setdefault("_spawned_agents", {})[a["name"]] = a
+    pipeline["last_activity_at"] = datetime.now().isoformat()
     _save_pipeline_state(state, pipeline, project_path)
     _log_decision(project_path, f"POLISH: Spawning 3 agents (bug_fixer, wiring_agent, requirements_tracer) for {len(changed_files)} files")
 
@@ -3432,11 +4032,28 @@ def _next_polish_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
     missing = []
 
     for agent_name in expected_agents:
-        output_file = output_dir / f"{agent_name}.md"
-        if not output_file.exists() or len(output_file.read_text().strip()) < MIN_AGENT_OUTPUT_LENGTH:
+        resolved_path, content = _resolve_agent_output(output_dir, agent_name, MIN_AGENT_OUTPUT_LENGTH)
+        if not resolved_path:
             missing.append(agent_name)
 
     if missing:
+        # Check for agent timeouts before returning error
+        for agent_name in missing:
+            timeout_result = _check_agent_timeout(
+                pipeline.get("agent_timing", {}), agent_name, "sonnet",
+                output_dir, project_path,
+            )
+            if timeout_result:
+                if timeout_result["action"] == "respawn_agent":
+                    spawned = pipeline.get("_spawned_agents", {}).get(agent_name)
+                    if spawned:
+                        timeout_result["agent"] = spawned
+                        timeout_result["output_dir"] = str(output_dir)
+                elif timeout_result["action"] == "escalate_to_user" and match_heal_condition:
+                    heal = match_heal_condition("agent_timeout", timeout_result)
+                    if heal:
+                        timeout_result["heal_suggestion"] = heal
+                return timeout_result
         return {
             "action": "error",
             "message": f"Missing or too short polish agent outputs: {', '.join(missing)}. Write to agent-outputs/<agent>.md and call next again.",
@@ -3449,8 +4066,7 @@ def _next_polish_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
     has_issues = False
 
     for agent_name in expected_agents:
-        output_file = output_dir / f"{agent_name}.md"
-        content = output_file.read_text().strip()
+        _, content = _resolve_agent_output(output_dir, agent_name, MIN_AGENT_OUTPUT_LENGTH)
         report_lines.append(f"## {agent_name}\n")
         report_lines.append(content)
         report_lines.append("")
@@ -3757,6 +4373,9 @@ def _next_backtrack_replan(state: dict, pipeline: dict, project_path: Path) -> d
     # Increment replan_count
     ql["replan_count"] = replan_count + 1
     pipeline["quality_loop"] = ql
+
+    # Clear agent_timing on backtrack — fresh start for replanned agents
+    pipeline["agent_timing"] = {"agent_start_times": {}, "respawn_counts": {}}
 
     # Build replan prompt from failure context
     replan_prompt = prepare_backtrack(

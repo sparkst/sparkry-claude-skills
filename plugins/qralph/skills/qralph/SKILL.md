@@ -1,4 +1,4 @@
-# QRALPH v2 — Deterministic Multi-Agent Pipeline
+# QRALPH v6.6.1 — Deterministic Multi-Agent Pipeline (Idea to Production)
 
 > You are a WORKFLOW EXECUTOR. You follow the pipeline script exactly.
 > You do NOT make judgment calls. You do NOT skip steps. You do NOT summarize.
@@ -17,11 +17,12 @@
 1. Spawn ALL agents returned by the pipeline. Never skip any.
 2. Use the EXACT model from each agent config. Never substitute.
 3. Write each agent's COMPLETE return text to disk verbatim. Never summarize or paraphrase.
-4. At ALL gates: STOP and show output to the user. Do not proceed without confirmation.
+4. **TWO-CALL GATE PROTOCOL:** At ALL confirm gates, the pipeline returns the gate action on the FIRST call. You MUST use AskUserQuestion to show the output and get the user's explicit approval. Only AFTER the user responds in a SEPARATE TURN do you call `next --confirm`. The pipeline enforces this — it rejects `--confirm` if the gate wasn't returned in a prior call. Calling `next --confirm` in the same turn as showing the gate is a VIOLATION.
 5. Never call pipeline commands directly. Only use `next`.
 6. If blocked or confused, STOP and ask the user. Do not guess.
 7. For no-code users (`--thorough`): use plain language only. Never show error traces, type errors, or technical jargon.
 8. NEVER leave the pipeline loop to invoke other skills or workflows. You are a dumb executor — call `next`, do what it says, repeat.
+9. When spawning smoke test agents, spawn ALL in parallel for maximum speed.
 
 ## Trigger
 
@@ -31,10 +32,65 @@
 
 | Mode | Flag | Phases | Audience |
 |------|------|--------|----------|
-| Thorough | `--thorough` (default) | IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUALITY_LOOP → POLISH → VERIFY → LEARN | No-code users |
-| Quick | `--quick` | PLAN → EXECUTE → SIMPLIFY → QUICK_REVIEW → LEARN | Developers |
+| Thorough | `--thorough` (default) | IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN | No-code users |
+| Quick | `--quick` | PLAN → EXECUTE → SIMPLIFY → VERIFY → DEPLOY → SMOKE → LEARN | Developers |
 
 Add `--with-business` to `--quick` mode for business insights without the full lifecycle.
+
+## Pipeline Flow
+
+```
+┌──────────┐     ┌──────────┐     ┌──────────────┐     ┌──────────┐
+│  IDEATE  │────▶│ PERSONA  │────▶│CONCEPT_REVIEW│────▶│   PLAN   │
+│          │     │          │     │              │     │          │
+│brainstorm│     │ generate │     │  multi-agent │     │ template │
+│ + review │     │ + review │     │   review +   │     │+ agents  │
+│          │     │          │     │  synthesis   │     │+ tasks   │
+└──────────┘     └──────────┘     └──────────────┘     └──────────┘
+     │                │                  │                   │
+  [GATE:           [GATE:            [GATE:             [GATE:
+confirm_         confirm_          confirm_           confirm_
+ideation]        personas]         concept]           template]
+                                                         │
+                                                     [GATE:
+                                                    confirm_
+                                                      plan]
+                                                         │
+                                                         ▼
+┌──────────┐     ┌──────────┐     ┌──────────────┐     ┌──────────┐
+│ QUALITY  │◀────│ SIMPLIFY │◀────│   EXECUTE    │◀────┘
+│   LOOP   │     │          │     │              │
+│          │     │complexity│     │parallel agent│
+│discovery │     │reduction │     │   groups     │
+│ + fix    │     │          │     │              │
+│ + dash   │     │          │     │+ quality gate│
+└──────────┘     └──────────┘     └──────────────┘
+     │
+     │ (converge / early_terminate / max_rounds)
+     │  backtrack ──▶ PLAN (max 2x)
+     ▼
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│  POLISH  │────▶│  VERIFY  │────▶│  DEPLOY  │────▶│  SMOKE   │
+│          │     │          │     │          │     │          │
+│bug_fixer │     │fresh-ctx │     │preflight │     │parallel  │
+│wiring    │     │verifier  │     │checklist │     │HTTP tests│
+│req_tracer│     │all ACs   │     │wrangler  │     │hit live  │
+│          │     │          │     │deploy    │     │URL       │
+└──────────┘     └──────────┘     └──────────┘     └──────────┘
+                      │                │                │
+                   FAIL ──▶         [GATE:           FAIL ──▶
+                   block          confirm_deploy     show to
+                                  OR auto if         user
+                                  explicit]
+                                                        │
+                                                        ▼
+                                  ┌──────────┐     ┌──────────┐
+                                  │  LEARN   │────▶│ COMPLETE │
+                                  │          │     │          │
+                                  │ capture  │     │ SUMMARY  │
+                                  │learnings │     │  .md     │
+                                  └──────────┘     └──────────┘
+```
 
 ## First Run
 
@@ -59,19 +115,47 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm]
 
 | Action | What to do |
 |--------|-----------|
-| `confirm_ideation` | Show `IDEATION.md` to user (refined concept, target users, tech stack, plugin selections). After they confirm: `next --confirm` |
-| `confirm_personas` | Show `personas/*.md` to user (2-5 personas with goals, pain points, success criteria). After they confirm: `next --confirm` |
-| `confirm_concept` | Show `CONCEPT-SYNTHESIS.md` to user (consolidated P0/P1/P2 findings from all reviewers). After they confirm: `next --confirm` |
-| `confirm_template` | Show template + agents to user. After they confirm: `next --confirm` |
-| `spawn_agents` | For EACH agent: spawn with `name=agent.name, model=agent.model, prompt=agent.prompt`. Write EXACT return to `{output_dir}/{agent.name}.md` |
+| `confirm_ideation` | Show `IDEATION.md` to user. Use AskUserQuestion. STOP. Only after user confirms in a separate turn: `next --confirm` |
+| `confirm_personas` | Show `personas/*.md` to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
+| `confirm_concept` | Show `CONCEPT-SYNTHESIS.md` to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
+| `confirm_template` | Show template + agents to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
+| `spawn_agents` | For EACH agent: spawn with `name=agent.name, model=agent.model, prompt=agent.prompt`. Write EXACT return to `{output_dir}/{agent.name}.md`. If `parallel: true`, spawn ALL agents simultaneously. |
 | `define_tasks` | Read `analyses_summary` from the action response. Read EXISTING `manifest.json` at `manifest_path`, ADD a `tasks` array (preserving all other fields), write back. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
-| `confirm_plan` | Show `PLAN.md` + tasks to user. After they confirm: `next --confirm` |
+| `confirm_plan` | Show `PLAN.md` + tasks to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
+| `confirm_deploy` | Show pre-deploy checklist (secrets, env vars, DNS, placeholders) to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm`. Note: if user explicitly said "deploy to X" in their original request, the pipeline auto-deploys and this gate is skipped. |
+| `smoke_results` | Show smoke test results to user (all passed). Celebrate the successful deployment. Call `next`. |
+| `smoke_failure` | Show failed smoke tests to user. Let user decide: (a) fix issues and redeploy, (b) accept current state and continue. Pass user's choice via `next`. |
 | `quality_dashboard` | Show `quality-reports/round-N.md` to user. If converging (P0 count dropping): tell user quality is improving, call `next`. If stuck or P0s persist at round 3: explain to user in plain language, then call `next` (pipeline handles backtrack). |
-| `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose an option. Pass their choice via `next --confirm`. Never add technical detail — use exactly what the pipeline provides. |
+| `respawn_agent` | An agent timed out. Re-spawn the agent named in `agent_name` with its original prompt and model. Write output to the file in `output_file`. If the response includes `heal_suggestion`, mention to user that auto-recovery is being attempted. Then call `next`. |
+| `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose an option. If `heal_suggestion` is present, show it as a recommended action. Pass their choice via `next --confirm`. Never add technical detail — use exactly what the pipeline provides. |
 | `backtrack_replan` | Tell user: "The current approach isn't working. The pipeline is going back to create a revised plan with what we learned." Call `next`. The pipeline routes back to PLAN with failure context. |
 | `learn_complete` | Show `learning-summary.md` to user. Summarize what the project taught QRALPH. Call `next`. |
 | `error` | Fix what the pipeline says is wrong. If the fix is unclear, show the error to the user and ask. Then call `next` again. |
 | `complete` | Show `SUMMARY.md` to user. Done. |
+
+## Deploy Behavior
+
+The DEPLOY phase is intelligent about when to ask:
+
+- **User said "deploy to Cloudflare Workers"** → Explicit intent detected. Pipeline auto-deploys (skips `confirm_deploy` gate). Smoke tests run against live URL.
+- **User said "build me a landing page"** (no deploy language) → No deploy intent. Pipeline skips DEPLOY and SMOKE entirely, goes straight to LEARN.
+- **User said "build and maybe deploy later"** → Implicit intent. Pipeline shows `confirm_deploy` gate with checklist. User decides.
+
+The pipeline auto-detects the deploy command from project config:
+- `wrangler.toml` → `npx wrangler deploy`
+- `vercel.json` → `npx vercel --prod`
+- `package.json` with `deploy` script → `npm run deploy`
+
+## Smoke Test Behavior
+
+After successful deployment, the pipeline generates **parallel smoke test agents** that hit the live URL:
+
+- Agents are categorized: pages, API, security, SEO, errors
+- All agents run **simultaneously** using haiku model (fast + cheap)
+- Agents use WebFetch/curl — no source code reading
+- Each criterion: PASS (with evidence), FAIL (with details), or SKIP (needs browser JS)
+- All PASS → advance to LEARN
+- Any FAIL → show to user with options
 
 ## Quality Loop Behavior
 
@@ -105,15 +189,25 @@ project-NNN/
 │   ├── business-advisor.md
 │   └── ...
 ├── CONCEPT-SYNTHESIS.md     # Consolidated concept findings (P0/P1/P2)
-├── analyses/                # Planning agent outputs
+├── agent-outputs/           # Planning agent outputs
 ├── PLAN.md                  # Implementation plan
 ├── manifest.json            # Project manifest with tasks
+├── execution-outputs/       # Per-task implementation outputs
 ├── quality-reports/         # Per-round quality dashboards
 │   ├── round-1.md
 │   └── round-2.md
-├── POLISH-REPORT.md         # Bug fix + wiring + requirements trace report
-├── SUMMARY.md               # Final summary with metrics
+├── POLISH-REPORT.md         # Bug fix + wiring + requirements trace
+├── verification/            # Fresh-context verification
+│   └── result.md
+├── DEPLOY-REPORT.md         # Deploy command output + live URL
+├── smoke-tests/             # Per-category smoke test results
+│   ├── smoke-pages.md
+│   ├── smoke-api.md
+│   ├── smoke-security.md
+│   └── smoke-seo.md
+├── SMOKE-REPORT.md          # Aggregated smoke test verdict
 ├── learning-summary.md      # What this project taught QRALPH
+├── SUMMARY.md               # Final summary with metrics
 └── ...
 ```
 
@@ -125,12 +219,18 @@ These invariants are enforced by the pipeline. You must never circumvent them:
 2. **Every requirement has a test.** The requirements tracer enforces this in POLISH.
 3. **Plain-language escalation.** When auto-fix fails, the user gets simple options — never "fix this TypeScript error."
 4. **No broken builds.** VERIFY is a hard gate — all checks must pass.
-5. **Learning accumulates.** Each project improves future projects via LEARN phase.
+5. **No silent deploys.** Unless user explicitly requested deployment, the pipeline always asks first.
+6. **Production is verified.** After deployment, smoke tests confirm the live site works.
+7. **Learning accumulates.** Each project improves future projects via LEARN phase.
 
 ## What the pipeline enforces (you don't need to)
 - Critical agents (sde-iii, architecture-advisor) are always included regardless of template
 - Quality gate (tests/lint/typecheck) runs automatically after execution, before verification
 - Verification verdict must be explicit PASS — ambiguous or FAIL blocks finalize
+- Gate two-call protocol — `--confirm` rejected if gate wasn't returned in prior call
+- Deploy intent detection — explicit ("deploy to X") vs implicit vs none
+- Deploy command auto-detection from project config (wrangler.toml, vercel.json, package.json)
+- Smoke test parallelization and verdict aggregation
 - Agent scaling by complexity (fewer agents for simple projects, more for complex)
 - Confidence-based consensus for early discovery termination
 - State is checkpointed at every transition for crash recovery

@@ -60,7 +60,8 @@ VALID_PHASES = {"INIT", "DISCOVERING", "REVIEWING", "EXECUTING", "UAT", "COMPLET
                 "PLAN", "EXECUTE", "VERIFY",
                 "IDEATE", "PERSONA", "CONCEPT_REVIEW", "SIMPLIFY",
                 "QUALITY_LOOP", "QUALITY_DISCOVERY", "QUALITY_FIX",
-                "POLISH", "LEARN", "BACKTRACK_REPLAN"}
+                "POLISH", "LEARN", "BACKTRACK_REPLAN",
+                "DEPLOY", "SMOKE"}
 
 VALID_SUBTEAM_STATUSES = {"creating", "running", "complete", "failed", "timeout",
                           "interrupted", "resuming"}

@@ -104,6 +104,7 @@ MAX_TOKENS = 500_000
 MAX_COST_USD = 40.0
 MAX_SAME_ERROR = 3
 MAX_HEAL_ATTEMPTS = 5
+MAX_BULK_REMEDIATE = 5
 
 # Fix level priorities: which finding severities to remediate
 LEVEL_PRIORITIES = {
@@ -1806,12 +1807,19 @@ def _cmd_finalize_locked():
                 f"Fix them and run remediate-verify, or change fix_level."
             )
 
+    # Recompute fresh EQS from disk at finalize time (avoids stale/empty state)
+    agents_for_eqs = state.get("agents", [])
+    outputs_dir_for_eqs = project_path / "agent-outputs"
+    fresh_eqs = compute_evidence_quality_score(agents_for_eqs, outputs_dir_for_eqs)
+    state["evidence_quality"] = fresh_eqs
+    save_state(state)
+
     # Evidence quality data
-    eqs = state.get("evidence_quality", {})
-    eqs_score = eqs.get("eqs", "N/A")
-    eqs_confidence = eqs.get("confidence", "N/A")
-    eqs_agents_with = eqs.get("agents_with_output", "?")
-    eqs_agents_total = eqs.get("total_agents", "?")
+    eqs = fresh_eqs
+    eqs_score = eqs.get("eqs", 0)
+    eqs_confidence = eqs.get("confidence", "HOLLOW RUN")
+    eqs_agents_with = eqs.get("agents_with_output", 0)
+    eqs_agents_total = eqs.get("total_agents", 0)
     eqs_words = eqs.get("total_words", 0)
 
     # Per-agent evidence
@@ -2231,24 +2239,31 @@ def _cmd_remediate_locked():
     return output
 
 
-def cmd_remediate_done(task_ids: str, notes: str = ""):
+def cmd_remediate_done(task_ids: str, notes: str = "", batch: bool = False):
     """Mark specific remediation tasks as fixed."""
     with qralph_state.exclusive_state_lock():
-        return _cmd_remediate_done_locked(task_ids, notes)
+        return _cmd_remediate_done_locked(task_ids, notes, batch)
 
 
-def _cmd_remediate_done_locked(task_ids: str, notes: str = ""):
+def _cmd_remediate_done_locked(task_ids: str, notes: str = "", batch: bool = False):
     """Inner remediate-done logic, called under exclusive lock.
 
     v5.1: COE analysis and pattern sweep are REQUIRED before marking tasks fixed.
+    v6.6.2: Bulk-stamp bypass prevention — max 5 tasks per call unless --batch.
     """
     state = load_state()
     if not state:
         return _error_result("No active project.")
 
     project_path = Path(state["project_path"])
-    ids = [tid.strip() for tid in task_ids.split(",")]
+    ids = [tid.strip() for tid in task_ids.split(",") if tid.strip()]
     tasks = state.get("remediation_tasks", [])
+
+    if len(ids) > MAX_BULK_REMEDIATE and not batch:
+        return _error_result(
+            f"Cannot mark more than {MAX_BULK_REMEDIATE} tasks as fixed in a single call. "
+            "Use --batch to override (not recommended)."
+        )
 
     # v5.1: Enforce COE analysis and pattern sweep before allowing remediate-done
     missing_coe = []
@@ -2284,6 +2299,7 @@ def _cmd_remediate_done_locked(task_ids: str, notes: str = ""):
     for task in tasks:
         if task["id"] in ids:
             task["status"] = "fixed"
+            task["fixed_at"] = datetime.now().isoformat()
             if notes:
                 task["notes"] = notes
             marked.append(task["id"])
@@ -2331,6 +2347,25 @@ def _cmd_remediate_verify_locked():
     open_all = [t for t in tasks if t["status"] == "open"]
 
     project_path = Path(state["project_path"])
+
+    # v6.6.2: Detect suspicious bulk-stamp timing pattern
+    suspicious_timing_warning = None
+    fixed_tasks = [t for t in tasks if t.get("status") == "fixed" and t.get("fixed_at")]
+    if len(fixed_tasks) > 10:
+        try:
+            timestamps = sorted(
+                datetime.fromisoformat(t["fixed_at"]) for t in fixed_tasks
+            )
+            delta = (timestamps[-1] - timestamps[0]).total_seconds()
+            if delta <= 60:
+                warning_msg = (
+                    f"[WARNING] Suspicious remediation pattern: {len(fixed_tasks)} tasks marked fixed "
+                    f"within {delta:.1f}s window. Recommend manual review."
+                )
+                log_decision(project_path, warning_msg)
+                suspicious_timing_warning = warning_msg
+        except (ValueError, TypeError):
+            pass
 
     if open_blocking:
         log_decision(project_path, f"Remediation verify blocked: {len(open_blocking)} tasks open at fix_level={fix_level}")
@@ -2439,6 +2474,8 @@ def _cmd_remediate_verify_locked():
         "quality_gate": quality_gate_result,
         "team_shutdown_needed": True,
     }
+    if suspicious_timing_warning:
+        output["suspicious_timing_warning"] = suspicious_timing_warning
     print(json.dumps(output, indent=2))
     return output
 
@@ -2997,6 +3034,7 @@ def main():
     rem_done_parser = subparsers.add_parser("remediate-done", help="Mark remediation tasks as fixed")
     rem_done_parser.add_argument("task_ids", help="Comma-separated task IDs (e.g. REM-001,REM-002)")
     rem_done_parser.add_argument("--notes", default="", help="Optional notes about the fix")
+    rem_done_parser.add_argument("--batch", action="store_true", help="Allow more than 5 task IDs in one call (not recommended)")
     subparsers.add_parser("remediate-verify", help="Verify remediation and transition to COMPLETE")
 
     # v4.1 sub-team commands
@@ -3068,7 +3106,7 @@ def main():
     elif args.command == "remediate":
         cmd_remediate()
     elif args.command == "remediate-done":
-        cmd_remediate_done(args.task_ids, args.notes)
+        cmd_remediate_done(args.task_ids, args.notes, args.batch)
     elif args.command == "remediate-verify":
         cmd_remediate_verify()
     elif args.command == "subteam-status":

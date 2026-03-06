@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
-"""Tests for QRALPH v6.2 Pipeline."""
+"""Tests for QRALPH v6.6.2 Pipeline."""
 
 import json
 import os
@@ -28,6 +28,16 @@ _config_path = Path(__file__).parent / "qralph-config.py"
 _config_spec = importlib.util.spec_from_file_location("qralph_config", _config_path)
 qralph_config = importlib.util.module_from_spec(_config_spec)
 _config_spec.loader.exec_module(qralph_config)
+
+_qd_path = Path(__file__).parent / "quality-dashboard.py"
+_qd_spec = importlib.util.spec_from_file_location("quality_dashboard", _qd_path)
+quality_dashboard = importlib.util.module_from_spec(_qd_spec)
+_qd_spec.loader.exec_module(quality_dashboard)
+
+_cs_path = Path(__file__).parent / "confidence-scorer.py"
+_cs_spec = importlib.util.spec_from_file_location("confidence_scorer", _cs_path)
+confidence_scorer = importlib.util.module_from_spec(_cs_spec)
+_cs_spec.loader.exec_module(confidence_scorer)
 
 
 # ─── Template Suggestion Tests ──────────────────────────────────────────────
@@ -93,6 +103,190 @@ class TestVersionSync:
             f"__version__ ({qralph_pipeline.__version__!r}). "
             "Update .qralph/VERSION when bumping __version__."
         )
+
+
+
+class TestValidPhases:
+    """REQ-COE-P1A: DEPLOY and SMOKE must be in VALID_PHASES."""
+
+    def test_deploy_in_valid_phases(self):
+        """REQ-COE-P1A: DEPLOY phase must be recognized by state validation."""
+        import importlib.util
+        _sp = Path(__file__).parent / "qralph-state.py"
+        _ss = importlib.util.spec_from_file_location("qs_test", _sp)
+        qs = importlib.util.module_from_spec(_ss)
+        _ss.loader.exec_module(qs)
+        assert "DEPLOY" in qs.VALID_PHASES
+
+    def test_smoke_in_valid_phases(self):
+        """REQ-COE-P1A: SMOKE phase must be recognized by state validation."""
+        import importlib.util
+        _sp = Path(__file__).parent / "qralph-state.py"
+        _ss = importlib.util.spec_from_file_location("qs_test", _sp)
+        qs = importlib.util.module_from_spec(_ss)
+        _ss.loader.exec_module(qs)
+        assert "SMOKE" in qs.VALID_PHASES
+
+
+class TestQualityGateCWD:
+    """REQ-COE-002: Quality gate must run in correct project directory."""
+
+    def test_detect_quality_gate_with_site_dir(self, tmp_path):
+        """REQ-COE-002: site_dir parameter takes priority over PROJECT_ROOT scan."""
+        site = tmp_path / "projects" / "mysite" / "site"
+        site.mkdir(parents=True)
+        (site / "package.json").write_text('{"scripts": {"test": "vitest"}}')
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', tmp_path / "projects"):
+            with mock.patch.object(qralph_pipeline, 'PROJECT_ROOT', tmp_path):
+                result = qralph_pipeline.detect_quality_gate(site_dir=str(site))
+        assert result.get("cwd") == str(site)
+        assert "npm run test" in result.get("cmd", "")
+
+    def test_detect_quality_gate_rejects_path_traversal(self, tmp_path):
+        """REQ-COE-002: site_dir outside PROJECT_ROOT must be rejected."""
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', tmp_path / "projects"):
+            with mock.patch.object(qralph_pipeline, 'PROJECT_ROOT', tmp_path):
+                result = qralph_pipeline.detect_quality_gate(site_dir="/etc")
+        assert result == {}
+
+    def test_detect_quality_gate_effective_false_no_linter(self, tmp_path):
+        """REQ-COE-003: Gate with test but no linter config returns effective=False."""
+        site = tmp_path / "projects" / "site"
+        site.mkdir(parents=True)
+        (site / "package.json").write_text('{"scripts": {"test": "vitest"}}')
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', tmp_path / "projects"):
+            with mock.patch.object(qralph_pipeline, 'PROJECT_ROOT', tmp_path):
+                result = qralph_pipeline.detect_quality_gate(site_dir=str(site))
+        assert result.get("effective") is False
+
+    def test_detect_quality_gate_effective_true_with_linter(self, tmp_path):
+        """REQ-COE-003: Gate with linter config returns effective=True."""
+        site = tmp_path / "projects" / "site"
+        site.mkdir(parents=True)
+        (site / "package.json").write_text('{"scripts": {"lint": "eslint .", "test": "vitest"}}')
+        (site / ".eslintrc.json").write_text("{}")
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', tmp_path / "projects"):
+            with mock.patch.object(qralph_pipeline, 'PROJECT_ROOT', tmp_path):
+                result = qralph_pipeline.detect_quality_gate(site_dir=str(site))
+        assert result.get("effective") is True
+
+    def test_is_safe_gate_cwd_rejects_outside_project(self, tmp_path):
+        """REQ-COE-002: _is_safe_gate_cwd rejects paths outside PROJECT_ROOT."""
+        with mock.patch.object(qralph_pipeline, 'PROJECT_ROOT', tmp_path):
+            assert qralph_pipeline._is_safe_gate_cwd("/etc") is False
+            assert qralph_pipeline._is_safe_gate_cwd(str(tmp_path / "subdir")) is True
+
+
+class TestAgentWatchdog:
+    """REQ-COE-001: Agents must be timed out and re-spawned or escalated."""
+
+    def test_resolve_agent_output_prefers_respawn(self, tmp_path):
+        """REQ-COE-001: _resolve_agent_output prefers larger file."""
+        (tmp_path / "agent.md").write_text("short")
+        (tmp_path / "agent.respawn.md").write_text("respawn content is much longer than original")
+        path, content = qralph_pipeline._resolve_agent_output(tmp_path, "agent", min_length=1)
+        assert "respawn" in content
+
+    def test_resolve_agent_output_falls_back_to_md(self, tmp_path):
+        """REQ-COE-001: _resolve_agent_output falls back to .md when no respawn."""
+        (tmp_path / "agent.md").write_text("original content here")
+        path, content = qralph_pipeline._resolve_agent_output(tmp_path, "agent", min_length=1)
+        assert content == "original content here"
+
+    def test_resolve_agent_output_uses_hung_as_last_resort(self, tmp_path):
+        """REQ-COE-001: _resolve_agent_output uses .hung.md as last resort."""
+        (tmp_path / "agent.hung.md").write_text("hung content")
+        path, content = qralph_pipeline._resolve_agent_output(tmp_path, "agent", min_length=1)
+        assert content == "hung content"
+
+    def test_resolve_agent_output_returns_empty_when_nothing(self, tmp_path):
+        """REQ-COE-001: _resolve_agent_output returns empty when no files exist."""
+        path, content = qralph_pipeline._resolve_agent_output(tmp_path, "agent", min_length=1)
+        assert content == ""
+        assert path is None
+
+    def test_resolve_agent_output_skips_short_content(self, tmp_path):
+        """REQ-COE-001: _resolve_agent_output skips files shorter than min_length."""
+        (tmp_path / "agent.md").write_text("short")
+        path, content = qralph_pipeline._resolve_agent_output(tmp_path, "agent", min_length=100)
+        assert path is None
+        assert content == ""
+
+    def test_agent_start_times_setdefault(self):
+        """REQ-COE-001: agent_start_times uses setdefault, never overwrites."""
+        timing = {"agent_start_times": {"agent-a": "2026-01-01T00:00:00"}, "respawn_counts": {}}
+        qralph_pipeline._record_agent_start("agent-a", timing)
+        assert timing["agent_start_times"]["agent-a"] == "2026-01-01T00:00:00"
+
+    def test_agent_start_times_sets_new(self):
+        """REQ-COE-001: _record_agent_start sets time for new agent."""
+        timing = {"agent_start_times": {}, "respawn_counts": {}}
+        qralph_pipeline._record_agent_start("agent-b", timing)
+        assert "agent-b" in timing["agent_start_times"]
+        assert "agent-b" in timing["respawn_counts"]
+
+    def test_check_agent_timeout_returns_none_when_under_limit(self):
+        """REQ-COE-001: No timeout when elapsed < model timeout."""
+        now = datetime.now()
+        timing = {
+            "agent_start_times": {"reviewer": now.isoformat()},
+            "respawn_counts": {"reviewer": 0},
+        }
+        result = qralph_pipeline._check_agent_timeout(
+            timing, "reviewer", "sonnet", Path("/tmp"), Path("/tmp")
+        )
+        assert result is None
+
+    def test_check_agent_timeout_triggers_respawn_on_first_timeout(self, tmp_path):
+        """REQ-COE-001: First timeout triggers re-spawn action."""
+        from datetime import timedelta
+        old_time = (datetime.now() - timedelta(seconds=500)).isoformat()
+        timing = {
+            "agent_start_times": {"reviewer": old_time},
+            "respawn_counts": {"reviewer": 0},
+        }
+        output_dir = tmp_path / "outputs"
+        output_dir.mkdir()
+        result = qralph_pipeline._check_agent_timeout(
+            timing, "reviewer", "sonnet", output_dir, tmp_path
+        )
+        assert result is not None
+        assert result["action"] == "respawn_agent"
+        assert result["agent_name"] == "reviewer"
+        assert timing["respawn_counts"]["reviewer"] == 1
+
+    def test_check_agent_timeout_escalates_after_respawn(self, tmp_path):
+        """REQ-COE-001: Second timeout escalates to user."""
+        from datetime import timedelta
+        old_time = (datetime.now() - timedelta(seconds=500)).isoformat()
+        timing = {
+            "agent_start_times": {"reviewer": old_time},
+            "respawn_counts": {"reviewer": 1},
+        }
+        output_dir = tmp_path / "outputs"
+        output_dir.mkdir()
+        result = qralph_pipeline._check_agent_timeout(
+            timing, "reviewer", "sonnet", output_dir, tmp_path
+        )
+        assert result is not None
+        assert result["action"] == "escalate_to_user"
+
+    def test_check_agent_timeout_renames_to_hung(self, tmp_path):
+        """REQ-COE-001: First timeout renames existing output to .hung.md."""
+        from datetime import timedelta
+        old_time = (datetime.now() - timedelta(seconds=500)).isoformat()
+        timing = {
+            "agent_start_times": {"reviewer": old_time},
+            "respawn_counts": {"reviewer": 0},
+        }
+        output_dir = tmp_path / "outputs"
+        output_dir.mkdir()
+        (output_dir / "reviewer.md").write_text("partial output")
+        qralph_pipeline._check_agent_timeout(
+            timing, "reviewer", "sonnet", output_dir, tmp_path
+        )
+        assert (output_dir / "reviewer.hung.md").exists()
+        assert (output_dir / "reviewer.hung.md").read_text() == "partial output"
 
 
 # ─── Parallel Group Computation Tests ───────────────────────────────────────
@@ -1501,7 +1695,7 @@ class TestMinimumOutputLength:
 
         result = qralph_pipeline._next_plan_waiting(state, pipeline, project_path)
         assert result["action"] == "error"
-        assert "too short" in result["message"].lower()
+        assert "missing" in result["message"].lower()
 
     def test_plan_long_output_accepted(self, tmp_path):
         state, project_path, projects_dir = self._make_state(tmp_path)
@@ -1523,7 +1717,7 @@ class TestMinimumOutputLength:
 
         result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
         assert result["action"] == "error"
-        assert "too short" in result["message"].lower()
+        assert "missing" in result["message"].lower()
 
 
 class TestTaskValidation:
@@ -2351,7 +2545,7 @@ class TestIdeateStateMachine:
             assert result["phase"] == "IDEATE"
             assert "IDEATION.md" in result["artifacts"]
             assert (project_path / "IDEATION.md").exists()
-            assert (project_path / "IDEATION.md").read_text() == content
+            assert (project_path / "IDEATION.md").read_text() == content.strip()
 
     def test_ideate_review_needs_confirm(self, tmp_path):
         """IDEATE_REVIEW without confirm should return confirm_ideation."""
@@ -3363,7 +3557,7 @@ class TestQualityLoopStateMachine:
             assert result["reason"] == "max_replans"
 
     def test_dashboard_max_rounds_advances_to_polish(self, tmp_path):
-        """Max rounds reached should advance to POLISH regardless of findings."""
+        """REQ-QL-MAX-1: Max rounds with only P1/P2 findings advances to POLISH normally."""
         findings = [{"severity": "P1", "id": "CR-001", "title": "Issue", "agent": "code-reviewer", "confidence": "high", "raw": "[P1] CR-001: Issue"}]
         ql = {
             "round": 3, "max_rounds": 3,
@@ -3383,6 +3577,62 @@ class TestQualityLoopStateMachine:
             assert result["action"] == "advance"
             assert result["phase"] == "POLISH"
             assert result["reason"] == "max_rounds"
+
+    def test_dashboard_max_rounds_with_p0_escalates_to_user(self, tmp_path):
+        """REQ-QL-MAX-2: Max rounds with P0 findings remaining escalates to user instead of advancing to POLISH."""
+        p0_finding = {"severity": "P0", "id": "SEC-001", "title": "SQL injection vulnerability", "agent": "security-reviewer", "confidence": "high", "raw": "[P0] SEC-001: SQL injection vulnerability"}
+        p1_finding = {"severity": "P1", "id": "CR-001", "title": "Minor issue", "agent": "code-reviewer", "confidence": "medium", "raw": "[P1] CR-001: Minor issue"}
+        findings = [p0_finding, p1_finding]
+        ql = {
+            "round": 3, "max_rounds": 3,
+            "rounds_history": [{"round": 3, "findings": findings, "agents": ["code-reviewer", "security-reviewer"]}],
+            "active_agents": ["code-reviewer", "security-reviewer"],
+            "dropped_agents": [],
+            "replan_count": 0,
+            "_dashboard_action": "max_rounds",
+            "_current_findings": findings,
+        }
+        state, pp, pd = self._make_quality_state(tmp_path, sub_phase="QUALITY_DASHBOARD", quality_loop=ql)
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', pd), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'save_state'), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
+            result = qralph_pipeline.cmd_next()
+            assert result["action"] == "escalate_to_user"
+            assert result["escalation_type"] == "max_quality_rounds_p0_remaining"
+            assert result["p0_count"] == 1
+            assert result["p0_findings"][0]["id"] == "SEC-001"
+            assert "SEC-001" in result["message"]
+            assert "SQL injection vulnerability" in result["message"]
+            option_ids = [o["id"] for o in result["options"]]
+            assert "accept" in option_ids
+            assert "retry" in option_ids
+            assert "abort" in option_ids
+            # Pipeline should NOT have advanced to POLISH
+            assert state["phase"] != "POLISH"
+
+    def test_dashboard_max_rounds_with_p0_no_phase_change(self, tmp_path):
+        """REQ-QL-MAX-3: When P0 findings remain at max_rounds, pipeline phase does not advance."""
+        p0_finding = {"severity": "P0", "id": "P0-001", "title": "Critical auth bypass", "agent": "security-reviewer", "confidence": "high", "raw": "[P0] P0-001: Critical auth bypass"}
+        ql = {
+            "round": 3, "max_rounds": 3,
+            "rounds_history": [{"round": 3, "findings": [p0_finding], "agents": ["security-reviewer"]}],
+            "active_agents": ["security-reviewer"],
+            "dropped_agents": [],
+            "replan_count": 0,
+            "_dashboard_action": "max_rounds",
+            "_current_findings": [p0_finding],
+        }
+        state, pp, pd = self._make_quality_state(tmp_path, sub_phase="QUALITY_DASHBOARD", quality_loop=ql)
+        original_phase = state["phase"]
+        with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', pd), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'save_state'), \
+             mock.patch.object(qralph_pipeline.qralph_state, 'exclusive_state_lock'):
+            result = qralph_pipeline.cmd_next()
+            assert result["action"] == "escalate_to_user"
+            # Phase stays at QUALITY_LOOP (not advanced to POLISH)
+            assert state["phase"] == original_phase
 
     def test_dashboard_writes_report_file(self, tmp_path):
         """Dashboard should write quality-reports/round-N.md."""
@@ -3437,7 +3687,7 @@ class TestQualityLoopStateMachine:
             assert dash_result["phase"] == "POLISH"
 
     def test_full_flow_with_findings_and_fix(self, tmp_path):
-        """Flow with P1 findings: DISCOVERY → FIX(continue) → DASHBOARD(fix_tasks) → DISCOVERY round 2."""
+        """Flow with P1 findings: DISCOVERY → FIX(continue) → REVERIFY → REVERIFY_WAITING → DASHBOARD(fix_tasks) → DISCOVERY round 2."""
         state, pp, pd = self._make_quality_state(tmp_path)
         with mock.patch.object(qralph_pipeline, 'PROJECTS_DIR', pd), \
              mock.patch.object(qralph_pipeline.qralph_state, 'load_state', return_value=state), \
@@ -3449,25 +3699,45 @@ class TestQualityLoopStateMachine:
 
             # Write P1 finding for first agent, clean for rest
             first_agent = agents[0]
+            finding_id = f"{first_agent['name'].upper()}-001"
             (pp / "agent-outputs" / first_agent["output_file"]).write_text(
-                f"[P1] {first_agent['name'].upper()}-001: Found an issue\nDescription.\n**Confidence:** high"
+                f"[P1] {finding_id}: Found an issue\nDescription.\n**Confidence:** high"
             )
             for agent in agents[1:]:
                 (pp / "agent-outputs" / agent["output_file"]).write_text(
                     "No issues found.\n**Confidence:** high"
                 )
 
-            # Step 2: FIX
+            # Step 2: FIX — P1 found → routes to QUALITY_REVERIFY
             fix_result = qralph_pipeline.cmd_next()
             assert fix_result["dashboard_action"] == "continue"
+            assert state["pipeline"]["sub_phase"] == "QUALITY_REVERIFY"
 
-            # Step 3: DASHBOARD
+            # Step 3: REVERIFY — spawns verifier agent
+            reverify_result = qralph_pipeline.cmd_next()
+            assert reverify_result["action"] == "spawn_agents"
+            assert len(reverify_result["agents"]) == 1
+            verifier_agent = reverify_result["agents"][0]
+            assert verifier_agent["model"] == "haiku"
+            assert state["pipeline"]["sub_phase"] == "QUALITY_REVERIFY_WAITING"
+
+            # Write verifier output marking the finding as unresolved (no fix yet)
+            verifier_output = pp / "agent-outputs" / verifier_agent["output_file"]
+            verifier_output.write_text(f"UNRESOLVED: {finding_id}\n")
+
+            # Step 4: REVERIFY_WAITING — collects verdict → routes to QUALITY_DASHBOARD
+            reverify_wait_result = qralph_pipeline.cmd_next()
+            assert reverify_wait_result["action"] == "quality_reverify_complete"
+            assert reverify_wait_result["unresolved_count"] == 1
+            assert state["pipeline"]["sub_phase"] == "QUALITY_DASHBOARD"
+
+            # Step 5: DASHBOARD — sees unresolved findings, continues to next round
             dash_result = qralph_pipeline.cmd_next()
             assert dash_result["action"] == "quality_fix_tasks"
             assert dash_result["next_round"] == 2
             assert state["pipeline"]["sub_phase"] == "QUALITY_DISCOVERY"
 
-            # Step 4: DISCOVERY round 2 (only agents with findings should remain)
+            # Step 6: DISCOVERY round 2 (only agents with findings should remain)
             spawn_result2 = qralph_pipeline.cmd_next()
             assert spawn_result2["action"] == "spawn_agents"
             # Round 2 agents should have output files for round 2
@@ -3974,6 +4244,810 @@ class TestAcquireSessionLock:
             qralph_pipeline._acquire_session_lock()
             data = json.loads(lock_file.read_text())
             assert data["pid"] == os.getpid()
+
+
+class TestConvergenceTracking:
+    """REQ-COE-004: Finding tracking across quality loop rounds."""
+
+    def test_compute_finding_deltas_carry_forward(self):
+        """REQ-COE-004: Same finding in both rounds is CARRY_FORWARD."""
+        prev = [{"id": "CR-001", "severity": "P0", "title": "bug"}]
+        curr = [{"id": "CR-001", "severity": "P0", "title": "bug"}]
+        deltas = quality_dashboard.compute_finding_deltas(prev, curr)
+        assert deltas["CR-001"] == "CARRY_FORWARD"
+
+    def test_compute_finding_deltas_fixed(self):
+        """REQ-COE-004: Finding in prev but not curr is FIXED."""
+        prev = [{"id": "CR-001", "severity": "P0", "title": "bug"}]
+        curr = []
+        deltas = quality_dashboard.compute_finding_deltas(prev, curr)
+        assert deltas["CR-001"] == "FIXED"
+
+    def test_compute_finding_deltas_new(self):
+        """REQ-COE-004: Finding in curr but not prev is NEW."""
+        prev = []
+        curr = [{"id": "CR-002", "severity": "P1", "title": "new issue"}]
+        deltas = quality_dashboard.compute_finding_deltas(prev, curr)
+        assert deltas["CR-002"] == "NEW"
+
+    def test_check_convergence_with_regression(self):
+        """REQ-COE-004: P0 increase detected as regression."""
+        prev = [{"id": "X", "severity": "P0", "title": "x"}]
+        curr = [
+            {"id": "X", "severity": "P0", "title": "x"},
+            {"id": "Y", "severity": "P0", "title": "new p0"},
+        ]
+        result = quality_dashboard.check_convergence(curr, prev_findings=prev)
+        assert result.get("regressed") is True
+
+    def test_check_convergence_no_regression_when_same(self):
+        """REQ-COE-004: Same P0 count is not a regression."""
+        prev = [{"id": "X", "severity": "P0", "title": "x"}]
+        curr = [{"id": "X", "severity": "P0", "title": "x"}]
+        result = quality_dashboard.check_convergence(curr, prev_findings=prev)
+        assert result.get("regressed") is False
+
+    def test_check_convergence_no_regression_without_prev(self):
+        """REQ-COE-004: No regression when no previous findings provided."""
+        curr = [{"id": "X", "severity": "P0", "title": "x"}]
+        result = quality_dashboard.check_convergence(curr)
+        assert result.get("regressed") is False
+
+    def test_should_backtrack_round2_small_sp(self):
+        """REQ-COE-004-CV05: should_backtrack fires at round 2 for SP<=2."""
+        assert confidence_scorer.should_backtrack(2, 1, 0, estimated_sp=2) is True
+
+    def test_should_backtrack_round2_large_sp(self):
+        """REQ-COE-004-CV05: should_backtrack still requires round >= 3 for SP > 2."""
+        assert confidence_scorer.should_backtrack(2, 1, 0, estimated_sp=5) is False
+        assert confidence_scorer.should_backtrack(3, 1, 0, estimated_sp=5) is True
+
+    def test_should_backtrack_backward_compatible(self):
+        """REQ-COE-004-CV05: Old 3-arg calling convention still works."""
+        # Without estimated_sp, defaults to 5.0 (large), so round >= 3 required
+        assert confidence_scorer.should_backtrack(3, 1, 0) is True
+        assert confidence_scorer.should_backtrack(2, 1, 0) is False
+
+
+class TestSelfHealing:
+    """REQ-COE-005: Session timeout detection and self-healing."""
+
+    @pytest.fixture
+    def sh_module(self):
+        """Load self-healing module fresh."""
+        _sh_path = Path(__file__).parent / "self-healing.py"
+        _sh_spec = importlib.util.spec_from_file_location("self_healing_test", _sh_path)
+        sh = importlib.util.module_from_spec(_sh_spec)
+        _sh_spec.loader.exec_module(sh)
+        return sh
+
+    def test_all_rules_valid(self, sh_module):
+        """REQ-COE-005: All rules pass schema validation."""
+        for rule in sh_module.SELF_HEAL_RULES:
+            errors = sh_module.validate_rule(rule)
+            assert errors == [], f"Rule {rule['id']} has errors: {errors}"
+
+    def test_match_condition_returns_rule(self, sh_module):
+        """REQ-COE-005: match_condition returns matching rule."""
+        rule = sh_module.match_condition("agent_timeout", {})
+        assert rule is not None
+        assert rule["id"] == "SH-001"
+        assert rule["action"] == "RE_SPAWN_AGENT"
+
+    def test_match_condition_returns_none_for_unknown(self, sh_module):
+        """REQ-COE-005: match_condition returns None for unknown condition."""
+        assert sh_module.match_condition("does_not_exist", {}) is None
+
+    def test_learn_update_counters_rejects_unknown(self, sh_module):
+        """REQ-COE-005: learn_update_counters rejects unknown rule IDs."""
+        state = {"heal_patterns": {}}
+        result = sh_module.learn_update_counters("FAKE-999", "success", state)
+        assert result is False
+
+    def test_learn_update_counters_increments_success(self, sh_module):
+        """REQ-COE-005: learn_update_counters increments success counter."""
+        state = {"heal_patterns": {"SH-001": {"success_count": 0, "failure_count": 0}}}
+        result = sh_module.learn_update_counters("SH-001", "success", state)
+        assert result is True
+        assert state["heal_patterns"]["SH-001"]["success_count"] == 1
+        assert state["heal_patterns"]["SH-001"]["failure_count"] == 0
+
+    def test_learn_update_counters_increments_failure(self, sh_module):
+        """REQ-COE-005: learn_update_counters increments failure counter."""
+        state = {"heal_patterns": {"SH-002": {"success_count": 0, "failure_count": 0}}}
+        result = sh_module.learn_update_counters("SH-002", "failure", state)
+        assert result is True
+        assert state["heal_patterns"]["SH-002"]["failure_count"] == 1
+
+    def test_learn_update_counters_creates_default(self, sh_module):
+        """REQ-COE-005: learn_update_counters creates counter dict if missing."""
+        state = {"heal_patterns": {}}
+        result = sh_module.learn_update_counters("SH-001", "success", state)
+        assert result is True
+        assert state["heal_patterns"]["SH-001"]["success_count"] == 1
+
+    def test_heal_on_cooldown_recent(self, sh_module):
+        """REQ-COE-005: Recent heal is on cooldown."""
+        recent = datetime.now().isoformat()
+        assert sh_module.is_heal_on_cooldown(recent) is True
+
+    def test_heal_off_cooldown_old(self, sh_module):
+        """REQ-COE-005: Old heal is off cooldown."""
+        from datetime import timedelta
+        old = (datetime.now() - timedelta(hours=2)).isoformat()
+        assert sh_module.is_heal_on_cooldown(old) is False
+
+    def test_heal_off_cooldown_none(self, sh_module):
+        """REQ-COE-005: None input means not on cooldown."""
+        assert sh_module.is_heal_on_cooldown(None) is False
+
+    def test_valid_actions_frozenset(self, sh_module):
+        """REQ-COE-005: VALID_ACTIONS is a frozenset (immutable)."""
+        assert isinstance(sh_module.VALID_ACTIONS, frozenset)
+
+    def test_known_rule_ids_frozenset(self, sh_module):
+        """REQ-COE-005: _KNOWN_RULE_IDS is a frozenset (immutable)."""
+        assert isinstance(sh_module._KNOWN_RULE_IDS, frozenset)
+        assert len(sh_module._KNOWN_RULE_IDS) == len(sh_module.SELF_HEAL_RULES)
+
+    def test_validate_rule_catches_invalid_action(self, sh_module):
+        """REQ-COE-005: validate_rule rejects unknown actions."""
+        bad_rule = {"id": "X", "condition": "x", "action": "rm -rf /", "max_attempts": 1}
+        errors = sh_module.validate_rule(bad_rule)
+        assert len(errors) > 0
+        assert "Invalid action" in errors[0]
+
+    def test_validate_rule_catches_missing_fields(self, sh_module):
+        """REQ-COE-005: validate_rule catches missing required fields."""
+        errors = sh_module.validate_rule({})
+        assert len(errors) >= 4  # id, condition, action, max_attempts
+
+
+class TestFullQualityLoopResilience:
+    """Integration test: quality loop handles all 5 COE scenarios."""
+
+    def test_quality_loop_with_no_agent_output_triggers_timeout(self, tmp_path):
+        """REQ-COE-INTEGRATION: Missing agent output + elapsed time = timeout action."""
+        pipeline = {
+            "quality_loop": {
+                "round": 1, "max_rounds": 3,
+                "active_agents": ["code-reviewer"],
+                "dropped_agents": [], "replan_count": 0,
+                "rounds_history": [],
+            },
+            "agent_timing": {
+                "agent_start_times": {},
+                "respawn_counts": {},
+            },
+            "sub_phase": "QUALITY_FIX",
+        }
+        # Simulate: agent started 500s ago (sonnet timeout is 400s)
+        from datetime import timedelta
+        old = (datetime.now() - timedelta(seconds=500)).isoformat()
+        pipeline["agent_timing"]["agent_start_times"]["code-reviewer"] = old
+        pipeline["agent_timing"]["respawn_counts"]["code-reviewer"] = 0
+
+        # Create empty output dir (no agent output)
+        output_dir = tmp_path / "agent-outputs"
+        output_dir.mkdir()
+
+        timing = pipeline["agent_timing"]
+        result = qralph_pipeline._check_agent_timeout(
+            timing, "code-reviewer", "sonnet", output_dir, tmp_path,
+        )
+        assert result is not None
+        assert result["action"] == "respawn_agent"
+
+
+class TestStateTransitionTimeout:
+    """End-to-end: WAITING handler detects timeout and returns respawn action via state machine."""
+
+    def test_plan_waiting_timeout_returns_respawn(self, tmp_path):
+        """REQ-COE-E2E: _next_plan_waiting with timed-out agent returns respawn action."""
+        from datetime import timedelta
+
+        # Build a realistic pipeline state at PLAN_WAITING
+        agent_names = ["researcher", "sde-iii"]
+        agents = [{"name": n, "model": "opus"} for n in agent_names]
+
+        pipeline = {
+            "sub_phase": "PLAN_WAITING",
+            "plan_agents": agents,
+            "agent_timing": {
+                "agent_start_times": {
+                    # researcher started 1000s ago (opus timeout is 900s)
+                    "researcher": (datetime.now() - timedelta(seconds=1000)).isoformat(),
+                    "sde-iii": (datetime.now() - timedelta(seconds=1000)).isoformat(),
+                },
+                "respawn_counts": {"researcher": 0, "sde-iii": 0},
+            },
+        }
+
+        # Create project dir structure with empty agent-outputs
+        (tmp_path / "agent-outputs").mkdir()
+
+        # Create minimal state
+        state = {"project_path": str(tmp_path), "phase": "PLAN"}
+
+        # Call the actual handler
+        result = qralph_pipeline._next_plan_waiting(state, pipeline, tmp_path)
+
+        # Should detect timeout and return respawn action
+        assert result is not None
+        assert result.get("action") == "respawn_agent", f"Expected respawn_agent, got {result}"
+        assert result.get("agent_name") == "researcher"  # first missing agent
+
+    def test_plan_waiting_with_output_succeeds(self, tmp_path):
+        """REQ-COE-E2E: _next_plan_waiting with valid output does not timeout."""
+        agent_names = ["researcher", "sde-iii"]
+        agents = [{"name": n, "model": "opus"} for n in agent_names]
+
+        pipeline = {
+            "sub_phase": "PLAN_WAITING",
+            "plan_agents": agents,
+            "agent_timing": {
+                "agent_start_times": {},
+                "respawn_counts": {},
+            },
+        }
+
+        # Create output files with sufficient content
+        output_dir = tmp_path / "agent-outputs"
+        output_dir.mkdir()
+        for name in agent_names:
+            (output_dir / f"{name}.md").write_text("A" * 200)
+
+        state = {"project_path": str(tmp_path), "phase": "PLAN"}
+
+        result = qralph_pipeline._next_plan_waiting(state, pipeline, tmp_path)
+
+        # Should NOT return a timeout — should proceed normally
+        assert result.get("action") != "respawn_agent"
+        assert result.get("action") != "escalate_to_user"
+
+    def test_resolve_agent_output_used_in_concept_waiting(self, tmp_path):
+        """REQ-COE-E2E: .respawn.md is preferred over .md in CONCEPT_WAITING."""
+        output_dir = tmp_path / "agent-outputs"
+        output_dir.mkdir()
+
+        # Create both .md (old/short) and .respawn.md (good) for an agent
+        (output_dir / "persona-riley.md").write_text("short")  # too short
+        (output_dir / "persona-riley.respawn.md").write_text("A" * 200)  # valid respawn
+
+        # _resolve_agent_output should prefer .respawn.md
+        path, content = qralph_pipeline._resolve_agent_output(output_dir, "persona-riley", 100)
+        assert path is not None
+        assert "respawn" in str(path)
+        assert len(content) >= 100
+
+    def test_respawn_includes_agent_config(self, tmp_path):
+        """REQ-COE-RESPAWN: respawn_agent action must include original agent config for orchestrator."""
+        from datetime import timedelta
+
+        agents = [{"name": "researcher", "model": "opus", "prompt": "Research the project"}]
+        pipeline = {
+            "sub_phase": "PLAN_WAITING",
+            "plan_agents": agents,
+            "_spawned_agents": {"researcher": agents[0]},
+            "agent_timing": {
+                "agent_start_times": {
+                    "researcher": (datetime.now() - timedelta(seconds=1000)).isoformat(),
+                },
+                "respawn_counts": {"researcher": 0},
+            },
+        }
+        (tmp_path / "agent-outputs").mkdir()
+        state = {"project_path": str(tmp_path), "phase": "PLAN"}
+
+        result = qralph_pipeline._next_plan_waiting(state, pipeline, tmp_path)
+
+        assert result["action"] == "respawn_agent"
+        assert "agent" in result, "respawn_agent must include 'agent' key with full config"
+        assert result["agent"]["prompt"] == "Research the project"
+        assert result["agent"]["model"] == "opus"
+
+
+# ─── Determinism Fix Tests (T-001 through T-004) ────────────────────────────
+
+
+class TestQualityReverify:
+    """T-001: QUALITY_REVERIFY sub-phase spawns haiku verifier per P0/P1 finding."""
+
+    def _make_base(self, tmp_path):
+        """Return (state, pipeline, project_path) wired with minimal structure."""
+        project_path = tmp_path / "projects" / "001-test"
+        (project_path / "agent-outputs").mkdir(parents=True)
+        (project_path / "checkpoints").mkdir(parents=True)
+        (project_path / "quality-reports").mkdir(parents=True)
+        pipeline = {
+            "sub_phase": "QUALITY_REVERIFY",
+            "quality_loop": {
+                "round": 1,
+                "max_rounds": 3,
+                "rounds_history": [
+                    {
+                        "round": 1,
+                        "findings": [
+                            {"id": "F-001", "severity": "P0", "title": "SQL injection", "agent": "sec"},
+                            {"id": "F-002", "severity": "P1", "title": "XSS vector", "agent": "sec"},
+                            {"id": "F-003", "severity": "P2", "title": "Weak headers", "agent": "sec"},
+                        ],
+                    }
+                ],
+            },
+        }
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "QUALITY_LOOP",
+            "pipeline": pipeline,
+        }
+        return state, pipeline, project_path
+
+    def test_quality_reverify_spawns_verifier(self, tmp_path):
+        """T-001: QUALITY_REVERIFY spawns a haiku verifier agent for P0/P1 findings."""
+        state, pipeline, project_path = self._make_base(tmp_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_reverify(state, pipeline, project_path)
+
+        assert result["action"] == "spawn_agents"
+        assert len(result["agents"]) == 1
+        agent = result["agents"][0]
+        assert agent["name"] == "quality-verifier"
+        assert agent["model"] == "haiku"
+        # Both P0 and P1 must appear in the prompt; P2 must not trigger a verifier
+        assert "F-001" in agent["prompt"]
+        assert "F-002" in agent["prompt"]
+        assert "RESOLVED:" in agent["prompt"]
+        assert "UNRESOLVED:" in agent["prompt"]
+
+    def test_quality_reverify_skips_to_dashboard_when_no_p0_p1(self, tmp_path):
+        """T-001: QUALITY_REVERIFY skips to QUALITY_DASHBOARD when only P2 findings exist."""
+        project_path = tmp_path / "projects" / "001-test"
+        (project_path / "agent-outputs").mkdir(parents=True)
+        (project_path / "checkpoints").mkdir(parents=True)
+        (project_path / "quality-reports").mkdir(parents=True)
+        pipeline = {
+            "sub_phase": "QUALITY_REVERIFY",
+            "quality_loop": {
+                "round": 1,
+                "max_rounds": 3,
+                "_dashboard_action": "converged",
+                "_current_findings": [],
+                "rounds_history": [
+                    {
+                        "round": 1,
+                        "findings": [
+                            {"id": "F-003", "severity": "P2", "title": "Minor issue", "agent": "sec"},
+                        ],
+                    }
+                ],
+                "active_agents": [],
+                "dropped_agents": [],
+            },
+        }
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "QUALITY_LOOP",
+            "pipeline": pipeline,
+        }
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_reverify(state, pipeline, project_path)
+
+        # No P0/P1 → skip to dashboard → _dashboard_action=converged → advance to POLISH
+        assert result.get("action") == "advance", \
+            f"Expected 'advance' but got: {result.get('action')}"
+        assert result.get("phase") == "POLISH"
+
+    def test_quality_reverify_blocks_on_unresolved(self, tmp_path):
+        """T-001: Findings without RESOLVED evidence remain unresolved (conservative default)."""
+        project_path = tmp_path / "projects" / "001-test"
+        (project_path / "agent-outputs").mkdir(parents=True)
+        (project_path / "checkpoints").mkdir(parents=True)
+        output_dir = project_path / "agent-outputs"
+
+        # Verifier output: only F-001 resolved, F-002 not mentioned → conservative unresolved
+        (output_dir / "quality-reverify-round-1.md").write_text(
+            "RESOLVED: F-001\n"
+            "# F-002 needs more investigation\n"
+        )
+
+        pipeline = {
+            "sub_phase": "QUALITY_REVERIFY_WAITING",
+            "quality_loop": {
+                "round": 1,
+                "max_rounds": 3,
+                "rounds_history": [
+                    {
+                        "round": 1,
+                        "findings": [
+                            {"id": "F-001", "severity": "P0", "title": "SQL injection", "agent": "sec"},
+                            {"id": "F-002", "severity": "P1", "title": "XSS vector", "agent": "sec"},
+                        ],
+                    }
+                ],
+            },
+        }
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "QUALITY_LOOP",
+            "pipeline": pipeline,
+        }
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_reverify_waiting(state, pipeline, project_path)
+
+        assert result["resolved_count"] == 1
+        assert result["unresolved_count"] == 1
+        unresolved = result["unresolved_findings"]
+        assert any(f["id"] == "F-002" for f in unresolved), \
+            "F-002 must be unresolved — conservative default for findings without evidence"
+
+    def test_quality_reverify_all_resolved(self, tmp_path):
+        """T-001: When all P0/P1 findings are RESOLVED, unresolved_count is zero."""
+        project_path = tmp_path / "projects" / "001-test"
+        (project_path / "agent-outputs").mkdir(parents=True)
+        (project_path / "checkpoints").mkdir(parents=True)
+        output_dir = project_path / "agent-outputs"
+
+        (output_dir / "quality-reverify-round-1.md").write_text(
+            "RESOLVED: F-001\nRESOLVED: F-002\n"
+        )
+
+        pipeline = {
+            "sub_phase": "QUALITY_REVERIFY_WAITING",
+            "quality_loop": {
+                "round": 1,
+                "max_rounds": 3,
+                "rounds_history": [
+                    {
+                        "round": 1,
+                        "findings": [
+                            {"id": "F-001", "severity": "P0", "title": "SQL injection", "agent": "sec"},
+                            {"id": "F-002", "severity": "P1", "title": "XSS vector", "agent": "sec"},
+                        ],
+                    }
+                ],
+            },
+        }
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "QUALITY_LOOP",
+            "pipeline": pipeline,
+        }
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_reverify_waiting(state, pipeline, project_path)
+
+        assert result["resolved_count"] == 2
+        assert result["unresolved_count"] == 0
+        assert result["unresolved_findings"] == []
+
+
+class TestMaxRoundsEscalation:
+    """T-002: max_rounds + P0 findings → escalate_to_user; max_rounds + only P2 → advance to POLISH."""
+
+    def _make_quality_dashboard_state(self, tmp_path, findings, dashboard_action="max_rounds"):
+        """Build (state, pipeline, project_path) ready for _next_quality_dashboard."""
+        project_path = tmp_path / "projects" / "001-test"
+        (project_path / "agent-outputs").mkdir(parents=True)
+        (project_path / "checkpoints").mkdir(parents=True)
+        (project_path / "quality-reports").mkdir(parents=True)
+        pipeline = {
+            "sub_phase": "QUALITY_DASHBOARD",
+            "quality_loop": {
+                "round": 3,
+                "max_rounds": 3,
+                "_dashboard_action": dashboard_action,
+                "_current_findings": findings,
+                "rounds_history": [{"round": 3, "findings": findings}],
+                "active_agents": [],
+                "dropped_agents": [],
+            },
+        }
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "QUALITY_LOOP",
+            "pipeline": pipeline,
+        }
+        return state, pipeline, project_path
+
+    def test_max_rounds_escalates_with_p0(self, tmp_path):
+        """T-002: max_rounds with at least one P0 finding → escalate_to_user."""
+        findings = [
+            {"id": "F-001", "severity": "P0", "title": "Critical SQL injection", "agent": "sec"},
+            {"id": "F-002", "severity": "P2", "title": "Minor style issue", "agent": "sec"},
+        ]
+        state, pipeline, project_path = self._make_quality_dashboard_state(tmp_path, findings)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_dashboard(state, pipeline, project_path)
+
+        assert result["action"] == "escalate_to_user", \
+            f"Expected escalate_to_user but got: {result['action']}"
+        assert result.get("escalation_type") == "max_quality_rounds_p0_remaining"
+        assert result.get("p0_count", 0) >= 1
+
+    def test_max_rounds_advances_without_p0(self, tmp_path):
+        """T-002: max_rounds with only P2 findings → advance to POLISH (no escalation)."""
+        findings = [
+            {"id": "F-003", "severity": "P2", "title": "Weak headers", "agent": "sec"},
+            {"id": "F-004", "severity": "P2", "title": "Missing rate limit", "agent": "sec"},
+        ]
+        state, pipeline, project_path = self._make_quality_dashboard_state(tmp_path, findings)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_dashboard(state, pipeline, project_path)
+
+        assert result["action"] == "advance", \
+            f"Expected advance but got: {result['action']}"
+        assert result.get("phase") == "POLISH"
+        assert result.get("reason") == "max_rounds"
+
+    def test_max_rounds_escalates_p0_priority_field(self, tmp_path):
+        """T-002: P0 detection also uses 'priority' field, not just 'severity'."""
+        # Must include 'severity' key too because generate_dashboard accesses it directly.
+        # The _next_quality_dashboard P0 check additionally tests the 'priority' field.
+        findings = [
+            {"id": "F-010", "severity": "P2", "priority": "P0",
+             "title": "Critical issue via priority", "agent": "sec"},
+        ]
+        state, pipeline, project_path = self._make_quality_dashboard_state(tmp_path, findings)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline._next_quality_dashboard(state, pipeline, project_path)
+
+        assert result["action"] == "escalate_to_user"
+
+
+class TestEvidenceMetrics:
+    """T-003: _compute_evidence_metrics scans agent-outputs/ and returns actual EQS values."""
+
+    def test_compute_evidence_metrics_with_outputs(self, tmp_path):
+        """T-003: EQS computed from real .md files — not placeholders."""
+        project_path = tmp_path / "001-test"
+        project_path.mkdir()
+        output_dir = project_path / "agent-outputs"
+        output_dir.mkdir()
+
+        (output_dir / "researcher.md").write_text("This is a detailed research report " * 20)
+        (output_dir / "security-reviewer.md").write_text("Found three vulnerabilities " * 15)
+        # One empty file — should count as no output
+        (output_dir / "empty-agent.md").write_text("")
+
+        state = {"project_id": "001-test", "project_path": str(project_path)}
+        pipeline = {"quality_loop": {"rounds_history": []}}
+
+        metrics = qralph_pipeline._compute_evidence_metrics(project_path, state, pipeline)
+
+        assert metrics["total_agents"] == 3
+        assert metrics["agents_with_output"] == 2
+        assert metrics["total_words"] > 0
+        assert 0 <= metrics["eqs"] <= 100
+        # Actual numeric EQS — not a placeholder string
+        assert isinstance(metrics["eqs"], int)
+        assert metrics["confidence"] in ("HIGH", "MEDIUM", "LOW", "HOLLOW RUN")
+
+    def test_compute_evidence_metrics_all_empty(self, tmp_path):
+        """T-003: EQS = 0 when all agent outputs are empty → HOLLOW RUN confidence."""
+        project_path = tmp_path / "001-test"
+        project_path.mkdir()
+        output_dir = project_path / "agent-outputs"
+        output_dir.mkdir()
+        (output_dir / "agent-a.md").write_text("")
+        (output_dir / "agent-b.md").write_text("")
+
+        state = {"project_id": "001-test", "project_path": str(project_path)}
+        pipeline = {"quality_loop": {}}
+
+        metrics = qralph_pipeline._compute_evidence_metrics(project_path, state, pipeline)
+
+        assert metrics["eqs"] == 0
+        assert metrics["confidence"] == "HOLLOW RUN"
+
+    def test_compute_evidence_metrics_no_dir(self, tmp_path):
+        """T-003: No agent-outputs/ dir → eqs=0, total_agents=0, no crash."""
+        project_path = tmp_path / "001-test"
+        project_path.mkdir()
+
+        state = {"project_id": "001-test", "project_path": str(project_path)}
+        pipeline = {"quality_loop": {}}
+
+        metrics = qralph_pipeline._compute_evidence_metrics(project_path, state, pipeline)
+
+        assert metrics["total_agents"] == 0
+        assert metrics["agents_with_output"] == 0
+        assert metrics["eqs"] == 0
+
+    def test_summary_has_evidence_metrics(self, tmp_path):
+        """T-003: SUMMARY.md contains actual computed EQS values, not placeholder text."""
+        project_path = tmp_path / "001-test"
+        project_path.mkdir()
+        output_dir = project_path / "agent-outputs"
+        output_dir.mkdir()
+        (project_path / "checkpoints").mkdir()
+        (project_path / "verification").mkdir()
+
+        # Write agent outputs so metrics are non-trivial
+        (output_dir / "researcher.md").write_text("Research findings " * 30)
+        (output_dir / "designer.md").write_text("Design output " * 25)
+
+        # Create minimal manifest — no acceptance_criteria so criteria_results not required
+        manifest = {
+            "tasks": [{"id": "T-001", "summary": "Build feature", "files": []}],
+            "agent_analyses": ["researcher", "designer"],
+        }
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+        # Write a passing verification result in JSON format (required by _parse_verdict)
+        verify_result = project_path / "verification" / "result.md"
+        verify_result.write_text('```json\n{"verdict": "PASS"}\n```\n')
+
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Build feature",
+            "template": "new-feature",
+            "created_at": "2026-01-01T00:00:00",
+            "pipeline": {},
+        }
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_safe_project_path", return_value=project_path), \
+             mock.patch.object(qralph_pipeline, "_pipeline_shutdown", return_value="2026-01-01T00:01:00"), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline.cmd_finalize()
+
+        # Must succeed
+        assert "error" not in result, f"cmd_finalize failed: {result}"
+
+        summary_path = project_path / "SUMMARY.md"
+        assert summary_path.exists(), "SUMMARY.md was not written"
+        summary_text = summary_path.read_text()
+
+        # Evidence Quality section must contain actual numbers, not placeholder text
+        assert "Evidence Quality" in summary_text
+        # The SUMMARY.md uses bold markdown: **Evidence Quality Score**: N/100
+        assert "Evidence Quality Score" in summary_text
+        # Must contain a numeric EQS value like "100/100 (HIGH)"
+        import re
+        eqs_match = re.search(r"Evidence Quality Score\*?\*?:\s*(\d+)/100", summary_text)
+        assert eqs_match is not None, \
+            f"SUMMARY.md must contain 'Evidence Quality Score: N/100' but got:\n{summary_text}"
+        # Verify it's a real computed value (0-100), not a static placeholder
+        eqs_value = int(eqs_match.group(1))
+        assert 0 <= eqs_value <= 100
+
+
+class TestPipelineShutdown:
+    """T-004: _pipeline_shutdown releases lock, records timestamp, clears agents."""
+
+    def test_pipeline_shutdown_records_timestamp(self, tmp_path):
+        """T-004: _pipeline_shutdown sets shutdown_at on pipeline dict."""
+        state = {
+            "project_id": "001-test",
+            "project_path": str(tmp_path),
+            "pipeline": {"sub_phase": "COMPLETE"},
+        }
+
+        with mock.patch.object(qralph_pipeline, "_release_session_lock"):
+            shutdown_at = qralph_pipeline._pipeline_shutdown(state, tmp_path)
+
+        assert shutdown_at is not None
+        assert state["pipeline"]["shutdown_at"] == shutdown_at
+        # Should be parseable as ISO datetime
+        datetime.fromisoformat(shutdown_at)
+
+    def test_pipeline_shutdown_clears_spawned_agents(self, tmp_path):
+        """T-004: _pipeline_shutdown empties _spawned_agents dict."""
+        state = {
+            "project_id": "001-test",
+            "project_path": str(tmp_path),
+            "pipeline": {
+                "sub_phase": "COMPLETE",
+                "_spawned_agents": {
+                    "researcher": {"name": "researcher", "model": "opus"},
+                    "designer": {"name": "designer", "model": "sonnet"},
+                },
+            },
+        }
+
+        with mock.patch.object(qralph_pipeline, "_release_session_lock"):
+            qralph_pipeline._pipeline_shutdown(state, tmp_path)
+
+        assert state["pipeline"]["_spawned_agents"] == {}
+
+    def test_pipeline_shutdown_no_spawned_agents_key(self, tmp_path):
+        """T-004: _pipeline_shutdown handles missing _spawned_agents key gracefully."""
+        state = {
+            "project_id": "001-test",
+            "project_path": str(tmp_path),
+            "pipeline": {"sub_phase": "COMPLETE"},
+        }
+
+        with mock.patch.object(qralph_pipeline, "_release_session_lock"):
+            shutdown_at = qralph_pipeline._pipeline_shutdown(state, tmp_path)
+
+        # Should not crash and must still set shutdown_at
+        assert shutdown_at is not None
+        assert "_spawned_agents" not in state["pipeline"]
+
+    def test_summary_shutdown_completed(self, tmp_path):
+        """T-004: SUMMARY.md Lifecycle section shows 'Pipeline cleanup: completed'."""
+        project_path = tmp_path / "001-test"
+        project_path.mkdir()
+        (project_path / "agent-outputs").mkdir()
+        (project_path / "checkpoints").mkdir()
+        (project_path / "verification").mkdir()
+
+        # No acceptance_criteria so criteria_results not required by _validate_criteria_results
+        manifest = {
+            "tasks": [{"id": "T-001", "summary": "Fix bug", "files": []}],
+        }
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+        # Verification result in JSON format (required by _parse_verdict)
+        verify_result = project_path / "verification" / "result.md"
+        verify_result.write_text('```json\n{"verdict": "PASS"}\n```\n')
+
+        state = {
+            "project_id": "001-test",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Fix bug",
+            "template": "bug-fix",
+            "created_at": "2026-01-01T00:00:00",
+            "pipeline": {},
+        }
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline, "_safe_project_path", return_value=project_path), \
+             mock.patch.object(qralph_pipeline, "_pipeline_shutdown", return_value="2026-01-01T00:02:00"), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"):
+            result = qralph_pipeline.cmd_finalize()
+
+        assert "error" not in result, f"cmd_finalize failed: {result}"
+
+        summary_path = project_path / "SUMMARY.md"
+        summary_text = summary_path.read_text()
+
+        assert "Lifecycle" in summary_text
+        assert "Pipeline cleanup: completed" in summary_text
+        assert "Session lock: released" in summary_text
 
 
 if __name__ == "__main__":

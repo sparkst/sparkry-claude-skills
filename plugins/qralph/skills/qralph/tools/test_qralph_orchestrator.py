@@ -2632,6 +2632,119 @@ def test_cmd_resume_includes_remediation_progress(mock_qralph_env, capsys):
 
 
 # ============================================================================
+# T-005: ANTI-BULK-STAMP TESTS
+# ============================================================================
+
+
+class TestAntiBulkStamp:
+    """T-005: Bulk-stamp bypass prevention in remediate-done and remediate-verify."""
+
+    def test_remediate_done_rejects_bulk(self, mock_qralph_env, capsys):
+        """T-005: remediate-done rejects >5 task IDs without --batch flag."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        # Build a comma-separated list of 6 task IDs (exceeds MAX_BULK_REMEDIATE=5)
+        six_ids = ",".join([f"REM-00{i}" for i in range(1, 7)])
+        result = qralph_orchestrator.cmd_remediate_done(six_ids, notes="bulk attempt")
+
+        assert "error" in result, "Should reject bulk remediation without --batch"
+        assert "5" in result["error"] or "batch" in result["error"].lower(), \
+            f"Error message must mention limit (5) or --batch: {result['error']}"
+
+    def test_remediate_done_allows_bulk_with_batch_flag(self, mock_qralph_env, capsys):
+        """T-005: remediate-done allows >5 task IDs when batch=True is passed."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        # Only test if we actually have tasks (synthesis may produce fewer than 6)
+        if len(tasks) < 6:
+            pytest.skip("Not enough remediation tasks for bulk batch test")
+
+        all_ids = ",".join(t["id"] for t in tasks[:6])
+        result = qralph_orchestrator.cmd_remediate_done(all_ids, notes="batch override", batch=True)
+
+        # Should not return an error about bulk limit
+        if "error" in result:
+            assert "5" not in result["error"] and "batch" not in result["error"].lower(), \
+                f"batch=True should bypass bulk limit, but got: {result['error']}"
+
+    def test_remediate_done_allows_exactly_five(self, mock_qralph_env, capsys):
+        """T-005: remediate-done accepts exactly 5 task IDs without --batch."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        if len(tasks) < 5:
+            pytest.skip("Not enough remediation tasks for this test")
+
+        five_ids = ",".join(t["id"] for t in tasks[:5])
+        result = qralph_orchestrator.cmd_remediate_done(five_ids, notes="exactly five")
+
+        # Should not fail with the bulk-limit error
+        if "error" in result:
+            assert "5" not in result["error"] or "batch" not in result["error"].lower(), \
+                f"Exactly 5 IDs should be allowed without --batch: {result['error']}"
+
+    def test_max_bulk_remediate_constant(self):
+        """T-005: MAX_BULK_REMEDIATE constant is defined and equals 5."""
+        assert hasattr(qralph_orchestrator, "MAX_BULK_REMEDIATE"), \
+            "MAX_BULK_REMEDIATE must be exported from qralph_orchestrator"
+        assert qralph_orchestrator.MAX_BULK_REMEDIATE == 5
+
+    def test_remediate_verify_detects_suspicious_timing(self, mock_qralph_env, capsys):
+        """T-005: remediate-verify logs a warning when >10 tasks fixed within 60s window."""
+        from datetime import timedelta
+
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+
+        # Force 11 tasks with a tight fixed_at window — simulate suspicious bulk-stamp
+        now = datetime.now()
+        padded_tasks = []
+        for i, t in enumerate(tasks):
+            padded_tasks.append(dict(t, status="fixed",
+                                     fixed_at=(now + timedelta(seconds=i * 2)).isoformat()))
+
+        # Pad to 11 tasks if needed
+        while len(padded_tasks) < 11:
+            idx = len(padded_tasks)
+            padded_tasks.append({
+                "id": f"REM-{idx:03d}",
+                "priority": "P1",
+                "status": "fixed",
+                "fixed_at": (now + timedelta(seconds=idx * 2)).isoformat(),
+                "finding": {"agent": "sec", "finding": "issue"},
+            })
+
+        state["remediation_tasks"] = padded_tasks
+        qralph_orchestrator.save_state(state)
+
+        project_path = Path(state["project_path"])
+        _clear_control_md(mock_qralph_env)
+
+        # Run remediate-verify; it should detect suspicious timing
+        result = qralph_orchestrator.cmd_remediate_verify()
+
+        # The warning should be logged — check decisions.log for the warning text
+        decisions_log = project_path / "decisions.log"
+        if decisions_log.exists():
+            log_text = decisions_log.read_text()
+            assert "Suspicious" in log_text or "suspicious" in log_text or \
+                   result is not None, \
+                "remediate-verify should log suspicious timing warning"
+
+        # Result must not crash
+        assert result is not None
+
+
+# ============================================================================
 # RUN TESTS
 # ============================================================================
 

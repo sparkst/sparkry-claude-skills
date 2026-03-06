@@ -64,8 +64,8 @@
     {
       "name": "qralph",
       "source": "./plugins/qralph",
-      "description": "Full-lifecycle 13-phase multi-agent pipeline with adaptive quality loops, cross-project learning, and confidence scoring (QRALPH v6.6.1)",
-      "version": "6.6.1",
+      "description": "Full-lifecycle 13-phase multi-agent pipeline with adaptive quality loops, cross-project learning, and confidence scoring (QRALPH v6.6.2)",
+      "version": "6.6.2",
       "license": "MIT",
       "keywords": ["orchestration", "multi-agent", "qralph", "pipeline", "deterministic", "quality-gates", "enforcement-hooks"],
       "category": "orchestration",

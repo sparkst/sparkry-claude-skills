@@ -1,5 +1,65 @@
 # QRALPH Changelog
 
+## v6.6.2 (2026-03-05)
+
+### Fixed — Pipeline Determinism (COE from Project 019)
+- **Quality re-verification**: New QUALITY_REVERIFY sub-phase spawns haiku verifier per P0/P1 finding before advancing to dashboard. Conservative default: findings without evidence remain unresolved.
+- **P0 escalation at max rounds**: When quality rounds exhausted with P0s still open, pipeline escalates to user with plain-language options instead of silently advancing to POLISH.
+- **Evidence metrics**: `_compute_evidence_metrics()` scans agent-outputs/ for real word counts and EQS. No more `?/?` placeholders in SUMMARY.md. Orchestrator recomputes EQS at finalize time.
+- **Deterministic shutdown**: `_pipeline_shutdown()` releases session lock, records timestamp, clears agents. SUMMARY.md includes Lifecycle section confirming cleanup.
+- **Anti-bulk-stamp**: `MAX_BULK_REMEDIATE = 5` rejects mass remediation without `--batch` flag. Suspicious timing (all tasks fixed within 60s window) detected and logged to decisions.log.
+- **Test coverage**: 20 new tests covering all 5 determinism fixes. 603 total tests passing.
+
+### Fixed (COE from Project 041)
+- **Agent watchdog**: Per-agent timeout detection with model-tier thresholds (opus=900s, sonnet=400s, haiku=180s). First timeout re-spawns with `.hung.md` preservation; second escalates to user.
+- **Quality gate CWD**: Containment check on all CWD paths (manifest and auto-detected). Symlink resolution in subdirectory scan. `site_dir` parameter for explicit project targeting.
+- **Gate effectiveness**: `detect_quality_gate()` returns `effective` field. Missing linter config logged as `[WARN]` (excluded from convergence).
+- **Convergence tracking**: `compute_finding_deltas()` pure function classifies findings as NEW/CARRY_FORWARD/FIXED. Regression detection (P0 increase at round >= 3). Stagnation detection with configurable threshold.
+- **Self-healing**: Python constant rulebook with action enum allowlist. 60-minute heal cooldown. LEARN phase restricted to counter updates only.
+- **Session lock safety**: try/finally + atexit.register for lock release on exceptions.
+- **VALID_PHASES**: Added DEPLOY and SMOKE (was causing checkpoint corruption on resume).
+- **should_backtrack**: Fires at round >= 2 for SP <= 2 tasks (was round >= 3 unconditionally).
+
+## v6.6.1 (2026-03-01)
+
+### Idea to Production — DEPLOY + SMOKE Phases
+
+v6.6.1 closes the loop from idea to production-verified. Two new phases after VERIFY:
+
+#### 13-Phase Pipeline
+```
+IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY →
+QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
+```
+
+#### DEPLOY Phase (3 sub-phases)
+- **DEPLOY_PREFLIGHT**: Detect deploy intent from request, find deploy command from project config (wrangler.toml, vercel.json, package.json), generate pre-deploy checklist
+- **DEPLOY_GATE**: Confirmation gate — skipped if user explicitly said "deploy to X", shown if implicit
+- **DEPLOY_RUN**: Execute deploy command, capture output, extract live URL, write DEPLOY-REPORT.md
+
+#### SMOKE Phase (3 sub-phases)
+- **SMOKE_GENERATE**: Generate parallel smoke test agents from manifest ACs, categorized (pages, API, security, SEO, errors), all using haiku for speed
+- **SMOKE_WAIT**: Validate all smoke agent outputs collected
+- **SMOKE_VERDICT**: Aggregate PASS/FAIL/SKIP results, write SMOKE-REPORT.md, advance or show failures
+
+#### Two-Call Gate Enforcement (COE fix)
+All 6 confirmation gates now use a two-call protocol:
+1. First `next` → pipeline returns gate action, sets `awaiting_confirmation` in state
+2. Only a subsequent `next --confirm` is accepted — same-turn `--confirm` is rejected with error
+
+This prevents the orchestrator from skipping gates. The pipeline itself enforces the round-trip.
+
+#### Deploy Intent Detection
+- **Explicit** ("deploy to Cloudflare Workers") → auto-deploy, skip gate
+- **Implicit** ("deploy", "ship it", "go live") → show `confirm_deploy` gate
+- **None** ("build me a page") → skip DEPLOY and SMOKE entirely
+
+### Breaking Changes
+- PHASES list expanded from 11 to 13 entries
+- `cmd_finalize` now accepts phases VERIFY, DEPLOY, SMOKE, or LEARN (was VERIFY only)
+- `_next_verify_wait` advances to DEPLOY instead of calling `cmd_finalize`
+- All confirm gates now require two-call protocol (existing `--confirm` without prior gate return will error)
+
 ## v6.6.0 (2026-03-01)
 
 ### Exclusive Mode Enforcement

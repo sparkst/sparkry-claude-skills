@@ -57,20 +57,22 @@ def detect_consensus(agent_results: list[dict]) -> dict:
     return {"consensus": False, "recommendation": "continue"}
 
 
-def should_backtrack(round_num: int, p0_count: int, replan_count: int) -> bool:
+def should_backtrack(round_num: int, p0_count: int, replan_count: int, estimated_sp: float = 5.0) -> bool:
     """Determine whether the quality loop should backtrack to replan.
 
     Args:
         round_num: Current review round number.
         p0_count: Number of P0 (critical) findings still open.
         replan_count: How many times we have already replanned.
+        estimated_sp: Story points estimate. SP <= 2 backtracks earlier.
 
     Returns:
         True if backtracking is warranted.
 
     Rules:
-        - True when: round_num >= 3 AND p0_count > 0 AND replan_count < 2
-        - False when: round < 3 (give more time), or replan_count >= 2
-          (max replans reached), or p0_count == 0 (no critical issues)
+        - For SP <= 2 (simple tasks): backtrack at round >= 2
+        - For SP > 2: backtrack at round >= 3
+        - Always requires p0_count > 0 AND replan_count < 2
     """
-    return round_num >= 3 and p0_count > 0 and replan_count < 2
+    min_round = 2 if estimated_sp <= 2 else 3
+    return round_num >= min_round and p0_count > 0 and replan_count < 2

@@ -49,14 +49,33 @@ def parse_findings(output: str, agent_name: str = "") -> list[dict]:
     return findings
 
 
-def check_convergence(findings: list[dict]) -> dict:
+def check_convergence(findings: list[dict], prev_findings: list[dict] | None = None) -> dict:
     """Check if the quality loop has converged.
 
-    Converged when there are zero P0 and zero P1 findings.
+    Converged when zero P0 and zero P1 findings.
+    Regressed when P0 count increased vs previous round with truly new P0s.
     """
     p0 = sum(1 for f in findings if f["severity"] == "P0")
     p1 = sum(1 for f in findings if f["severity"] == "P1")
     p2 = sum(1 for f in findings if f["severity"] == "P2")
+
+    regressed = False
+    if prev_findings is not None:
+        prev_p0 = sum(1 for f in prev_findings if f["severity"] == "P0")
+        if p0 > prev_p0:
+            prev_p0_ids = {f["id"] for f in prev_findings if f.get("severity") == "P0" and "id" in f}
+            curr_p0_ids = {f["id"] for f in findings if f.get("severity") == "P0" and "id" in f}
+            new_p0s = curr_p0_ids - prev_p0_ids
+            regressed = len(new_p0s) > 0
+
+    # Stagnation: P0+P1 barely changed (delta <= 1) with 3+ issues remaining
+    if prev_findings is not None:
+        prev_p01 = sum(1 for f in prev_findings if f["severity"] in ("P0", "P1"))
+        curr_p01 = p0 + p1
+        delta = prev_p01 - curr_p01
+        stagnant = (delta <= 1 and curr_p01 >= 3)
+    else:
+        stagnant = False
 
     return {
         "converged": p0 == 0 and p1 == 0,
@@ -64,6 +83,8 @@ def check_convergence(findings: list[dict]) -> dict:
         "p1_count": p1,
         "p2_count": p2,
         "total": len(findings),
+        "regressed": regressed,
+        "stagnant": stagnant,
     }
 
 
@@ -73,6 +94,23 @@ def should_agent_continue(agent_findings: list[dict]) -> bool:
     Returns True if any finding is P0 or P1.
     """
     return any(f["severity"] in ("P0", "P1") for f in agent_findings)
+
+
+def compute_finding_deltas(prev_findings: list[dict], curr_findings: list[dict]) -> dict[str, str]:
+    """Compute disposition of each finding across two rounds.
+
+    Returns dict mapping finding ID to: "NEW", "CARRY_FORWARD", or "FIXED".
+    """
+    prev_ids = {f["id"] for f in prev_findings if "id" in f}
+    curr_ids = {f["id"] for f in curr_findings if "id" in f}
+
+    deltas = {}
+    for fid in curr_ids:
+        deltas[fid] = "CARRY_FORWARD" if fid in prev_ids else "NEW"
+    for fid in prev_ids:
+        if fid not in curr_ids:
+            deltas[fid] = "FIXED"
+    return deltas
 
 
 def generate_dashboard(
