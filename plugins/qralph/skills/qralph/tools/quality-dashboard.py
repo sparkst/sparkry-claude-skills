@@ -3,6 +3,8 @@
 Parses review agent findings and generates convergence dashboards.
 """
 
+from __future__ import annotations
+
 import re
 
 

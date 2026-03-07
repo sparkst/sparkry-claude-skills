@@ -3,6 +3,8 @@
 # Copyright (c) 2026 Travis Sparks
 """Tests for QRALPH v6.6.2 Pipeline."""
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess

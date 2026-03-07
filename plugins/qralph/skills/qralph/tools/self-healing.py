@@ -9,6 +9,8 @@ actions inline. qralph-healer.py remains the separate catastrophic
 rollback tool.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any
 

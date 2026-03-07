@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.6.1 Pipeline — deterministic multi-agent orchestration, idea to production.
+QRALPH v6.6.2 Pipeline — deterministic multi-agent orchestration, idea to production.
 
 Full pipeline: IDEATE → PERSONA → CONCEPT → PLAN → EXECUTE → SIMPLIFY →
                QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
@@ -19,6 +19,8 @@ Commands:
     resume               — Read checkpoint, return current phase + next action
     status               — Return project state
 """
+
+from __future__ import annotations
 
 import argparse
 import json
