@@ -125,7 +125,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.6.2"
+__version__ = "6.6.4"
 
 QUALITY_STANDARD = """
 ## Quality Standard
