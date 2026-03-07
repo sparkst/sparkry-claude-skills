@@ -982,14 +982,16 @@ def pattern_sweep(project_path: Path, task_id: str, coe_analysis: dict) -> dict:
     if not search_patterns:
         return {"clean": True, "remaining_instances": [], "patterns_checked": []}
 
-    # Resolve repo root from a stub state
-    repo_root = _resolve_repo_root({}, project_path)
+    # Use project_path as search root — _resolve_repo_root with empty state
+    # falls back to cwd which is wrong when running from a different directory.
+    repo_root = project_path
     remaining: List[Dict[str, Any]] = []
     patterns_checked: List[str] = []
 
     # Directories to skip during sweep
     skip_dirs = {".git", "node_modules", "__pycache__", "dist", "build",
-                 ".qralph", "vendor", "target", ".next", ".svelte-kit"}
+                 ".qralph", "vendor", "target", ".next", ".svelte-kit",
+                 "coe-analyses"}
 
     for pattern_str in search_patterns:
         if not isinstance(pattern_str, str) or not pattern_str.strip():
