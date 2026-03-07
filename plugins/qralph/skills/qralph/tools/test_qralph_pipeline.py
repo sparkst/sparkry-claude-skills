@@ -2002,47 +2002,49 @@ class TestValidateCriteriaResults:
         return [{"id": f"T-{i+1}", "acceptance_criteria": list(acs)} for i, acs in enumerate(ac_lists)]
 
     def test_validate_criteria_results_all_pass(self):
-        """All ACs covered with pass → (True, [], [])."""
+        """All ACs covered with pass → (True, [], [], [])."""
         tasks = self._tasks(["Server responds on port 3000", "Returns 200 OK"])
         criteria_results = [
-            {"criterion_index": "AC-1", "criterion": "Server responds on port 3000", "status": "pass", "evidence": "f:1"},
-            {"criterion_index": "AC-2", "criterion": "Returns 200 OK", "status": "pass", "evidence": "f:2"},
+            {"criterion_index": "AC-1", "criterion": "Server responds on port 3000", "status": "pass", "intent_match": True, "ship_ready": True, "evidence": "server.ts:10 — ok"},
+            {"criterion_index": "AC-2", "criterion": "Returns 200 OK", "status": "pass", "intent_match": True, "ship_ready": True, "evidence": "handler.ts:20 — ok"},
         ]
-        is_valid, missing, failed = qralph_pipeline._validate_criteria_results(criteria_results, tasks)
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(criteria_results, tasks)
         assert is_valid is True
         assert missing == []
         assert failed == []
+        assert block_reasons == []
 
     def test_validate_criteria_results_missing_criterion(self):
-        """AC-2 absent from results → (False, ["AC-2"], [])."""
+        """AC-2 absent from results → (False, ["AC-2"], [], [...])."""
         tasks = self._tasks(["Server starts", "Returns hello"])
         criteria_results = [
-            {"criterion_index": "AC-1", "criterion": "Server starts", "status": "pass", "evidence": "f:1"},
+            {"criterion_index": "AC-1", "criterion": "Server starts", "status": "pass", "intent_match": True, "ship_ready": True, "evidence": "server.ts:1 — ok"},
             # AC-2 deliberately omitted
         ]
-        is_valid, missing, failed = qralph_pipeline._validate_criteria_results(criteria_results, tasks)
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(criteria_results, tasks)
         assert is_valid is False
         assert "AC-2" in missing
         assert failed == []
 
     def test_validate_criteria_results_failed_criterion(self):
-        """AC-1 with status 'fail' → (False, [], [<label>])."""
+        """AC-1 with status 'fail' → (False, [], [<label>], [...])."""
         tasks = self._tasks(["Tests pass"])
         criteria_results = [
             {"criterion_index": "AC-1", "criterion": "Tests pass", "status": "fail", "evidence": "no tests found"},
         ]
-        is_valid, missing, failed = qralph_pipeline._validate_criteria_results(criteria_results, tasks)
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(criteria_results, tasks)
         assert is_valid is False
         assert missing == []
         assert len(failed) == 1
 
     def test_validate_criteria_results_no_acs_always_valid(self):
-        """Manifest with no ACs → (True, [], []) even when criteria_results is None."""
+        """Manifest with no ACs → (True, [], [], []) even when criteria_results is None."""
         tasks = [{"id": "T-1", "acceptance_criteria": []}]
-        is_valid, missing, failed = qralph_pipeline._validate_criteria_results(None, tasks)
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(None, tasks)
         assert is_valid is True
         assert missing == []
         assert failed == []
+        assert block_reasons == []
 
 
 # ─── T-004: Story Point Estimation ───────────────────────────────────────────
@@ -5048,6 +5050,1429 @@ class TestPipelineShutdown:
         assert "Lifecycle" in summary_text
         assert "Pipeline cleanup: completed" in summary_text
         assert "Session lock: released" in summary_text
+
+
+# ─── T-002: Request Fragment Extraction Tests ───────────────────────────────
+
+class TestFragmentRequest:
+    """T-002: _fragment_request splits requests into (REQ-F-N, text) tuples deterministically."""
+
+    def test_sentence_boundaries_split_on_period(self):
+        """T-002: Splits on sentence-ending periods followed by capitalized word."""
+        request = "Build a login page. Add JWT authentication. Deploy to production."
+        frags = qralph_pipeline._fragment_request(request)
+        assert len(frags) == 3
+        assert frags[0] == ("REQ-F-1", "Build a login page.")
+        assert frags[1] == ("REQ-F-2", "Add JWT authentication.")
+        assert frags[2] == ("REQ-F-3", "Deploy to production.")
+
+    def test_sentence_boundaries_exclamation_and_question(self):
+        """T-002: Splits on ! and ? sentence boundaries."""
+        request = "Make it fast! Is the API secured? Add rate limiting."
+        frags = qralph_pipeline._fragment_request(request)
+        texts = [t for _, t in frags]
+        assert any("Make it fast" in t for t in texts)
+        assert any("Is the API secured" in t for t in texts)
+        assert any("Add rate limiting" in t for t in texts)
+
+    def test_numbered_list_items(self):
+        """T-002: Splits numbered list items into separate fragments."""
+        request = "1. Create the database schema\n2. Build the REST API\n3. Write unit tests"
+        frags = qralph_pipeline._fragment_request(request)
+        assert len(frags) == 3
+        ids = [fid for fid, _ in frags]
+        assert ids == ["REQ-F-1", "REQ-F-2", "REQ-F-3"]
+        texts = [t for _, t in frags]
+        assert any("database schema" in t for t in texts)
+        assert any("REST API" in t for t in texts)
+        assert any("unit tests" in t for t in texts)
+
+    def test_semicolons_split_into_fragments(self):
+        """T-002: Semicolons are treated as fragment delimiters."""
+        request = "Add user authentication; implement password reset; add 2FA support"
+        frags = qralph_pipeline._fragment_request(request)
+        assert len(frags) == 3
+        texts = [t for _, t in frags]
+        assert any("user authentication" in t for t in texts)
+        assert any("password reset" in t for t in texts)
+        assert any("2FA support" in t for t in texts)
+
+    def test_bullet_list_items(self):
+        """T-002: Dash/bullet list items at start of line become separate fragments."""
+        request = "- Create the homepage layout\n- Add contact form\n- Integrate analytics"
+        frags = qralph_pipeline._fragment_request(request)
+        assert len(frags) == 3
+        texts = [t for _, t in frags]
+        assert any("homepage layout" in t for t in texts)
+        assert any("contact form" in t for t in texts)
+        assert any("analytics" in t for t in texts)
+
+    def test_filters_short_conversational_filler(self):
+        """T-002: Fragments shorter than 10 chars are filtered out as conversational filler."""
+        # Short fragments like "ok", "sure", "yes please" get dropped
+        request = "Build a secure API. Ok. Add rate limiting to all endpoints."
+        frags = qralph_pipeline._fragment_request(request)
+        ids = [fid for fid, _ in frags]
+        texts = [t for _, t in frags]
+        # "Ok." is < 10 chars and must be filtered
+        assert all(len(t) >= 10 for _, t in frags)
+        # Meaningful fragments survive
+        assert any("secure API" in t for t in texts)
+        assert any("rate limiting" in t for t in texts)
+
+    def test_returns_empty_for_very_short_request(self):
+        """T-002: Returns empty list for requests shorter than 20 chars total."""
+        assert qralph_pipeline._fragment_request("") == []
+        assert qralph_pipeline._fragment_request("Short.") == []
+        assert qralph_pipeline._fragment_request("Fix it") == []
+        assert qralph_pipeline._fragment_request("ok sure yes") == []
+
+    def test_returns_empty_for_none_like_empty(self):
+        """T-002: Returns empty list when request_text is empty string."""
+        assert qralph_pipeline._fragment_request("") == []
+
+    def test_fragments_are_numbered_sequentially(self):
+        """T-002: Fragment IDs are REQ-F-1, REQ-F-2, ... in order."""
+        request = "First requirement. Second requirement. Third requirement."
+        frags = qralph_pipeline._fragment_request(request)
+        ids = [fid for fid, _ in frags]
+        assert ids == ["REQ-F-1", "REQ-F-2", "REQ-F-3"]
+
+    def test_returns_list_of_tuples(self):
+        """T-002: Return type is a list of (str, str) tuples."""
+        request = "Build the login page and add JWT authentication tokens."
+        frags = qralph_pipeline._fragment_request(request)
+        assert isinstance(frags, list)
+        for item in frags:
+            assert isinstance(item, tuple)
+            assert len(item) == 2
+            fid, text = item
+            assert isinstance(fid, str)
+            assert isinstance(text, str)
+            assert fid.startswith("REQ-F-")
+
+    def test_single_long_sentence_returns_one_fragment(self):
+        """T-002: A single long sentence without delimiters returns one fragment."""
+        request = "Build a highly scalable authentication system with JWT tokens and refresh tokens"
+        frags = qralph_pipeline._fragment_request(request)
+        assert len(frags) == 1
+        assert frags[0][0] == "REQ-F-1"
+        assert "authentication system" in frags[0][1]
+
+
+class TestFragmentsStoredInState:
+    """T-002: request_fragments must be stored in pipeline state at plan time."""
+
+    def _run_cmd_plan(self, request: str, tmp_path, *, project_id: int = 1) -> tuple[dict, dict]:
+        """Run cmd_plan with all infrastructure mocked out. Returns (result, state_holder)."""
+        state_holder: dict = {}
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=None), \
+             mock.patch.object(qralph_pipeline.qralph_config, "load_config", return_value={"model_tiers": {}, "research_tools": {}}), \
+             mock.patch.object(qralph_pipeline.qralph_config, "cmd_setup"), \
+             mock.patch.object(qralph_pipeline, "PROJECTS_DIR", tmp_path), \
+             mock.patch.object(qralph_pipeline, "QRALPH_DIR", tmp_path), \
+             mock.patch.object(qralph_pipeline, "PROJECT_ROOT", tmp_path), \
+             mock.patch.object(qralph_pipeline, "_acquire_session_lock"), \
+             mock.patch.object(qralph_pipeline, "_release_session_lock"), \
+             mock.patch.object(qralph_pipeline, "_next_project_id", return_value=project_id), \
+             mock.patch.object(qralph_pipeline, "estimate_story_points", return_value=1.0), \
+             mock.patch.object(qralph_pipeline, "calculate_adaptive_budget", return_value=5.0), \
+             mock.patch.object(qralph_pipeline, "init_project_directory"), \
+             mock.patch.object(qralph_pipeline, "generate_plan_agent_prompt",
+                               return_value={"name": "sde-iii", "model": "sonnet", "prompt": "p"}), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock",
+                               return_value=mock.MagicMock()), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state",
+                               side_effect=state_holder.update), \
+             mock.patch.object(qralph_pipeline, "_save_checkpoint"), \
+             mock.patch.object(qralph_pipeline, "_log_decision"):
+            result = qralph_pipeline.cmd_plan(request, mode="quick")
+
+        return result, state_holder
+
+    def test_fragments_stored_in_state_after_plan(self, tmp_path):
+        """T-002: cmd_plan stores request_fragments in state keyed by fragment ID and text."""
+        request = "Build a login page. Add JWT authentication. Deploy to Cloudflare."
+        result, state_holder = self._run_cmd_plan(request, tmp_path, project_id=1)
+
+        assert "error" not in result, f"cmd_plan failed: {result}"
+        assert "request_fragments" in state_holder, "request_fragments not stored in state"
+        fragments = state_holder["request_fragments"]
+        assert isinstance(fragments, list)
+        assert len(fragments) >= 1
+        for frag in fragments:
+            assert "id" in frag
+            assert "text" in frag
+            assert frag["id"].startswith("REQ-F-")
+            assert len(frag["text"]) >= 10
+
+    def test_fragments_persisted_as_dicts_with_id_and_text(self, tmp_path):
+        """T-002: Stored fragments are dicts with 'id' and 'text' keys, not raw tuples."""
+        request = "Implement user registration; add email verification; store users in Postgres"
+        _, state_holder = self._run_cmd_plan(request, tmp_path, project_id=2)
+
+        fragments = state_holder.get("request_fragments", [])
+        assert len(fragments) == 3
+        ids = [f["id"] for f in fragments]
+        assert ids == ["REQ-F-1", "REQ-F-2", "REQ-F-3"]
+        texts = [f["text"] for f in fragments]
+        assert any("user registration" in t for t in texts)
+        assert any("email verification" in t for t in texts)
+        assert any("Postgres" in t for t in texts)
+
+
+class TestVerifyPromptRequirementsCoverage:
+    """T-002: cmd_verify() prompt must include a Requirements Coverage section when fragments exist."""
+
+    def _make_state_with_fragments(self, tmp_path) -> dict:
+        project_path = tmp_path / "001-test-verify"
+        project_path.mkdir()
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        return {
+            "project_id": "001-test-verify",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Build a login page. Add JWT authentication. Deploy to Cloudflare.",
+            "request_fragments": [
+                {"id": "REQ-F-1", "text": "Build a login page."},
+                {"id": "REQ-F-2", "text": "Add JWT authentication."},
+                {"id": "REQ-F-3", "text": "Deploy to Cloudflare."},
+            ],
+        }
+
+    def _get_verify_prompt(self, state: dict, tasks: list | None = None) -> str:
+        """Run cmd_verify with mocked state/path and return the agent prompt."""
+        project_path = Path(state["project_path"])
+        manifest = {"tasks": tasks or [], "request": state["request"]}
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline, "_safe_project_path", return_value=project_path):
+            result = qralph_pipeline.cmd_verify()
+        assert "error" not in result, f"cmd_verify failed: {result}"
+        return result["agent"]["prompt"]
+
+    def test_verify_prompt_includes_requirements_coverage_section(self, tmp_path):
+        """T-002: verify prompt contains '## Requirements Coverage' when fragments are stored."""
+        prompt = self._get_verify_prompt(self._make_state_with_fragments(tmp_path))
+        assert "## Requirements Coverage" in prompt
+
+    def test_verify_prompt_lists_all_req_f_n_fragments(self, tmp_path):
+        """T-002: Verify prompt lists each REQ-F-N fragment in the Requirements Coverage section."""
+        prompt = self._get_verify_prompt(self._make_state_with_fragments(tmp_path))
+        assert "REQ-F-1" in prompt
+        assert "REQ-F-2" in prompt
+        assert "REQ-F-3" in prompt
+        assert "Build a login page" in prompt
+        assert "JWT authentication" in prompt
+        assert "Deploy to Cloudflare" in prompt
+
+    def test_verify_prompt_includes_request_satisfaction_in_json_schema(self, tmp_path):
+        """T-002: Verify prompt JSON schema block includes 'request_satisfaction' array."""
+        prompt = self._get_verify_prompt(self._make_state_with_fragments(tmp_path))
+        assert '"request_satisfaction"' in prompt
+
+    def test_verify_prompt_request_satisfaction_includes_satisfied_partial_missing(self, tmp_path):
+        """T-002: Verify prompt documents 'satisfied', 'partial', 'missing' as valid statuses."""
+        prompt = self._get_verify_prompt(self._make_state_with_fragments(tmp_path))
+        assert "satisfied" in prompt
+        assert "partial" in prompt
+        assert "missing" in prompt
+
+    def test_verify_prompt_no_requirements_coverage_when_no_fragments(self, tmp_path):
+        """T-002: Requirements Coverage section is absent when state has no fragments."""
+        project_path = tmp_path / "002-test-nofrag"
+        project_path.mkdir()
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        state = {
+            "project_id": "002-test-nofrag",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Fix the broken button.",
+            # No request_fragments key
+        }
+        manifest = {"tasks": [], "request": state["request"]}
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline, "_safe_project_path", return_value=project_path):
+            result = qralph_pipeline.cmd_verify()
+        assert "error" not in result, f"cmd_verify failed: {result}"
+        assert "## Requirements Coverage" not in result["agent"]["prompt"]
+
+
+# ─── T-003: Verifier 3-Dimension Grading + Hard Enforcement ────────────────
+
+class TestValidateCriteriaResultsT003:
+    """T-003: _validate_criteria_results enforces intent_match, ship_ready, evidence depth."""
+
+    def _make_tasks(self, n: int = 1) -> list:
+        return [
+            {
+                "id": f"task-{i + 1}",
+                "summary": f"Task {i + 1}",
+                "files": ["file.ts"],
+                "acceptance_criteria": [f"AC criterion {i + 1}"],
+            }
+            for i in range(n)
+        ]
+
+    def _pass_entry(self, idx: str, evidence: str = "src/app.ts:42 — impl") -> dict:
+        return {
+            "criterion_index": idx,
+            "criterion": f"some criterion for {idx}",
+            "status": "pass",
+            "intent_match": True,
+            "ship_ready": True,
+            "evidence": evidence,
+        }
+
+    # --- intent_match checks ---
+
+    def test_intent_match_false_causes_fail(self):
+        """T-003-AC4: intent_match=false on a passing criterion is a hard FAIL."""
+        tasks = self._make_tasks(1)
+        entry = self._pass_entry("AC-1")
+        entry["intent_match"] = False
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        assert not is_valid
+        assert "AC-1" in failed
+        assert any("intent_match" in r for r in block_reasons)
+
+    def test_intent_match_true_does_not_fail(self):
+        """T-003-AC4: intent_match=true leaves criterion in PASS."""
+        tasks = self._make_tasks(1)
+        entry = self._pass_entry("AC-1")
+        entry["intent_match"] = True
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        assert is_valid
+        assert not failed
+
+    # --- ship_ready checks ---
+
+    def test_ship_ready_false_causes_fail(self):
+        """T-003-AC4: ship_ready=false on a passing criterion is a hard FAIL."""
+        tasks = self._make_tasks(1)
+        entry = self._pass_entry("AC-1")
+        entry["ship_ready"] = False
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        assert not is_valid
+        assert "AC-1" in failed
+        assert any("ship_ready" in r for r in block_reasons)
+
+    def test_ship_ready_true_does_not_fail(self):
+        """T-003-AC4: ship_ready=true leaves criterion in PASS."""
+        tasks = self._make_tasks(1)
+        entry = self._pass_entry("AC-1")
+        entry["ship_ready"] = True
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        assert is_valid
+        assert not failed
+
+    def test_both_intent_and_ship_ready_false_both_reasons_surfaced(self):
+        """T-003-AC7: Both intent_match and ship_ready failures appear in block_reasons."""
+        tasks = self._make_tasks(1)
+        entry = self._pass_entry("AC-1")
+        entry["intent_match"] = False
+        entry["ship_ready"] = False
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        assert not is_valid
+        assert any("intent_match" in r for r in block_reasons)
+        assert any("ship_ready" in r for r in block_reasons)
+
+    # --- evidence depth checks ---
+
+    def test_evidence_without_file_line_flagged_as_weak(self):
+        """T-003-AC5: Evidence string without file:line pattern counts as weak."""
+        tasks = self._make_tasks(1)
+        # Evidence with no filename.ext:N pattern
+        entry = self._pass_entry("AC-1", evidence="the feature was implemented correctly")
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        # One weak evidence entry out of one total = 0% strong < 80% threshold → block
+        assert not is_valid
+        assert any("evidence depth" in r for r in block_reasons)
+
+    def test_evidence_with_file_line_counts_as_strong(self):
+        """T-003-AC5: Evidence string containing filename.ext:N pattern is strong."""
+        tasks = self._make_tasks(1)
+        entry = self._pass_entry("AC-1", evidence="src/auth.ts:87 — verifies token")
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            [entry], tasks
+        )
+
+        assert is_valid
+        assert not any("evidence depth" in r for r in block_reasons)
+
+    def test_evidence_depth_below_80_percent_blocks(self):
+        """T-003-AC5: < 80% file:line entries causes block_reason for evidence depth."""
+        # 5 ACs, only 3 have strong evidence (60% < 80%)
+        tasks = self._make_tasks(5)
+        entries = [
+            self._pass_entry("AC-1", evidence="src/a.ts:1 — ok"),
+            self._pass_entry("AC-2", evidence="src/b.ts:2 — ok"),
+            self._pass_entry("AC-3", evidence="src/c.ts:3 — ok"),
+            self._pass_entry("AC-4", evidence="just a note with no line ref"),
+            self._pass_entry("AC-5", evidence="another weak note"),
+        ]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            entries, tasks
+        )
+
+        assert not is_valid
+        assert any("evidence depth" in r for r in block_reasons)
+
+    def test_evidence_depth_exactly_80_percent_passes(self):
+        """T-003-AC5: Exactly 80% strong evidence meets the threshold."""
+        # 5 ACs, 4 have strong evidence (80%)
+        tasks = self._make_tasks(5)
+        entries = [
+            self._pass_entry("AC-1", evidence="src/a.ts:1 — ok"),
+            self._pass_entry("AC-2", evidence="src/b.ts:2 — ok"),
+            self._pass_entry("AC-3", evidence="src/c.ts:3 — ok"),
+            self._pass_entry("AC-4", evidence="src/d.ts:4 — ok"),
+            self._pass_entry("AC-5", evidence="weak note only"),
+        ]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            entries, tasks
+        )
+
+        assert is_valid
+        assert not any("evidence depth" in r for r in block_reasons)
+
+    # --- all dimensions pass ---
+
+    def test_all_dimensions_pass_yields_is_valid_true(self):
+        """T-003-AC7: All criteria pass with intent_match=True, ship_ready=True, strong evidence."""
+        tasks = self._make_tasks(2)
+        entries = [
+            self._pass_entry("AC-1", evidence="src/a.ts:10 — impl"),
+            self._pass_entry("AC-2", evidence="src/b.ts:20 — impl"),
+        ]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            entries, tasks
+        )
+
+        assert is_valid
+        assert not missing
+        assert not failed
+        assert not block_reasons
+
+    # --- return signature is 4-tuple ---
+
+    def test_returns_four_tuple(self):
+        """T-003: _validate_criteria_results returns (is_valid, missing, failed, block_reasons)."""
+        tasks = self._make_tasks(1)
+        result = qralph_pipeline._validate_criteria_results(
+            [self._pass_entry("AC-1")], tasks
+        )
+        assert len(result) == 4
+
+
+class TestValidateRequestSatisfactionT003:
+    """T-003: _validate_request_satisfaction blocks finalize on partial/missing fragments."""
+
+    def _make_state(self, fragments: list[dict]) -> dict:
+        return {
+            "request_fragments": fragments,
+        }
+
+    def test_missing_fragment_blocks(self):
+        """T-003-AC6: Fragment with status 'missing' causes a block_reason."""
+        state = self._make_state([
+            {"id": "REQ-F-1", "text": "Build a login page."},
+        ])
+        verify_result = [
+            {"fragment_id": "REQ-F-1", "status": "missing", "evidence": "not found"},
+        ]
+
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, verify_result
+        )
+
+        assert not is_satisfied
+        assert any("REQ-F-1" in r for r in block_reasons)
+        assert any("missing" in r for r in block_reasons)
+
+    def test_partial_fragment_blocks(self):
+        """T-003-AC6: Fragment with status 'partial' causes a block_reason."""
+        state = self._make_state([
+            {"id": "REQ-F-2", "text": "Add JWT authentication."},
+        ])
+        verify_result = [
+            {"fragment_id": "REQ-F-2", "status": "partial", "evidence": "token check missing"},
+        ]
+
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, verify_result
+        )
+
+        assert not is_satisfied
+        assert any("REQ-F-2" in r for r in block_reasons)
+        assert any("partial" in r for r in block_reasons)
+
+    def test_satisfied_fragment_does_not_block(self):
+        """T-003-AC6: Fragment with status 'satisfied' does not cause a block."""
+        state = self._make_state([
+            {"id": "REQ-F-1", "text": "Deploy to Cloudflare."},
+        ])
+        verify_result = [
+            {"fragment_id": "REQ-F-1", "status": "satisfied", "evidence": "wrangler.ts:5"},
+        ]
+
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, verify_result
+        )
+
+        assert is_satisfied
+        assert not block_reasons
+
+    def test_no_fragments_in_state_skips_check(self):
+        """T-003-AC6: When state has no request_fragments, check is skipped (returns True)."""
+        state = {}
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, None
+        )
+        assert is_satisfied
+        assert not block_reasons
+
+    def test_verify_result_none_with_fragments_treats_all_as_missing(self):
+        """T-003-AC6: None verify_result when fragments exist → all fragments missing."""
+        state = self._make_state([
+            {"id": "REQ-F-1", "text": "Build a login page."},
+            {"id": "REQ-F-2", "text": "Add JWT authentication."},
+        ])
+
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, None
+        )
+
+        assert not is_satisfied
+        assert len(block_reasons) == 2
+
+    def test_multiple_failing_fragments_all_surfaced(self):
+        """T-003-AC7: Multiple partial/missing fragments all appear in block_reasons."""
+        state = self._make_state([
+            {"id": "REQ-F-1", "text": "Feature A."},
+            {"id": "REQ-F-2", "text": "Feature B."},
+            {"id": "REQ-F-3", "text": "Feature C."},
+        ])
+        verify_result = [
+            {"fragment_id": "REQ-F-1", "status": "satisfied", "evidence": "impl.ts:1"},
+            {"fragment_id": "REQ-F-2", "status": "partial", "evidence": "half done"},
+            {"fragment_id": "REQ-F-3", "status": "missing", "evidence": "not found"},
+        ]
+
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, verify_result
+        )
+
+        assert not is_satisfied
+        assert len(block_reasons) == 2
+        assert any("REQ-F-2" in r for r in block_reasons)
+        assert any("REQ-F-3" in r for r in block_reasons)
+
+
+class TestCmdVerifyPromptT003:
+    """T-003: cmd_verify() prompt includes 3-dimension grading and quality bar language."""
+
+    def _make_state(self, tmp_path: Path) -> tuple[dict, Path]:
+        project_path = tmp_path / "003-test-verify"
+        project_path.mkdir()
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        state = {
+            "project_id": "003-test-verify",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Build a login page. Add JWT authentication.",
+            "request_fragments": [
+                {"id": "REQ-F-1", "text": "Build a login page."},
+                {"id": "REQ-F-2", "text": "Add JWT authentication."},
+            ],
+        }
+        return state, project_path
+
+    def _get_verify_prompt(self, state: dict, project_path: Path, tasks: list | None = None) -> str:
+        """Write manifest, run cmd_verify, return the agent prompt."""
+        manifest = {"tasks": tasks or [], "request": state["request"]}
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline, "_safe_project_path", return_value=project_path):
+            result = qralph_pipeline.cmd_verify()
+        return result["agent"]["prompt"]
+
+    def test_prompt_contains_intent_match_field(self, tmp_path):
+        """T-003-AC1: criteria_results schema includes intent_match field."""
+        state, project_path = self._make_state(tmp_path)
+        tasks = [{"id": "task-1", "summary": "Build login", "files": ["app.ts"],
+                  "acceptance_criteria": ["Login form renders"]}]
+        prompt = self._get_verify_prompt(state, project_path, tasks=tasks)
+        assert "intent_match" in prompt
+
+    def test_prompt_contains_ship_ready_field(self, tmp_path):
+        """T-003-AC1: criteria_results schema includes ship_ready field."""
+        state, project_path = self._make_state(tmp_path)
+        tasks = [{"id": "task-1", "summary": "Build login", "files": ["app.ts"],
+                  "acceptance_criteria": ["Login form renders"]}]
+        prompt = self._get_verify_prompt(state, project_path, tasks=tasks)
+        assert "ship_ready" in prompt
+
+    def test_prompt_contains_stub_placeholder_fail_language(self, tmp_path):
+        """T-003-AC2: Prompt includes anti-rubber-stamp language about stubs/placeholders."""
+        state, project_path = self._make_state(tmp_path)
+        prompt = self._get_verify_prompt(state, project_path)
+        assert "stub" in prompt.lower()
+        assert "placeholder" in prompt.lower()
+        assert "FAIL" in prompt
+
+    def test_prompt_contains_did_we_deliver_question(self, tmp_path):
+        """T-003-AC3: Prompt instructs verifier to re-read original request and ask intent question."""
+        state, project_path = self._make_state(tmp_path)
+        prompt = self._get_verify_prompt(state, project_path)
+        assert "what this person wanted" in prompt.lower() or "did we deliver" in prompt.lower()
+
+    def test_prompt_contains_amazon_apple_quality_bar(self, tmp_path):
+        """T-003-AC2: Prompt references Amazon/Apple engineer quality bar."""
+        state, project_path = self._make_state(tmp_path)
+        prompt = self._get_verify_prompt(state, project_path)
+        # Quality bar language appears either in the verify prompt body or via QUALITY_STANDARD
+        assert "Amazon" in prompt or "apple" in prompt.lower()
+
+
+class TestNextVerifyWaitUnifiedBlockReasonT003:
+    """T-003: _next_verify_wait unifies all block dimensions into one block_reason."""
+
+    def _make_project(self, tmp_path: Path, fragments: list[dict] | None = None) -> tuple[dict, dict, Path]:
+        project_path = tmp_path / "003-vw-test"
+        project_path.mkdir()
+        (project_path / "verification").mkdir()
+
+        state: dict = {
+            "project_id": "003-vw-test",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Build feature X.",
+        }
+        if fragments is not None:
+            state["request_fragments"] = fragments
+
+        pipeline: dict = {
+            "sub_phase": "VERIFY_WAIT",
+            "verify_retries": 0,
+        }
+        return state, pipeline, project_path
+
+    def _write_result(self, project_path: Path, data: dict) -> None:
+        content = "```json\n" + json.dumps(data) + "\n```"
+        (project_path / "verification" / "result.md").write_text(content)
+
+    def _make_manifest(self, project_path: Path, n_acs: int = 1) -> None:
+        tasks = [{
+            "id": f"task-{i + 1}",
+            "summary": f"Task {i + 1}",
+            "files": ["file.ts"],
+            "acceptance_criteria": [f"Criterion {i + 1}"],
+        } for i in range(n_acs)]
+        (project_path / "manifest.json").write_text(json.dumps({"tasks": tasks}))
+
+    def test_block_reason_includes_detail_when_intent_match_false(self, tmp_path):
+        """T-003-AC7: block_reason surfaces intent_match failure with specific detail."""
+        state, pipeline, project_path = self._make_project(tmp_path)
+        self._make_manifest(project_path, n_acs=1)
+        self._write_result(project_path, {
+            "verdict": "PASS",
+            "criteria_results": [{
+                "criterion_index": "AC-1",
+                "criterion": "Criterion 1",
+                "status": "pass",
+                "intent_match": False,
+                "ship_ready": True,
+                "evidence": "src/a.ts:10 — impl",
+            }],
+            "request_satisfaction": [],
+            "quality_gate": "pass",
+            "issues": [],
+        })
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "safe_read_json",
+                               side_effect=lambda p, d: json.loads((project_path / p.name).read_text()) if p.exists() else d):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+
+        assert result.get("action") != "advance"
+        # Should block — extract error message
+        error_msg = result.get("error", result.get("message", result.get("technical_detail", "")))
+        assert "intent_match" in error_msg
+
+    def test_partial_request_fragment_blocks_finalize(self, tmp_path):
+        """T-003-AC6: partial REQ-F-N fragment causes _next_verify_wait to block."""
+        fragments = [{"id": "REQ-F-1", "text": "Build login page."}]
+        state, pipeline, project_path = self._make_project(tmp_path, fragments=fragments)
+        self._make_manifest(project_path, n_acs=0)
+        self._write_result(project_path, {
+            "verdict": "PASS",
+            "criteria_results": [],
+            "request_satisfaction": [
+                {"fragment_id": "REQ-F-1", "status": "partial", "evidence": "half done"},
+            ],
+            "quality_gate": "pass",
+            "issues": [],
+        })
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "safe_read_json",
+                               side_effect=lambda p, d: json.loads((project_path / p.name).read_text()) if p.exists() else d):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+
+        error_msg = result.get("error", result.get("message", result.get("technical_detail", "")))
+        assert "REQ-F-1" in error_msg or result.get("action") not in ("finalize", None)
+
+    def test_missing_request_fragment_blocks_finalize(self, tmp_path):
+        """T-003-AC6: missing REQ-F-N fragment causes _next_verify_wait to block."""
+        fragments = [{"id": "REQ-F-1", "text": "Deploy to Cloudflare."}]
+        state, pipeline, project_path = self._make_project(tmp_path, fragments=fragments)
+        self._make_manifest(project_path, n_acs=0)
+        self._write_result(project_path, {
+            "verdict": "PASS",
+            "criteria_results": [],
+            "request_satisfaction": [
+                {"fragment_id": "REQ-F-1", "status": "missing", "evidence": "not found"},
+            ],
+            "quality_gate": "pass",
+            "issues": [],
+        })
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "safe_read_json",
+                               side_effect=lambda p, d: json.loads((project_path / p.name).read_text()) if p.exists() else d):
+            result = qralph_pipeline._next_verify_wait(state, pipeline, project_path)
+
+        error_msg = result.get("error", result.get("message", result.get("technical_detail", "")))
+        assert "REQ-F-1" in error_msg or result.get("action") not in ("finalize", None)
+
+
+class TestPolishReviewRetriesT004:
+    """T-004: POLISH phase enforces completeness — NEEDS_ATTENTION triggers retry, not silent advance."""
+
+    def _make_polish_review_state(
+        self,
+        tmp_path: Path,
+        *,
+        verdict: str = "NEEDS_ATTENTION",
+        retry_count: int = 0,
+    ) -> tuple[dict, dict, Path]:
+        """Create minimal state for _next_polish_review tests."""
+        project_path = tmp_path / "004-polish-retry-test"
+        project_path.mkdir(parents=True)
+        (project_path / "agent-outputs").mkdir()
+        (project_path / "verification").mkdir()
+
+        state: dict = {
+            "project_id": "004-polish-retry-test",
+            "project_path": str(project_path),
+            "request": "Build feature X with tests.",
+            "mode": "thorough",
+            "phase": "POLISH",
+        }
+        pipeline: dict = {
+            "sub_phase": "POLISH_REVIEW",
+            "polish_verdict": verdict,
+            "polish_retry_count": retry_count,
+        }
+        return state, pipeline, project_path
+
+    def _write_needs_attention_report(self, project_path: Path, content: str | None = None) -> None:
+        """Write a POLISH-REPORT.md that triggers NEEDS_ATTENTION verdict."""
+        if content is None:
+            content = (
+                "# Polish Report\n\n"
+                "## bug_fixer\n"
+                "P1: Missing null check in handler. Fix required.\n\n"
+                "## requirements_tracer\n"
+                "Missing coverage for REQ-101. No test found.\n\n"
+                "## Verdict: NEEDS_ATTENTION\n"
+            )
+        (project_path / "POLISH-REPORT.md").write_text(content)
+
+    def _write_clean_report(self, project_path: Path) -> None:
+        """Write a POLISH-REPORT.md with a CLEAN verdict."""
+        (project_path / "POLISH-REPORT.md").write_text(
+            "# Polish Report\n\nAll checks passed.\n\n## Verdict: CLEAN\n"
+        )
+
+    # ── AC1: NEEDS_ATTENTION triggers retry, not advance to VERIFY ────────────
+
+    def test_needs_attention_first_retry_spawns_polish_agents(self, tmp_path):
+        """T-004-AC1: First NEEDS_ATTENTION triggers re-spawn of POLISH agents."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=0
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert result["action"] == "spawn_agents", (
+            f"Expected spawn_agents for first NEEDS_ATTENTION retry, got {result['action']!r}"
+        )
+        agent_names = [a["name"] for a in result.get("agents", [])]
+        assert "bug_fixer" in agent_names
+        assert "wiring_agent" in agent_names
+        assert "requirements_tracer" in agent_names
+
+    def test_needs_attention_does_not_advance_to_verify_on_first_retry(self, tmp_path):
+        """T-004-AC1: NEEDS_ATTENTION must not advance to VERIFY on first failure."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=0
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        # Must NOT be an advance to VERIFY
+        assert result.get("phase") != "VERIFY" or result["action"] != "spawn_agents" or (
+            # It's okay to spawn POLISH agents (not VERIFY agents)
+            result.get("agents", [{}])[0].get("name") != "result"
+        ), "Should not advance to VERIFY phase on first NEEDS_ATTENTION"
+
+    def test_needs_attention_increments_retry_counter(self, tmp_path):
+        """T-004-AC1: Retry counter increments on each NEEDS_ATTENTION round."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=0
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert pipeline.get("polish_retry_count") == 1
+
+    def test_needs_attention_second_retry_still_spawns_not_escalates(self, tmp_path):
+        """T-004-AC2: Second NEEDS_ATTENTION (retry_count=1) still spawns, not escalates."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=1
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert result["action"] == "spawn_agents", (
+            f"At retry_count=1 (< cap 2), expected spawn_agents, got {result['action']!r}"
+        )
+
+    # ── AC2: After 2 NEEDS_ATTENTION rounds, escalate to user ─────────────────
+
+    def test_needs_attention_after_cap_escalates_to_user(self, tmp_path):
+        """T-004-AC2: After 2 NEEDS_ATTENTION rounds (retry_count=2), escalate."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=2
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert result["action"] == "escalate_to_user", (
+            f"After cap reached, expected escalate_to_user, got {result['action']!r}"
+        )
+        assert result.get("escalation_type") == "polish_retry_limit"
+
+    def test_escalation_includes_options(self, tmp_path):
+        """T-004-AC2: Escalation includes actionable options for the user."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=2
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        options = result.get("options", [])
+        option_ids = [o["id"] for o in options]
+        assert "retry" in option_ids
+        assert "accept" in option_ids
+        assert "abort" in option_ids
+
+    # ── AC3: Retry logs specific gaps to decisions.log ────────────────────────
+
+    def test_retry_logs_gaps_to_decisions_log(self, tmp_path):
+        """T-004-AC3: POLISH retry logs specific gaps found to decisions.log."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=0
+        )
+        # Report with identifiable gap markers
+        self._write_needs_attention_report(project_path, content=(
+            "# Polish Report\n\n"
+            "## requirements_tracer\n"
+            "Missing coverage for REQ-202.\n\n"
+            "## Verdict: NEEDS_ATTENTION\n"
+        ))
+        log_path = project_path / "decisions.log"
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert log_path.exists(), "decisions.log should be written on POLISH retry"
+        log_content = log_path.read_text()
+        assert "POLISH" in log_content
+        assert "NEEDS_ATTENTION" in log_content
+
+    def test_retry_logs_include_gap_descriptions(self, tmp_path):
+        """T-004-AC3: Gap descriptions (missing tests, wiring issues) appear in decisions.log."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=0
+        )
+        self._write_needs_attention_report(project_path, content=(
+            "# Polish Report\n\n"
+            "## bug_fixer\n"
+            "P0: Critical null pointer. Must fix.\n\n"
+            "## wiring_agent\n"
+            "disconnected module found — not reachable from entry.\n\n"
+            "## Verdict: NEEDS_ATTENTION\n"
+        ))
+        log_path = project_path / "decisions.log"
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        log_content = log_path.read_text()
+        # At least one of the extracted gap categories must appear in the log
+        assert any(kw in log_content.lower() for kw in ["critical", "wiring", "p0", "missing"]), (
+            f"Expected gap descriptions in decisions.log, got:\n{log_content}"
+        )
+
+    # ── AC4: Escalation includes plain-language explanation ───────────────────
+
+    def test_escalation_message_is_plain_language(self, tmp_path):
+        """T-004-AC4: Escalation message explains what POLISH found in plain language."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=2
+        )
+        self._write_needs_attention_report(project_path, content=(
+            "# Polish Report\n\n"
+            "## requirements_tracer\n"
+            "Missing coverage — no test found for REQ-303.\n\n"
+            "## Verdict: NEEDS_ATTENTION\n"
+        ))
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        message = result.get("message", "")
+        # Should reference the retry count and describe what was found
+        assert len(message) > 50, "Escalation message too short to be plain-language"
+        assert "POLISH" in message or "incomplete" in message or "issues" in message, (
+            f"Escalation message should describe POLISH findings. Got: {message!r}"
+        )
+        assert "POLISH-REPORT" in message or "review" in message.lower(), (
+            "Escalation should direct user to the report"
+        )
+
+    def test_escalation_includes_gaps_list(self, tmp_path):
+        """T-004-AC4: Escalation result includes structured list of gaps."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=2
+        )
+        self._write_needs_attention_report(project_path, content=(
+            "# Polish Report\n\n"
+            "## bug_fixer\n"
+            "P1: Off-by-one in loop.\n\n"
+            "## requirements_tracer\n"
+            "missing coverage — REQ-404 has no test.\n\n"
+            "## Verdict: NEEDS_ATTENTION\n"
+        ))
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        gaps = result.get("gaps", [])
+        assert isinstance(gaps, list) and len(gaps) > 0, (
+            "Escalation result should include a non-empty 'gaps' list"
+        )
+
+    # ── AC5: SHIP_IT / CLEAN verdict still advances normally (no regression) ──
+
+    def test_clean_verdict_advances_to_verify(self, tmp_path):
+        """T-004-AC5: CLEAN verdict still advances to VERIFY (no regression)."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="CLEAN", retry_count=0
+        )
+        self._write_clean_report(project_path)
+
+        fake_verifier = {"name": "result", "model": "sonnet", "prompt": "Verify the project."}
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"), \
+             mock.patch.object(qralph_pipeline, "cmd_verify", return_value={
+                 "status": "verify_ready", "agent": fake_verifier,
+             }):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert result["action"] == "spawn_agents", (
+            f"CLEAN verdict should advance to VERIFY via spawn_agents, got {result['action']!r}"
+        )
+        assert result.get("phase") == "VERIFY"
+        assert result["agents"][0]["name"] == "result"
+
+    def test_clean_verdict_resets_retry_counter(self, tmp_path):
+        """T-004-AC5: CLEAN verdict resets polish_retry_count to 0."""
+        state, pipeline, project_path = self._make_polish_review_state(
+            tmp_path, verdict="CLEAN", retry_count=1
+        )
+        self._write_clean_report(project_path)
+
+        fake_verifier = {"name": "result", "model": "sonnet", "prompt": "Verify the project."}
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"), \
+             mock.patch.object(qralph_pipeline, "cmd_verify", return_value={
+                 "status": "verify_ready", "agent": fake_verifier,
+             }):
+            qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert pipeline.get("polish_retry_count") == 0, (
+            "CLEAN verdict should reset polish_retry_count to 0"
+        )
+
+    def test_extract_polish_gaps_detects_missing_coverage(self, tmp_path):
+        """T-004-AC3: _extract_polish_gaps identifies missing coverage markers."""
+        content = "## requirements_tracer\nMissing coverage for REQ-101.\n"
+        gaps = qralph_pipeline._extract_polish_gaps(content)
+        assert any("coverage" in g or "test" in g for g in gaps), (
+            f"Expected coverage/test gap detected, got: {gaps}"
+        )
+
+    def test_extract_polish_gaps_detects_p0_bugs(self, tmp_path):
+        """T-004-AC3: _extract_polish_gaps identifies P0/critical bug markers."""
+        content = "## bug_fixer\nP0: Null dereference in payment handler.\n"
+        gaps = qralph_pipeline._extract_polish_gaps(content)
+        assert any("critical" in g or "P0" in g or "p0" in g.lower() for g in gaps), (
+            f"Expected P0/critical gap detected, got: {gaps}"
+        )
+
+    def test_extract_polish_gaps_detects_wiring_issues(self, tmp_path):
+        """T-004-AC3: _extract_polish_gaps identifies wiring/disconnected code markers."""
+        content = "## wiring_agent\nFound disconnected module — not reachable from entry point.\n"
+        gaps = qralph_pipeline._extract_polish_gaps(content)
+        assert any("wiring" in g or "disconnected" in g for g in gaps), (
+            f"Expected wiring gap detected, got: {gaps}"
+        )
+
+    def test_extract_polish_gaps_returns_fallback_for_unknown(self, tmp_path):
+        """T-004-AC3: _extract_polish_gaps returns a fallback message for unrecognized content."""
+        content = "## bug_fixer\nSomething is wrong but unspecified.\n"
+        gaps = qralph_pipeline._extract_polish_gaps(content)
+        assert len(gaps) > 0, "Should always return at least one gap description"
+
+
+class TestQualityBarEnforcement:
+    """T-005: Canonical acceptance tests proving the quality bar cannot be bypassed."""
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _make_execute_task(self) -> tuple[dict, dict]:
+        task = {
+            "id": "T1",
+            "summary": "Build the feature",
+            "description": "Implement it completely.",
+            "files": ["src/feature.ts"],
+            "acceptance_criteria": ["Feature works end-to-end"],
+            "tests_needed": True,
+        }
+        manifest = {"request": "Build the feature.", "quality_gate_cmd": "npm test"}
+        return task, manifest
+
+    def _make_verify_state(self, tmp_path: Path) -> tuple[dict, Path]:
+        project_path = tmp_path / "t005-verify"
+        project_path.mkdir()
+        (project_path / "execution-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        state = {
+            "project_id": "t005-verify",
+            "project_path": str(project_path),
+            "phase": "VERIFY",
+            "request": "Build a login page with authentication.",
+            "request_fragments": [
+                {"id": "REQ-F-1", "text": "Build a login page."},
+                {"id": "REQ-F-2", "text": "Add authentication."},
+            ],
+        }
+        return state, project_path
+
+    def _make_polish_state(
+        self,
+        tmp_path: Path,
+        *,
+        verdict: str = "NEEDS_ATTENTION",
+        retry_count: int = 0,
+    ) -> tuple[dict, dict, Path]:
+        project_path = tmp_path / "t005-polish"
+        project_path.mkdir(parents=True)
+        (project_path / "agent-outputs").mkdir()
+        (project_path / "verification").mkdir()
+        state: dict = {
+            "project_id": "t005-polish",
+            "project_path": str(project_path),
+            "request": "Build feature X with tests.",
+            "mode": "thorough",
+            "phase": "POLISH",
+        }
+        pipeline: dict = {
+            "sub_phase": "POLISH_REVIEW",
+            "polish_verdict": verdict,
+            "polish_retry_count": retry_count,
+        }
+        return state, pipeline, project_path
+
+    def _write_needs_attention_report(self, project_path: Path) -> None:
+        (project_path / "POLISH-REPORT.md").write_text(
+            "# Polish Report\n\n"
+            "## bug_fixer\n"
+            "P1: Missing null check.\n\n"
+            "## Verdict: NEEDS_ATTENTION\n"
+        )
+
+    # ── 1: QUALITY_STANDARD in execute prompt ─────────────────────────────────
+
+    def test_quality_standard_injected_in_execution_prompt(self):
+        """T-005-AC1: QUALITY_STANDARD substring appears in execution agent prompts."""
+        task, manifest = self._make_execute_task()
+        prompt = qralph_pipeline._generate_execute_agent_prompt(task, manifest)
+        assert qralph_pipeline.QUALITY_STANDARD in prompt, (
+            "QUALITY_STANDARD must be injected into execution agent prompts via "
+            "_inject_quality_standard; found it absent"
+        )
+
+    # ── 2: QUALITY_STANDARD in verify prompt ──────────────────────────────────
+
+    def test_quality_standard_injected_in_verify_prompt(self, tmp_path):
+        """T-005-AC2: QUALITY_STANDARD appears in the prompt produced by cmd_verify."""
+        state, project_path = self._make_verify_state(tmp_path)
+        manifest = {"tasks": [], "request": state["request"]}
+        (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline, "_safe_project_path", return_value=project_path):
+            result = qralph_pipeline.cmd_verify()
+
+        prompt = result["agent"]["prompt"]
+        assert qralph_pipeline.QUALITY_STANDARD in prompt, (
+            "QUALITY_STANDARD must appear in the verify agent prompt"
+        )
+
+    # ── 3: QUALITY_STANDARD in quality loop prompt ────────────────────────────
+
+    def test_quality_standard_injected_in_quality_loop_prompt(self):
+        """T-005-AC3: QUALITY_STANDARD appears in _generate_quality_review_prompt output."""
+        prompt = qralph_pipeline._generate_quality_review_prompt(
+            "code-reviewer",
+            "Senior Code Reviewer",
+            "Build a login page.",
+            Path("/tmp/proj"),
+            {"tasks": []},
+        )
+        assert qralph_pipeline.QUALITY_STANDARD in prompt, (
+            "QUALITY_STANDARD must be injected into quality loop review prompts"
+        )
+
+    # ── 4: QUALITY_STANDARD in POLISH agent prompts ───────────────────────────
+
+    def test_quality_standard_injected_in_polish_prompt(self, tmp_path):
+        """T-005-AC4: QUALITY_STANDARD appears in POLISH agent prompts from _next_polish_run."""
+        state, pipeline, project_path = self._make_polish_state(tmp_path)
+        (project_path / "manifest.json").write_text(json.dumps({"tasks": []}))
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "safe_read_json",
+                               return_value={"tasks": []}), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_run(state, pipeline, project_path)
+
+        agents = result.get("agents", [])
+        assert agents, "Expected spawn_agents result with at least one agent"
+        for agent in agents:
+            assert qralph_pipeline.QUALITY_STANDARD in agent["prompt"], (
+                f"QUALITY_STANDARD missing from POLISH agent '{agent['name']}' prompt"
+            )
+
+    # ── 5: _validate_criteria_results catches intent_match=false ──────────────
+
+    def test_validate_catches_intent_mismatch(self):
+        """T-005-AC5: _validate_criteria_results with intent_match=false returns FAIL."""
+        manifest_tasks = [{
+            "id": "T1",
+            "acceptance_criteria": ["Login form renders"],
+        }]
+        criteria_results = [{
+            "criterion_index": "AC-1",
+            "criterion": "Login form renders",
+            "status": "pass",
+            "intent_match": False,
+            "ship_ready": True,
+            "evidence": "src/login.ts:10 — form element",
+        }]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            criteria_results, manifest_tasks
+        )
+
+        assert not is_valid, "intent_match=false must result in is_valid=False"
+        assert any("intent_match" in r for r in block_reasons), (
+            f"block_reasons should mention intent_match. Got: {block_reasons}"
+        )
+
+    # ── 6: _validate_criteria_results catches ship_ready=false ────────────────
+
+    def test_validate_catches_not_ship_ready(self):
+        """T-005-AC6: _validate_criteria_results with ship_ready=false returns FAIL."""
+        manifest_tasks = [{
+            "id": "T1",
+            "acceptance_criteria": ["Feature complete"],
+        }]
+        criteria_results = [{
+            "criterion_index": "AC-1",
+            "criterion": "Feature complete",
+            "status": "pass",
+            "intent_match": True,
+            "ship_ready": False,
+            "evidence": "src/feature.ts:5 — stub implementation",
+        }]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            criteria_results, manifest_tasks
+        )
+
+        assert not is_valid, "ship_ready=false must result in is_valid=False"
+        assert any("ship_ready" in r for r in block_reasons), (
+            f"block_reasons should mention ship_ready. Got: {block_reasons}"
+        )
+
+    # ── 7: _validate_request_satisfaction catches missing fragment ────────────
+
+    def test_validate_catches_missing_fragment(self):
+        """T-005-AC7: _validate_request_satisfaction with status='missing' returns block."""
+        state = {
+            "request_fragments": [
+                {"id": "REQ-F-1", "text": "Build the login page with real auth."},
+            ]
+        }
+        verify_result = [
+            {"fragment_id": "REQ-F-1", "status": "missing", "evidence": "not implemented"},
+        ]
+
+        is_satisfied, block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, verify_result
+        )
+
+        assert not is_satisfied, "status='missing' must result in is_satisfied=False"
+        assert any("REQ-F-1" in r for r in block_reasons), (
+            f"block_reasons must name the missing fragment. Got: {block_reasons}"
+        )
+
+    # ── 8: _validate_* passes when all dimensions are clean ───────────────────
+
+    def test_validate_passes_full_quality(self):
+        """T-005-AC8: All dimensions pass yields is_valid=True and is_satisfied=True."""
+        manifest_tasks = [{
+            "id": "T1",
+            "acceptance_criteria": ["Login form renders"],
+        }]
+        criteria_results = [{
+            "criterion_index": "AC-1",
+            "criterion": "Login form renders",
+            "status": "pass",
+            "intent_match": True,
+            "ship_ready": True,
+            "evidence": "src/login.ts:42 — complete form element with validation",
+        }]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            criteria_results, manifest_tasks
+        )
+
+        assert is_valid, f"All dimensions pass must yield is_valid=True. Got block_reasons: {block_reasons}"
+        assert not missing
+        assert not failed
+        assert not block_reasons
+
+        state = {
+            "request_fragments": [
+                {"id": "REQ-F-1", "text": "Build the login page."},
+            ]
+        }
+        verify_result = [
+            {"fragment_id": "REQ-F-1", "status": "satisfied", "evidence": "src/login.ts:1"},
+        ]
+        is_satisfied, sat_block_reasons = qralph_pipeline._validate_request_satisfaction(
+            state, verify_result
+        )
+
+        assert is_satisfied, (
+            f"Satisfied fragment must yield is_satisfied=True. Got: {sat_block_reasons}"
+        )
+        assert not sat_block_reasons
+
+    # ── 9: evidence depth flags weak evidence ─────────────────────────────────
+
+    def test_evidence_depth_flags_weak(self):
+        """T-005-AC9: Evidence without file:line pattern is flagged as weak."""
+        manifest_tasks = [{
+            "id": "T1",
+            "acceptance_criteria": ["Feature works"],
+        }]
+        # All 5 entries use vague evidence (no file:line pattern like 'foo.ts:42')
+        criteria_results = [
+            {
+                "criterion_index": "AC-1",
+                "criterion": "Feature works",
+                "status": "pass",
+                "intent_match": True,
+                "ship_ready": True,
+                "evidence": f"I checked and it seems fine — entry {i}",
+            }
+            for i in range(5)
+        ]
+
+        is_valid, missing, failed, block_reasons = qralph_pipeline._validate_criteria_results(
+            criteria_results, manifest_tasks
+        )
+
+        # AC-1 is covered, no failures — but evidence is weak
+        assert not is_valid, (
+            "Weak evidence (no file:line) should cause is_valid=False via evidence depth check"
+        )
+        assert any("evidence" in r.lower() for r in block_reasons), (
+            f"block_reasons should mention evidence depth. Got: {block_reasons}"
+        )
+
+    # ── 10: _fragment_request splits correctly ────────────────────────────────
+
+    def test_fragment_request_splits_correctly(self):
+        """T-005-AC10: _fragment_request handles sentences, numbered lists, and edge cases."""
+        # Sentence splitting
+        result = qralph_pipeline._fragment_request(
+            "Build a login page. Add JWT authentication. Deploy to Cloudflare."
+        )
+        assert len(result) >= 2, f"Should split multi-sentence request into fragments. Got: {result}"
+        assert all(isinstance(r, tuple) and len(r) == 2 for r in result), (
+            "Each fragment must be a (REQ-F-N, text) tuple"
+        )
+        assert all(r[0].startswith("REQ-F-") for r in result), (
+            "Fragment IDs must start with REQ-F-"
+        )
+
+        # Numbered list splitting
+        numbered = qralph_pipeline._fragment_request(
+            "1. Add user authentication\n2. Build a dashboard\n3. Deploy to production"
+        )
+        assert len(numbered) >= 2, (
+            f"Numbered list items should each become a fragment. Got: {numbered}"
+        )
+
+        # Edge case: very short input returns empty list
+        short = qralph_pipeline._fragment_request("Fix it")
+        assert short == [], f"Short input (<20 chars) must return empty list. Got: {short}"
+
+        # Edge case: empty string
+        empty = qralph_pipeline._fragment_request("")
+        assert empty == [], f"Empty input must return empty list. Got: {empty}"
+
+    # ── 11: NEEDS_ATTENTION triggers retry, not advance to VERIFY ─────────────
+
+    def test_polish_needs_attention_retries(self, tmp_path):
+        """T-005-AC11: NEEDS_ATTENTION verdict triggers retry (spawn_agents), not advance to VERIFY."""
+        state, pipeline, project_path = self._make_polish_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=0
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert result["action"] == "spawn_agents", (
+            f"NEEDS_ATTENTION must trigger spawn_agents (retry), not advance. Got: {result['action']!r}"
+        )
+        # Must not advance to VERIFY — agents should be POLISH agents, not the 'result' verifier
+        agent_names = [a["name"] for a in result.get("agents", [])]
+        assert "result" not in agent_names, (
+            "NEEDS_ATTENTION retry must not spawn a 'result' verifier (VERIFY advance)"
+        )
+        assert result.get("phase") != "VERIFY" or "bug_fixer" in agent_names, (
+            "If phase is VERIFY, it means a premature advance occurred"
+        )
+
+    # ── 12: Escalates to user after max retries ───────────────────────────────
+
+    def test_polish_escalates_after_max_retries(self, tmp_path):
+        """T-005-AC12: After 2 NEEDS_ATTENTION rounds, escalates to user (not infinite retry)."""
+        state, pipeline, project_path = self._make_polish_state(
+            tmp_path, verdict="NEEDS_ATTENTION", retry_count=qralph_pipeline._POLISH_RETRY_CAP
+        )
+        self._write_needs_attention_report(project_path)
+
+        with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+             mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+             mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock"):
+            result = qralph_pipeline._next_polish_review(state, pipeline, project_path)
+
+        assert result["action"] == "escalate_to_user", (
+            f"After {qralph_pipeline._POLISH_RETRY_CAP} NEEDS_ATTENTION rounds, "
+            f"must escalate_to_user. Got: {result['action']!r}"
+        )
+        assert result.get("escalation_type") == "polish_retry_limit", (
+            f"escalation_type must be 'polish_retry_limit'. Got: {result.get('escalation_type')!r}"
+        )
 
 
 if __name__ == "__main__":

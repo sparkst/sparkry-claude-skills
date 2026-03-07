@@ -1,5 +1,15 @@
 # QRALPH Changelog
 
+## v6.6.3 (2026-03-06)
+
+### Added — Quality Bar Enforcement (Project 045)
+- **QUALITY_STANDARD constant**: Module-level production quality bar injected into every agent prompt (6 points: execution, verify, quality loop, 3 POLISH agents). Includes anti-shortcut patterns preventing AI from assuming speed over quality.
+- **Request fragmentation**: `_fragment_request()` splits user requests into numbered REQ-F-N tuples at sentence/clause boundaries, numbered lists, semicolons. Stored in pipeline state at plan time so dropped requirements cannot escape detection.
+- **3-dimension verification**: Every AC graded on IMPLEMENTED + INTENT_MATCH + SHIP_READY. Verifier must ask: "Did we deliver what this person wanted, or what was convenient?"
+- **Hard structural enforcement**: `intent_match=false` or `ship_ready=false` is a hard FAIL. Evidence depth must be 80%+ strong (file:line references). Missing/partial request fragments block finalization.
+- **POLISH retry enforcement**: NEEDS_ATTENTION verdict triggers retry (cap: 2) with gap logging to decisions.log. After cap, escalates to user with plain-language explanation instead of silently advancing.
+- **12 canonical tests** proving the quality bar cannot be bypassed. 469 total tests passing.
+
 ## v6.6.2 (2026-03-05)
 
 ### Fixed — Pipeline Determinism (COE from Project 019)

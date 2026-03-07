@@ -125,6 +125,54 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
 
 __version__ = "6.6.2"
 
+QUALITY_STANDARD = """
+## Quality Standard
+
+You are expected to deliver production-quality work. The following rules are non-negotiable:
+
+- No stubs, placeholders, TODOs, or "for now" implementations. Every piece of code must be complete and correct.
+- No descoping of requirements without explicit escalation to the user. If something is hard, solve it — do not quietly drop it.
+- No hardcoded workarounds. Implement real solutions only.
+- Complete error handling. Every failure path must be handled with real behavior, not mocks or silent failures.
+- Anti-shortcut patterns:
+  - Never assume the user wants speed over quality.
+  - Never silently drop requirements.
+  - Never accept a partial implementation as done.
+  - Never leave a known bug because it "doesn't matter right now."
+- If you find yourself writing a workaround or deferring something, stop and solve it properly.
+
+Good-enough is not good enough. Would a senior engineer at Amazon stake their name on this?
+""".strip()
+
+
+def _inject_quality_standard(prompt: str) -> str:
+    """Append the QUALITY_STANDARD section to any agent prompt."""
+    return prompt + "\n\n" + QUALITY_STANDARD
+
+
+def _fragment_request(request_text: str) -> list[tuple[str, str]]:
+    """Split a user request into numbered (REQ-F-N, text) tuples.
+
+    Splits on sentence boundaries (. ! ?), numbered list items (1. 2. etc),
+    semicolons, and line breaks preceded by dashes or bullets. Filters out
+    conversational filler (fragments < 10 chars). Returns an empty list for
+    very short requests (< 20 chars total).
+    """
+    if not request_text or len(request_text.strip()) < 20:
+        return []
+
+    # Normalize and insert NUL as a split sentinel at each delimiter
+    text = request_text.strip().replace("\r\n", "\n").replace("\r", "\n")
+    sep = "\x00"
+    text = re.sub(r'(?m)^(\d+[.)]\s+)', sep + r'\1', text)       # numbered list items
+    text = re.sub(r'(?m)^([-*•]\s+)', sep + r'\1', text)          # bullet/dash items
+    text = re.sub(r'([.!?])\s+(?=[A-Z\-\*•\d])', r'\1' + sep, text)  # sentence endings
+    text = re.sub(r';\s*', sep, text)                              # semicolons
+
+    meaningful = [p for p in (p.strip() for p in text.split(sep)) if len(p) >= 10]
+    return [(f"REQ-F-{i + 1}", frag) for i, frag in enumerate(meaningful)]
+
+
 PROJECT_ROOT = Path.cwd()
 QRALPH_DIR = PROJECT_ROOT / ".qralph"
 PROJECTS_DIR = QRALPH_DIR / "projects"
@@ -577,21 +625,27 @@ def _parse_criteria_results(content: str) -> Optional[list]:
     return _extract(content)
 
 
+_EVIDENCE_FILE_LINE_RE = re.compile(r'\w+\.\w+:\d+')
+
+
 def _validate_criteria_results(
     criteria_results: Optional[list],
     manifest_tasks: list,
-) -> tuple[bool, list, list]:
+) -> tuple[bool, list, list, list]:
     """Cross-reference criteria_results against every acceptance criterion in the manifest.
 
-    Returns (is_valid, missing_criteria, failed_criteria).
+    Returns (is_valid, missing_criteria, failed_criteria, block_reasons).
 
     - missing_criteria: AC indices (e.g. "AC-3") present in manifest but absent from results.
-    - failed_criteria: criterion labels from results where status is not 'pass'.
+    - failed_criteria: criterion labels from results where status is not 'pass',
+      intent_match is false, or ship_ready is false.
+    - block_reasons: human-readable strings describing each failure dimension.
     - is_valid is True only when criteria_results is present, every manifest AC appears
-      in the results, and no result has a non-pass status.
+      in the results, no result has a non-pass status, all intent_match and ship_ready
+      flags are true, and evidence depth meets the 80% file:line threshold.
 
     When the manifest has no acceptance criteria at all, criteria_results is not
-    required and the function returns (True, [], []).
+    required and the function returns (True, [], [], []).
     """
     # Enumerate all acceptance criteria from the manifest
     all_criteria: list[str] = []
@@ -601,40 +655,153 @@ def _validate_criteria_results(
 
     # No ACs defined — nothing to validate
     if not all_criteria:
-        return True, [], []
+        return True, [], [], []
 
     # criteria_results absent when ACs exist — all are missing
     if criteria_results is None:
         missing = [f"AC-{i + 1}" for i in range(len(all_criteria))]
-        return False, missing, []
+        return False, missing, [], [f"criteria_results missing for: {', '.join(missing)}"]
 
     # Build a lookup of what the verifier covered (by index label or criterion text)
     covered_indices: set[str] = set()
     failed: list[str] = []
+    block_reasons: list[str] = []
+    total_evidence = 0
+    strong_evidence = 0
+
     for entry in criteria_results:
         if not isinstance(entry, dict):
             continue
         idx = entry.get("criterion_index", "")
         label = entry.get("criterion", "")
         status = str(entry.get("status", "")).lower()
+        intent_match = entry.get("intent_match")
+        ship_ready = entry.get("ship_ready")
+        evidence = str(entry.get("evidence", ""))
+        display = idx or label or str(entry)
+
         if idx:
             covered_indices.add(str(idx))
         # Also accept plain "AC-N" in the criterion text
         for part in str(label).split():
             if re.match(r'AC-\d+', part, re.IGNORECASE):
                 covered_indices.add(part.upper())
+
+        # Status check
         if status not in ("pass", "passed"):
-            display = idx or label or str(entry)
             failed.append(display)
+            block_reasons.append(f"{display}: status={status!r}")
+        else:
+            # Only apply intent_match / ship_ready / evidence checks to passing criteria
+            # so that failed criteria don't double-count.
+            if intent_match is False:
+                if display not in failed:
+                    failed.append(display)
+                block_reasons.append(
+                    f"{display}: intent_match=false — implementation may satisfy the literal AC "
+                    "wording but missed what the user actually meant"
+                )
+            if ship_ready is False:
+                if display not in failed:
+                    failed.append(display)
+                block_reasons.append(
+                    f"{display}: ship_ready=false — contains stub, TODO, placeholder, partial "
+                    "implementation, or hardcoded workaround; not production-quality"
+                )
 
-    missing: list[str] = []
-    for i in range(len(all_criteria)):
-        label = f"AC-{i + 1}"
-        if label not in covered_indices:
-            missing.append(label)
+        # Evidence depth tracking (applies to all entries)
+        if evidence:
+            total_evidence += 1
+            if _EVIDENCE_FILE_LINE_RE.search(evidence):
+                strong_evidence += 1
 
-    is_valid = not missing and not failed
-    return is_valid, missing, failed
+    missing = [f"AC-{i + 1}" for i in range(len(all_criteria)) if f"AC-{i + 1}" not in covered_indices]
+
+    if missing:
+        block_reasons.append(f"missing results for: {', '.join(missing)}")
+
+    # Evidence depth check: at least 80% of entries must have file:line references
+    if total_evidence > 0:
+        strength_ratio = strong_evidence / total_evidence
+        if strength_ratio < 0.8:
+            weak_count = total_evidence - strong_evidence
+            block_reasons.append(
+                f"evidence depth too weak: {weak_count}/{total_evidence} entries lack file:line "
+                f"references (need ≥80% with 'filename.ext:N' pattern, got "
+                f"{strength_ratio:.0%})"
+            )
+
+    is_valid = not block_reasons
+    return is_valid, missing, failed, block_reasons
+
+
+def _parse_request_satisfaction(content: str) -> Optional[list]:
+    """Extract request_satisfaction array from verification JSON output.
+
+    Returns the list if found, or None when the key is absent.
+    Mirrors the _parse_criteria_results strategy (json block, then raw JSON).
+    """
+    def _extract(text: str) -> Optional[list]:
+        try:
+            data = json.loads(text)
+            if "request_satisfaction" in data:
+                val = data["request_satisfaction"]
+                return val if isinstance(val, list) else None
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        return None
+
+    # Try 1: JSON code block
+    block_match = re.search(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
+    if block_match:
+        result = _extract(block_match.group(1))
+        if result is not None:
+            return result
+
+    # Try 2: raw JSON (entire content)
+    return _extract(content)
+
+
+def _validate_request_satisfaction(
+    state: dict,
+    verify_result: Optional[list],
+) -> tuple[bool, list]:
+    """Check that every REQ-F-N fragment is fully satisfied.
+
+    Returns (is_satisfied, block_reasons).
+
+    - is_satisfied: True only when every fragment in state['request_fragments']
+      has status 'satisfied' in verify_result.
+    - block_reasons: human-readable strings for each partial or missing fragment.
+
+    When state has no request_fragments this check is skipped (returns True, []).
+    When verify_result is None but fragments exist, all are treated as missing.
+    """
+    stored_fragments: list[dict] = state.get("request_fragments", [])
+    if not stored_fragments:
+        return True, []
+
+    # Build lookup by fragment_id
+    satisfaction_by_id: dict[str, str] = {}
+    if verify_result:
+        for entry in verify_result:
+            if isinstance(entry, dict):
+                fid = entry.get("fragment_id", "")
+                status = str(entry.get("status", "")).lower()
+                if fid:
+                    satisfaction_by_id[fid] = status
+
+    block_reasons: list[str] = []
+    for frag in stored_fragments:
+        fid = frag.get("id", "")
+        ftext = frag.get("text", "")
+        status = satisfaction_by_id.get(fid, "missing")
+        if status in ("partial", "missing"):
+            block_reasons.append(
+                f"{fid} ({ftext[:60]!r}): status={status!r} — requirement not fully delivered"
+            )
+
+    return not block_reasons, block_reasons
 
 
 def _validate_tasks(tasks: list) -> list[str]:
@@ -1632,6 +1799,18 @@ def cmd_plan(request: str, target_dir: Optional[str] = None, mode: str = "thorou
         suggested, scores = suggest_template(request)
         template = TASK_TEMPLATES[suggested]
 
+        # Fragment the request for deterministic requirements tracking — stored in state
+        # so they persist across all phases and retries without re-parsing.
+        request_fragments = _fragment_request(request)
+        state["request_fragments"] = [
+            {"id": frag_id, "text": frag_text}
+            for frag_id, frag_text in request_fragments
+        ]
+        _log_decision(
+            project_path,
+            f"FRAGMENTS: {len(request_fragments)} requirement fragments extracted"
+        )
+
         # ── Fast-track: trivial tasks skip multi-agent planning ──────────────────
         if estimated_sp < 0.2:
             agent_config = generate_plan_agent_prompt(
@@ -2038,7 +2217,7 @@ def _generate_execute_agent_prompt(task: dict, manifest: dict) -> str:
         "4. Any issues or concerns\n"
     )
 
-    return prompt
+    return _inject_quality_standard(prompt)
 
 
 def cmd_execute_collect() -> dict:
@@ -2139,6 +2318,9 @@ def cmd_verify() -> dict:
 
     quality_gate = manifest.get("quality_gate_cmd", "")
 
+    # Load request fragments stored at plan time for deterministic coverage tracking
+    stored_fragments: list[dict] = state.get("request_fragments", [])
+
     working_dir = manifest.get("target_directory", state.get("target_directory", str(PROJECT_ROOT)))
     prompt = (
         f"You are a fresh-context verification agent. You have NO knowledge of how "
@@ -2154,15 +2336,42 @@ def cmd_verify() -> dict:
     if quality_gate:
         prompt += f"## Quality Gate\nRun: `{quality_gate}`\n\n"
 
+    # Requirements Coverage: list every REQ-F-N fragment the verifier must account for.
+    # Fragments were extracted deterministically at plan time so nothing can be silently dropped.
+    if stored_fragments:
+        frag_lines = [
+            f"- **{frag['id']}**: {frag['text']}"
+            for frag in stored_fragments
+        ]
+        frag_text = "\n".join(frag_lines)
+        prompt += (
+            "## Requirements Coverage\n"
+            "The user's request was decomposed into the following atomic requirement fragments "
+            "at plan time. You MUST account for every fragment — a PASS verdict requires that "
+            "each fragment is satisfied or explicitly documented as out-of-scope with justification.\n\n"
+            f"{frag_text}\n\n"
+        )
+
     # Build the criteria_results schema example from actual AC indices
     if indexed_criteria:
         example_entries = ", ".join(
-            f'{{"criterion_index": "{idx}", "criterion": "{text[:40]}...", "status": "pass", "evidence": "file.ts:42 — <quote>"}}'
+            f'{{"criterion_index": "{idx}", "criterion": "{text[:40]}...", "status": "pass", "intent_match": true, "ship_ready": true, "evidence": "file.ts:42 — <quote>"}}'
             for idx, _, text in indexed_criteria[:2]
         )
         criteria_schema = f"[{example_entries}]"
     else:
         criteria_schema = "[]"
+
+    # Build the request_satisfaction schema example from actual fragments
+    if stored_fragments:
+        sat_examples = stored_fragments[:2]
+        sat_entries = ", ".join(
+            f'{{"fragment_id": "{f["id"]}", "fragment_text": "{f["text"][:50]}...", "status": "satisfied", "evidence": "implemented in <file>"}}'
+            for f in sat_examples
+        )
+        satisfaction_schema = f"[{sat_entries}]"
+    else:
+        satisfaction_schema = "[]"
 
     prompt += (
         "## Your Job\n"
@@ -2170,14 +2379,25 @@ def cmd_verify() -> dict:
         "2. For EACH acceptance criterion above (AC-1, AC-2, …), open the relevant file and\n"
         "   confirm the criterion is met. Record the exact file path and line number as evidence.\n"
         "3. If any criterion cannot be confirmed with file:line evidence, mark it FAIL.\n"
-        "4. Run the quality gate command if provided.\n"
-        "5. Write your findings to verification/result.md using the EXACT JSON block below.\n\n"
-        "IMPORTANT: `verdict` must be 'PASS' only when EVERY criterion has status 'pass'.\n"
-        "A single criterion without file:line evidence MUST be marked 'fail'.\n\n"
+        "4. For EACH requirement fragment (REQ-F-1, REQ-F-2, …), confirm the implementation\n"
+        "   satisfies it. Status must be 'satisfied', 'partial', or 'missing'.\n"
+        "5. Run the quality gate command if provided.\n"
+        "6. After checking all ACs, re-read the Original Request and ask yourself: "
+        "'Did we deliver what this person wanted, or what was convenient?' "
+        "If the implementation satisfied the letter of an AC but missed the user's actual intent, "
+        "set `intent_match` to false for that criterion.\n"
+        "7. Write your findings to verification/result.md using the EXACT JSON block below.\n\n"
+        "## Quality Bar (Non-Negotiable)\n"
+        "A stub, placeholder, no-op, TODO, partial implementation, or hardcoded workaround is a FAIL. "
+        "Good-enough is not good enough. Would a senior Amazon or Apple engineer stake their name on this?\n\n"
+        "IMPORTANT: `verdict` must be 'PASS' only when EVERY criterion has status 'pass' AND\n"
+        "every requirement fragment has status 'satisfied'. A single 'missing' or 'partial'\n"
+        "fragment without explicit out-of-scope justification MUST result in verdict 'FAIL'.\n\n"
         "```json\n"
         "{\n"
         '  "verdict": "PASS",\n'
         f'  "criteria_results": {criteria_schema},\n'
+        f'  "request_satisfaction": {satisfaction_schema},\n'
         '  "quality_gate": "pass",\n'
         '  "issues": []\n'
         "}\n"
@@ -2187,7 +2407,17 @@ def cmd_verify() -> dict:
         '- `"criterion_index"`: the AC-N label (e.g. "AC-1")\n'
         '- `"criterion"`: the criterion text\n'
         '- `"status"`: exactly "pass" or "fail"\n'
+        '- `"intent_match"`: true if the implementation does what the user actually meant '
+        '(not just the literal AC wording); false if the spirit of the requirement was missed\n'
+        '- `"ship_ready"`: true only if a senior Amazon/Apple engineer would stake their name on this; '
+        'false if there are stubs, TODOs, workarounds, partial implementations, or hardcoded values\n'
         '- `"evidence"`: "file/path.ext:LINE — <quoted snippet>" (required for pass; explain why for fail)\n'
+        "\n"
+        "Each `request_satisfaction` entry MUST include:\n"
+        '- `"fragment_id"`: the REQ-F-N label (e.g. "REQ-F-1")\n'
+        '- `"fragment_text"`: the original requirement fragment text\n'
+        '- `"status"`: exactly "satisfied", "partial", or "missing"\n'
+        '- `"evidence"`: where in the codebase this is fulfilled, or reason for partial/missing\n'
         "\n"
         "## User Journey Checks\n"
         "For any task that involves a user-facing flow (forms, buttons, checkout, downloads):\n"
@@ -2198,6 +2428,8 @@ def cmd_verify() -> dict:
         "- Flag any flow where the user would hit a 404, broken link, or missing file\n"
         "- If a checkout/payment flow exists, verify the complete path: button → payment → delivery\n"
     )
+
+    prompt = _inject_quality_standard(prompt)
 
     _log_decision(project_path, "VERIFY: Verification agent prepared")
 
@@ -2297,17 +2529,21 @@ def cmd_finalize() -> dict:
 
     # Block if per-criterion results are missing or any criterion failed
     criteria_results = _parse_criteria_results(verification_content)
-    is_valid, missing, failed = _validate_criteria_results(
+    is_valid, missing, failed, criteria_block_reasons = _validate_criteria_results(
         criteria_results, manifest.get("tasks", [])
     )
-    if not is_valid:
-        parts = []
-        if missing:
-            parts.append(f"missing results for {', '.join(missing)}")
-        if failed:
-            parts.append(f"failed criteria: {', '.join(failed)}")
+
+    # Also block if any request fragments are unsatisfied
+    satisfaction_results = _parse_request_satisfaction(verification_content)
+    is_satisfied, satisfaction_block_reasons = _validate_request_satisfaction(
+        state, satisfaction_results
+    )
+
+    if not is_valid or not is_satisfied:
+        all_reasons = criteria_block_reasons + satisfaction_block_reasons
+        reason_str = "; ".join(all_reasons) if all_reasons else "unknown failure"
         return {
-            "error": f"Verification criteria incomplete or failed: {'; '.join(parts)}. "
+            "error": f"Verification criteria incomplete or failed: {reason_str}. "
                      "Review verification/result.md before finalizing.",
             "verification_path": str(verify_result),
             "missing_criteria": missing,
@@ -3452,7 +3688,7 @@ def _generate_quality_review_prompt(agent_name: str, agent_role: str, request: s
     }
     specific = role_instructions.get(agent_name, f"Review from the perspective of a {agent_role}.")
 
-    return f"""You are a {agent_role} reviewing a completed implementation.
+    prompt = f"""You are a {agent_role} reviewing a completed implementation.
 
 ## Original Request
 {request}
@@ -3483,6 +3719,7 @@ Severity guide:
 
 If no issues found, state "No issues found." and explain why you are confident.
 """
+    return _inject_quality_standard(prompt)
 
 
 def _next_quality_discovery(state: dict, pipeline: dict, project_path: Path) -> dict:
@@ -3961,7 +4198,7 @@ def _next_polish_run(state: dict, pipeline: dict, project_path: Path) -> dict:
 
     request = state.get("request", "")
 
-    bug_fixer_prompt = (
+    bug_fixer_prompt = _inject_quality_standard(
         "You are a bug fixer. Review the implementation for bugs, edge cases, "
         "and correctness issues.\n\n"
         f"## Original Request\n{request}\n\n"
@@ -3975,7 +4212,7 @@ def _next_polish_run(state: dict, pipeline: dict, project_path: Path) -> dict:
         f"Working Directory: {str(PROJECT_ROOT)}\n"
     )
 
-    wiring_prompt = (
+    wiring_prompt = _inject_quality_standard(
         "You are a wiring agent. Verify that all components are properly connected "
         "and integrated.\n\n"
         f"## Original Request\n{request}\n\n"
@@ -3989,7 +4226,7 @@ def _next_polish_run(state: dict, pipeline: dict, project_path: Path) -> dict:
         f"Working Directory: {str(PROJECT_ROOT)}\n"
     )
 
-    tracer_prompt = (
+    tracer_prompt = _inject_quality_standard(
         "You are a requirements tracer. Verify test coverage for all requirements.\n\n"
         f"## Original Request\n{request}\n\n"
         f"## Files Changed\n{files_list}\n\n"
@@ -4095,8 +4332,43 @@ def _next_polish_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
     }
 
 
+_POLISH_RETRY_CAP = 2
+
+
+def _extract_polish_gaps(report_content: str) -> list[str]:
+    """Extract specific gap descriptions from a POLISH-REPORT.md.
+
+    Scans for known gap markers (missing tests, missing coverage, wiring issues,
+    critical/P0/P1 findings) and returns a deduplicated list of plain-language
+    descriptions suitable for decisions.log and user escalation messages.
+    """
+    gaps: list[str] = []
+    content_lower = report_content.lower()
+
+    if "missing coverage" in content_lower or "not covered" in content_lower:
+        gaps.append("missing test coverage for one or more requirements")
+    if "missing test" in content_lower or "no test" in content_lower:
+        gaps.append("missing tests")
+    if "p0" in content_lower or "critical" in content_lower:
+        gaps.append("critical (P0) bugs or correctness issues")
+    if "p1" in content_lower:
+        gaps.append("high-severity (P1) findings")
+    if "disconnected" in content_lower or "dead code" in content_lower or "not reachable" in content_lower:
+        gaps.append("wiring issues (disconnected or unreachable code)")
+    if "import" in content_lower and ("error" in content_lower or "missing" in content_lower):
+        gaps.append("import or export wiring problems")
+
+    return gaps if gaps else ["unspecified quality issues (see POLISH-REPORT.md)"]
+
+
 def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict:
-    """POLISH_REVIEW: Review POLISH-REPORT.md and route to VERIFY or escalate."""
+    """POLISH_REVIEW: Review POLISH-REPORT.md and route to VERIFY, retry, or escalate.
+
+    SHIP_IT / CLEAN verdict: advance to VERIFY immediately.
+    NEEDS_ATTENTION verdict:
+      - retry_count < _POLISH_RETRY_CAP: log gaps, increment counter, re-run POLISH agents.
+      - retry_count >= _POLISH_RETRY_CAP: escalate to user with plain-language explanation.
+    """
     report_path = project_path / "POLISH-REPORT.md"
     if not report_path.exists():
         return {
@@ -4107,8 +4379,11 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
     report_content = report_path.read_text()
     verdict = pipeline.get("polish_verdict", "CLEAN")
 
-    # Check for CLEAN verdict in report or pipeline state
-    if "CLEAN" in report_content or verdict == "CLEAN":
+    # Advance when verdict is clean in pipeline state or when the report says CLEAN with no NEEDS_ATTENTION
+    clean_in_report = "CLEAN" in report_content and "NEEDS_ATTENTION" not in report_content
+    if verdict in ("CLEAN", "SHIP_IT") or clean_in_report:
+        # Reset retry counter on clean pass so it doesn't bleed into next project
+        pipeline["polish_retry_count"] = 0
         # Advance to VERIFY — save to disk before cmd_verify() reloads state
         state["phase"] = "VERIFY"
         _save_pipeline_state(state, pipeline, project_path)
@@ -4133,27 +4408,47 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
             "phase": "VERIFY",
         }
 
-    # Issues found — escalate (provide report for human review, still advance)
-    state["phase"] = "VERIFY"
-    _save_pipeline_state(state, pipeline, project_path)
-    verify_result = cmd_verify()
-    if "error" in verify_result:
-        return {"action": "error", "message": verify_result["error"]}
+    # NEEDS_ATTENTION — enforce completeness with retry-then-escalate logic
+    retry_count = pipeline.get("polish_retry_count", 0)
+    gaps = _extract_polish_gaps(report_content)
+    gaps_text = "; ".join(gaps)
 
-    state = qralph_state.load_state()
-    pipeline = state.get("pipeline", {})
-    pipeline["sub_phase"] = "VERIFY_WAIT"
-    _save_pipeline_state(state, pipeline, project_path)
-    _log_decision(project_path, f"POLISH: Issues found (verdict={verdict}) — advancing to VERIFY with warnings")
+    if retry_count < _POLISH_RETRY_CAP:
+        retry_count += 1
+        pipeline["polish_retry_count"] = retry_count
+        pipeline["sub_phase"] = "POLISH_RUN"
+        _save_pipeline_state(state, pipeline, project_path)
+        _log_decision(
+            project_path,
+            f"POLISH: NEEDS_ATTENTION (retry {retry_count}/{_POLISH_RETRY_CAP}) — gaps: {gaps_text}",
+        )
+        # Re-spawn polish agents for another round
+        return _next_polish_run(state, pipeline, project_path)
 
-    verifier = verify_result.get("agent", {})
+    # Retry cap reached — escalate to user
+    _log_decision(
+        project_path,
+        f"POLISH: NEEDS_ATTENTION after {retry_count} retries — escalating to user. Gaps: {gaps_text}",
+    )
+    gap_bullets = "\n".join(f"  - {g}" for g in gaps)
+    escalation_message = (
+        f"The POLISH phase ran {retry_count} time(s) but the project still has incomplete areas:\n\n"
+        f"{gap_bullets}\n\n"
+        "Please review POLISH-REPORT.md for details. You can choose to fix these issues and retry, "
+        "accept the current state and continue to VERIFY, or abort."
+    )
     return {
-        "action": "spawn_agents",
-        "agents": [verifier],
-        "output_dir": str(project_path / "verification"),
-        "phase": "VERIFY",
-        "polish_warnings": True,
+        "action": "escalate_to_user",
+        "escalation_type": "polish_retry_limit",
+        "retry_count": retry_count,
+        "gaps": gaps,
         "report_path": str(report_path),
+        "message": escalation_message,
+        "options": [
+            {"id": "retry", "label": "Fix the issues and retry POLISH"},
+            {"id": "accept", "label": "Accept the current state and continue to VERIFY"},
+            {"id": "abort", "label": "Stop the pipeline here"},
+        ],
     }
 
 
@@ -4192,23 +4487,30 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
         # Validate per-criterion results against manifest
         manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
         criteria_results = _parse_criteria_results(verification_content)
-        is_valid, missing, failed = _validate_criteria_results(
+        is_valid, missing, failed, criteria_block_reasons = _validate_criteria_results(
             criteria_results, manifest.get("tasks", [])
         )
-        if not is_valid:
-            parts = []
-            if missing:
-                parts.append(f"missing results for {', '.join(missing)}")
-            if failed:
-                parts.append(f"failed criteria: {', '.join(failed)}")
-            reason = "; ".join(parts)
-            _log_decision(project_path, f"VERIFY: Criteria validation failed — {reason}")
+
+        # Validate request satisfaction (REQ-F-N fragment coverage)
+        satisfaction_results = _parse_request_satisfaction(verification_content)
+        is_satisfied, satisfaction_block_reasons = _validate_request_satisfaction(
+            state, satisfaction_results
+        )
+
+        # Unify all failure dimensions into one block_reason
+        if not is_valid or not is_satisfied:
+            all_block_reasons = criteria_block_reasons + satisfaction_block_reasons
+            reason = "; ".join(all_block_reasons) if all_block_reasons else "unknown validation failure"
+            _log_decision(project_path, f"VERIFY: Validation failed — {reason}")
             verify_blocked = True
-            block_reason = f"Verification criteria incomplete or failed: {reason}. Fix and re-run verification."
+            block_reason = f"Verification failed: {reason}. Fix and re-run verification."
             block_detail = {
                 "verification_path": str(verify_file),
                 "missing_criteria": missing,
                 "failed_criteria": failed,
+                "unsatisfied_fragments": [
+                    r.split(":")[0] for r in satisfaction_block_reasons
+                ],
             }
 
     if verify_blocked:
