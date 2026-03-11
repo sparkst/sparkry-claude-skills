@@ -125,7 +125,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.6.5"
+__version__ = "6.7.0"
 
 QUALITY_STANDARD = """
 ## Quality Standard
@@ -182,66 +182,110 @@ STATE_FILE = QRALPH_DIR / "current-project.json"
 # Session lock uses __file__-relative path to match hooks (immune to CWD changes)
 SESSION_LOCK = Path(__file__).resolve().parent.parent / "active-session.lock"
 
+# ─── Multi-Project Concurrency ──────────────────────────────────────────────
+# When --project <id> is passed, state is loaded from the project's own
+# state.json instead of the global current-project.json. This allows
+# multiple projects to run simultaneously in separate sessions.
 
-def _acquire_session_lock() -> None:
+_active_project_id: Optional[str] = None  # Set by CLI when --project is used
+
+
+def _project_state_file(project_id: Optional[str] = None) -> Path:
+    """Resolve the state file for a given project, or the global default."""
+    pid = project_id or _active_project_id
+    if pid:
+        return PROJECTS_DIR / pid / "state.json"
+    return STATE_FILE
+
+
+def _project_session_lock(project_id: Optional[str] = None) -> Path:
+    """Resolve a per-project session lock, or the global default."""
+    pid = project_id or _active_project_id
+    if pid:
+        return PROJECTS_DIR / pid / "session.lock"
+    return SESSION_LOCK
+
+
+def _acquire_session_lock(project_id: Optional[str] = None) -> None:
     """Create session lock file atomically. Hooks use this to know QRALPH is active.
 
     Uses O_CREAT|O_EXCL for atomic creation to prevent TOCTOU races between
     concurrent sessions. If an existing lock is present, checks whether the
     locked PID is still alive. A dead PID (stale lock) is silently removed
     before retrying. A live PID raises RuntimeError.
+
+    When project_id is provided, uses a per-project lock instead of the global
+    one, allowing multiple projects to run concurrently.
     """
+    lock_path = _project_session_lock(project_id)
     lock_payload = json.dumps({
         "pid": os.getpid(),
+        "project_id": project_id or _active_project_id,
         "started_at": datetime.now().isoformat(),
     }).encode()
 
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     for _attempt in range(2):
         try:
-            fd = os.open(str(SESSION_LOCK), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(str(lock_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
             try:
                 os.write(fd, lock_payload)
             finally:
                 os.close(fd)
+            # Also create the global lock for backward compat with hooks
+            if lock_path != SESSION_LOCK and not SESSION_LOCK.exists():
+                try:
+                    SESSION_LOCK.write_text(lock_payload.decode())
+                except OSError:
+                    pass
             return
         except FileExistsError:
-            _maybe_clear_stale_lock()  # removes stale or raises RuntimeError
+            _maybe_clear_stale_lock(lock_path)  # removes stale or raises RuntimeError
 
     # Final fallback: overwrite (should rarely reach here)
-    SESSION_LOCK.write_text(lock_payload.decode())
+    lock_path.write_text(lock_payload.decode())
 
 
-def _maybe_clear_stale_lock() -> None:
+def _maybe_clear_stale_lock(lock_path: Optional[Path] = None) -> None:
     """Remove session lock if the owning PID is dead. Raise if alive."""
+    lock_path = lock_path or SESSION_LOCK
     try:
-        lock_data = json.loads(SESSION_LOCK.read_text())
+        lock_data = json.loads(lock_path.read_text())
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        SESSION_LOCK.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
         return
 
     pid = lock_data.get("pid")
     if not isinstance(pid, int):
-        SESSION_LOCK.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
         return
 
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        SESSION_LOCK.unlink(missing_ok=True)
+        lock_path.unlink(missing_ok=True)
         return
     except PermissionError:
         pass  # PID exists but we can't signal it — treat as live
 
     started_at = lock_data.get("started_at", "unknown time")
+    locked_project = lock_data.get("project_id", "unknown")
     raise RuntimeError(
-        f"Another QRALPH session (PID {pid}, started {started_at}) is already running. "
+        f"Another QRALPH session (PID {pid}, project {locked_project}, "
+        f"started {started_at}) is already running this project. "
         "Wait for it to complete, or use /clear to start fresh."
     )
 
 
-def _release_session_lock() -> None:
+def _release_session_lock(project_id: Optional[str] = None) -> None:
     """Remove session lock file. Hooks will silently allow everything."""
-    SESSION_LOCK.unlink(missing_ok=True)
+    lock_path = _project_session_lock(project_id)
+    lock_path.unlink(missing_ok=True)
+    # Clean up global lock only if no other per-project locks exist
+    if lock_path != SESSION_LOCK:
+        active_locks = list(PROJECTS_DIR.glob("*/session.lock"))
+        if not active_locks:
+            SESSION_LOCK.unlink(missing_ok=True)
 
 atexit.register(_release_session_lock)
 
@@ -1482,8 +1526,12 @@ def _init_project(request: str, target_dir: Optional[str] = None) -> dict:
         "pipeline_version": __version__,
     }
 
+    # Save to both global current-project.json (backward compat) and
+    # project-local state.json (enables multi-project concurrency)
+    project_state_file = PROJECTS_DIR / project_id / "state.json"
     with qralph_state.exclusive_state_lock():
         qralph_state.save_state(state)
+        qralph_state.save_state(state, state_file=project_state_file)
 
     # Write initial decisions.log
     log_path = project_path / "decisions.log"
@@ -2706,9 +2754,10 @@ def cmd_resume() -> dict:
         raise
 
 
-def cmd_status() -> dict:
+def cmd_status(project_id: Optional[str] = None) -> dict:
     """Return current project state."""
-    state = qralph_state.load_state()
+    state_file = _project_state_file(project_id)
+    state = qralph_state.load_state(state_file=state_file)
     if not state:
         return {"status": "no_active_project"}
 
@@ -2856,11 +2905,20 @@ def _build_phase_progress(state: dict, pipeline: dict) -> dict:
     }
 
 
-def cmd_next(confirm: bool = False) -> dict:
-    """Return the next pipeline action. Validates previous step before advancing."""
-    state = qralph_state.load_state()
+def cmd_next(confirm: bool = False, project_id: Optional[str] = None) -> dict:
+    """Return the next pipeline action. Validates previous step before advancing.
+
+    Args:
+        confirm: Whether to confirm a pending gate.
+        project_id: If provided, operate on this specific project instead of
+            the global current-project.json. Enables running multiple projects
+            concurrently in separate sessions.
+    """
+    state_file = _project_state_file(project_id)
+    state = qralph_state.load_state(state_file=state_file)
     if not state:
-        return {"action": "error", "message": "No active project. Run 'plan' first."}
+        msg = f"No state found for project '{project_id}'." if project_id else "No active project. Run 'plan' first."
+        return {"action": "error", "message": msg}
 
     try:
         project_path = _safe_project_path(state)
@@ -3270,10 +3328,22 @@ def _next_concept_review(state: dict, pipeline: dict, project_path: Path, confir
 
 
 def _save_pipeline_state(state: dict, pipeline: dict, project_path: Path):
-    """Save pipeline sub-phase state atomically."""
+    """Save pipeline sub-phase state atomically.
+
+    Saves to: (1) project-local state.json, (2) global current-project.json
+    (only if this is the active project or no --project flag), (3) checkpoint.
+    """
     state["pipeline"] = pipeline
+    project_id = state.get("project_id", "")
+    project_state_file = project_path / "state.json"
+
     with qralph_state.exclusive_state_lock():
-        qralph_state.save_state(state)
+        # Always save to project-local state
+        qralph_state.save_state(state, state_file=project_state_file)
+        # Also update global state for backward compat (when not in multi-project mode,
+        # or when this IS the active project per current-project.json)
+        if not _active_project_id or _active_project_id == project_id:
+            qralph_state.save_state(state)
     _save_checkpoint(project_path, state)
 
 
@@ -5292,16 +5362,27 @@ def main():
     subparsers.add_parser("verify", help="Generate verification agent config")
     subparsers.add_parser("finalize", help="Write SUMMARY.md and mark complete")
     subparsers.add_parser("resume", help="Resume from checkpoint")
-    subparsers.add_parser("status", help="Show project status")
+
+    status_parser = subparsers.add_parser("status", help="Show project status")
+    status_parser.add_argument("--project", dest="project_id", default=None,
+                               help="Project ID to check status for")
 
     next_parser = subparsers.add_parser("next", help="Get next pipeline action")
     next_parser.add_argument("--confirm", action="store_true", help="Confirm gate (template/plan approval)")
+    next_parser.add_argument("--project", dest="project_id", default=None,
+                             help="Project ID to operate on (enables multi-project concurrency)")
 
     args = parser.parse_args()
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # Set module-level project ID for multi-project concurrency
+    global _active_project_id
+    project_id = getattr(args, "project_id", None)
+    if project_id:
+        _active_project_id = project_id
 
     commands = {
         "plan": lambda: cmd_plan(args.request, target_dir=args.target_dir, mode=args.mode) if not args.dry_run else _dry_run_plan(args.request),
@@ -5312,8 +5393,8 @@ def main():
         "verify": cmd_verify,
         "finalize": cmd_finalize,
         "resume": cmd_resume,
-        "status": cmd_status,
-        "next": lambda: cmd_next(confirm=args.confirm),
+        "status": lambda: cmd_status(project_id=project_id),
+        "next": lambda: cmd_next(confirm=args.confirm, project_id=project_id),
     }
 
     handler = commands.get(args.command)

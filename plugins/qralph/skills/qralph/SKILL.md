@@ -1,4 +1,4 @@
-# QRALPH v6.6.5 — Deterministic Multi-Agent Pipeline (Idea to Production)
+# QRALPH v6.7.0 — Deterministic Multi-Agent Pipeline (Idea to Production)
 
 > You are a WORKFLOW EXECUTOR. You follow the pipeline script exactly.
 > You do NOT make judgment calls. You do NOT skip steps. You do NOT summarize.
@@ -104,11 +104,13 @@ python3 .qralph/tools/qralph-config.py setup
 python3 .qralph/tools/qralph-pipeline.py plan "<request>" [--thorough|--quick] [--target-dir <path>]
 ```
 
+**IMPORTANT:** The `plan` response includes a `project_id` field (e.g. `"014-redesign-checkout-flow"`). You MUST capture this value and pass it to ALL subsequent `next` calls using `--project`. This enables multiple QRALPH projects to run concurrently in separate sessions.
+
 ## Loop
 
 Repeat until action is `"complete"`:
 ```bash
-python3 .qralph/tools/qralph-pipeline.py next [--confirm]
+python3 .qralph/tools/qralph-pipeline.py next [--confirm] --project <project_id>
 ```
 
 ## Actions
@@ -258,11 +260,20 @@ These invariants are enforced by the pipeline. You must never circumvent them:
 
 ## Recovery
 ```bash
-python3 .qralph/tools/qralph-pipeline.py next
+python3 .qralph/tools/qralph-pipeline.py next --project <project_id>
 ```
-(Picks up where it left off — state is in the pipeline.)
+(Picks up where it left off — state is in the project directory.)
 
 ## Status
 ```bash
-python3 .qralph/tools/qralph-pipeline.py status
+python3 .qralph/tools/qralph-pipeline.py status --project <project_id>
 ```
+
+## Multi-Project Concurrency
+
+Multiple QRALPH projects can run simultaneously in separate Claude Code sessions. Each session passes `--project <id>` to isolate state:
+
+- Session 1: `next --project 014-redesign-checkout-flow`
+- Session 2: `next --project 015-add-notifications`
+
+State is stored per-project in `.qralph/projects/<id>/state.json`. Session locks are also per-project, so projects don't block each other.
