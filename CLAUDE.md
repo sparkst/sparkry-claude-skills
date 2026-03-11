@@ -27,18 +27,19 @@ Each plugin maps from an exec-team source directory to a marketplace plugin dire
 | **qshortcuts-learning** | `.claude/plugins/qshortcuts-learning/` | `plugins/qshortcuts-learning/` |
 | **integrations-trello** | `.claude/plugins/integrations-trello/` | `plugins/integrations-trello/` |
 
-### 2. QRALPH (orchestration-workflow) — Special mapping
+### 2. QRALPH — Special mapping
 
 QRALPH has a non-standard source layout. The file mapping is:
 
 ```
 exec-team source                              → marketplace destination
 ─────────────────────────────────────────────────────────────────────────
-.qralph/tools/*.py                            → plugins/orchestration-workflow/skills/qralph/tools/*.py
-.qralph/tools/test_*.py                       → plugins/orchestration-workflow/skills/qralph/tools/test_*.py
-.claude/agents/qralph-team-lead.md            → plugins/orchestration-workflow/agents/qralph-team-lead.md
-.claude/agents/qralph-validator.md            → plugins/orchestration-workflow/agents/qralph-validator.md
-.claude/skills/project-orchestration/qralph/SKILL.md → plugins/orchestration-workflow/skills/qralph/SKILL.md
+.qralph/tools/*.py                            → plugins/qralph/skills/qralph/tools/*.py
+.qralph/tools/test_*.py                       → plugins/qralph/skills/qralph/tools/test_*.py
+.qralph/VERSION                               → plugins/qralph/skills/qralph/VERSION
+.claude/agents/qralph-team-lead.md            → plugins/qralph/agents/qralph-team-lead.md
+.claude/agents/qralph-validator.md            → plugins/qralph/agents/qralph-validator.md
+.claude/skills/project-orchestration/qralph/SKILL.md → plugins/qralph/skills/qralph/SKILL.md
 ```
 
 Tool files to copy (all from `.qralph/tools/`):
@@ -66,9 +67,11 @@ For each updated plugin:
 - Update the plugin's `README.md` with new features, version, test counts
 - Update root `README.md` plugin description if the summary changed
 
-**Both version files MUST be bumped.** The marketplace uses `marketplace.json` to detect updates — if the version there is stale, `/plugin marketplace update` will see no changes and users must delete + reinstall to get updates.
+**For QRALPH specifically** — there is also a `VERSION` file at `plugins/qralph/skills/qralph/VERSION` that MUST match the `__version__` in `qralph-pipeline.py`. CI validates this with `test_version_file_matches_module_version`. Forgetting this file causes CI failure.
 
-### 4. Commit and push
+**All version files MUST be bumped.** The marketplace uses `marketplace.json` to detect updates — if the version there is stale, `/plugin marketplace update` will see no changes and users must delete + reinstall to get updates.
+
+### 4. Commit, push, and MONITOR CI
 
 ```bash
 cd .qralph/projects/001-package-publish-claude/github-repo
@@ -77,6 +80,13 @@ git add README.md  # if root description changed
 git commit -m "feat(<plugin-name>): <description>"
 git push origin main
 ```
+
+**MANDATORY: Monitor CI after pushing.** Do not assume tests pass.
+```bash
+gh run list --limit 1   # get the run ID
+gh run watch <run-id>   # watch until complete
+```
+If CI fails, fix the issue and push again. Never leave a red build.
 
 ---
 
