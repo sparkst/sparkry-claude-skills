@@ -1,4 +1,4 @@
-# QRALPH v6.6.1 — Deterministic Multi-Agent Pipeline (Idea to Production)
+# QRALPH v6.6.5 — Deterministic Multi-Agent Pipeline (Idea to Production)
 
 > You are a WORKFLOW EXECUTOR. You follow the pipeline script exactly.
 > You do NOT make judgment calls. You do NOT skip steps. You do NOT summarize.
@@ -130,7 +130,7 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm]
 | `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose an option. If `heal_suggestion` is present, show it as a recommended action. Pass their choice via `next --confirm`. Never add technical detail — use exactly what the pipeline provides. |
 | `backtrack_replan` | Tell user: "The current approach isn't working. The pipeline is going back to create a revised plan with what we learned." Call `next`. The pipeline routes back to PLAN with failure context. |
 | `learn_complete` | Show `learning-summary.md` to user. Summarize what the project taught QRALPH. Call `next`. |
-| `error` | Fix what the pipeline says is wrong. If the fix is unclear, show the error to the user and ask. Then call `next` again. |
+| `error` | **Read the error carefully.** If this is a verification error (during VERIFY phase), the `message` field tells you exactly what failed — missing criteria, weak evidence, failed ACs, etc. You MUST feed these specific failures back into the next verification attempt. Delete `verification/result.md`, then re-run `next` so the pipeline regenerates the verification agent. The verifier will try again with a fresh prompt. If the error is about implementation bugs (not verification format), fix the code first, then re-run `next`. If the fix is unclear, show the error to the user and ask. |
 | `complete` | Show `SUMMARY.md` to user. Done. |
 
 ## Deploy Behavior
@@ -156,6 +156,27 @@ After successful deployment, the pipeline generates **parallel smoke test agents
 - Each criterion: PASS (with evidence), FAIL (with details), or SKIP (needs browser JS)
 - All PASS → advance to LEARN
 - Any FAIL → show to user with options
+
+## Verification Phase Behavior (CRITICAL — read this carefully)
+
+The VERIFY phase is the #1 source of pipeline failures. The verifier agent must check **each acceptance criterion individually** by reading actual source files. Here's what goes wrong and how to handle it:
+
+**Common failure: rubber-stamping.** The verifier writes generic evidence like "Verified in execution outputs" instead of reading files and citing `file:line` references. The pipeline's validation layer catches this and returns an `error` action with specific block reasons (e.g., "evidence depth too weak: 20/25 entries lack file:line references").
+
+**When you receive an `error` during VERIFY phase:**
+1. Read the `message` field — it tells you exactly what failed (missing AC results, weak evidence, failed criteria, etc.)
+2. Delete `verification/result.md` so the pipeline regenerates a fresh verification prompt
+3. Call `next` — the pipeline will re-enter VERIFY and spawn a new verifier agent
+4. The new verifier starts fresh and must do the work properly this time
+
+**What "properly" means for verification:**
+- The verifier reads each source file with the Read tool (not just execution reports)
+- Each AC gets its own read→verify→record cycle — no batching
+- Evidence must be `filename.ext:LINE — "quoted code snippet"`
+- The pipeline validates: ≥80% of evidence must have `file:line` patterns
+- All 6 fields per criterion are required: criterion_index, criterion, status, intent_match, ship_ready, evidence
+
+**Max retries:** 3 verification attempts. After 3 failures, the pipeline escalates to the user with options: accept current state, go back for more fixes, or stop.
 
 ## Quality Loop Behavior
 

@@ -125,7 +125,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.6.4"
+__version__ = "6.6.5"
 
 QUALITY_STANDARD = """
 ## Quality Standard
@@ -2376,57 +2376,95 @@ def cmd_verify() -> dict:
         satisfaction_schema = "[]"
 
     prompt += (
-        "## Your Job\n"
-        "1. Read the changed files directly from the codebase — do NOT rely on what was reported done.\n"
-        "2. For EACH acceptance criterion above (AC-1, AC-2, …), open the relevant file and\n"
-        "   confirm the criterion is met. Record the exact file path and line number as evidence.\n"
-        "3. If any criterion cannot be confirmed with file:line evidence, mark it FAIL.\n"
-        "4. For EACH requirement fragment (REQ-F-1, REQ-F-2, …), confirm the implementation\n"
-        "   satisfies it. Status must be 'satisfied', 'partial', or 'missing'.\n"
-        "5. Run the quality gate command if provided.\n"
-        "6. After checking all ACs, re-read the Original Request and ask yourself: "
-        "'Did we deliver what this person wanted, or what was convenient?' "
-        "If the implementation satisfied the letter of an AC but missed the user's actual intent, "
-        "set `intent_match` to false for that criterion.\n"
-        "7. Write your findings to verification/result.md using the EXACT JSON block below.\n\n"
+        "## MANDATORY PROCEDURE — You MUST follow these steps IN ORDER\n\n"
+        "This is not optional. You cannot summarize, batch, or shortcut this procedure.\n"
+        "The pipeline validates your output and will REJECT results that skip steps.\n\n"
+        "### Step 1: Run the quality gate (if provided)\n"
+        "Execute the quality gate command. Record the exit code and output.\n"
+        "If it fails, set `quality_gate` to `\"fail\"` in your output.\n\n"
+        "### Step 2: Verify EACH acceptance criterion ONE AT A TIME\n\n"
+        "For EACH criterion (AC-1, AC-2, AC-3, … in order):\n\n"
+        "  a) **Read the criterion text** — understand exactly what it requires.\n"
+        "  b) **Open the relevant source file(s)** using the Read tool. Do NOT rely on\n"
+        "     execution reports or summaries. You MUST read the actual file.\n"
+        "  c) **Find the specific line(s)** that satisfy (or fail to satisfy) the criterion.\n"
+        "  d) **Quote the evidence** — copy the actual code/text from the file.\n"
+        "  e) **Decide: pass or fail.** A pass requires concrete file:line evidence.\n"
+        "     'Verified in execution outputs' is NOT evidence. You must cite a real file\n"
+        "     and a real line number with a real quoted snippet from that file.\n"
+        "  f) **Check intent_match** — does this implementation do what the user MEANT,\n"
+        "     not just what the AC literally says? If you're unsure, re-read the Original\n"
+        "     Request above.\n"
+        "  g) **Check ship_ready** — would a senior Amazon/Apple engineer stake their name\n"
+        "     on this specific criterion's implementation? Any stub, TODO, placeholder,\n"
+        "     partial implementation, or hardcoded workaround → ship_ready: false.\n"
+        "  h) **Record the result** before moving to the next criterion.\n\n"
+        "DO NOT batch criteria together. DO NOT write 'all pass' for a group.\n"
+        "Each AC gets its own read-verify-record cycle.\n\n"
+        "### Step 3: Verify EACH requirement fragment\n"
+        "For each REQ-F-N fragment, confirm the implementation satisfies it.\n"
+        "Status must be 'satisfied', 'partial', or 'missing'.\n\n"
+        "### Step 4: Intent check\n"
+        "Re-read the Original Request. Ask yourself:\n"
+        "'Did we deliver what this person wanted, or what was convenient to build?'\n"
+        "If any AC passed the letter but missed the spirit, set intent_match to false.\n\n"
+        "### Step 5: Write verification/result.md\n"
+        "Write your findings using the EXACT JSON schema below.\n\n"
         "## Quality Bar (Non-Negotiable)\n"
         "A stub, placeholder, no-op, TODO, partial implementation, or hardcoded workaround is a FAIL. "
-        "Good-enough is not good enough. Would a senior Amazon or Apple engineer stake their name on this?\n\n"
-        "IMPORTANT: `verdict` must be 'PASS' only when EVERY criterion has status 'pass' AND\n"
-        "every requirement fragment has status 'satisfied'. A single 'missing' or 'partial'\n"
-        "fragment without explicit out-of-scope justification MUST result in verdict 'FAIL'.\n\n"
+        "Good-enough is not good enough.\n\n"
+        "## Verdict Rules\n"
+        "- `verdict` is `\"PASS\"` ONLY when ALL of these are true:\n"
+        "  - EVERY criterion has status `\"pass\"`\n"
+        "  - EVERY criterion has `intent_match: true`\n"
+        "  - EVERY criterion has `ship_ready: true`\n"
+        "  - EVERY requirement fragment has status `\"satisfied\"`\n"
+        "  - Quality gate passed (if present)\n"
+        "- If ANY criterion fails ANY of those checks → verdict is `\"FAIL\"`\n"
+        "- A single `\"missing\"` or `\"partial\"` fragment without explicit out-of-scope "
+        "justification → verdict is `\"FAIL\"`\n\n"
+        "## Evidence Format (CRITICAL — the pipeline validates this)\n\n"
+        "**GOOD evidence** (pipeline accepts):\n"
+        '- `"src/routes/index.ts:42 — export const GET = async () => { ... }"`\n'
+        '- `"lib/config.py:18 — ALLOWED_ORIGINS = [\'https://example.com\']"`\n\n'
+        "**BAD evidence** (pipeline REJECTS — verification will fail validation):\n"
+        '- `"Verified in execution outputs"` ← NOT evidence, will be rejected\n'
+        '- `"Verified in execution outputs and quality gate"` ← NOT evidence\n'
+        '- `"Implementation confirmed"` ← NOT evidence\n'
+        '- `"See task output"` ← NOT evidence\n\n'
+        "The pipeline requires ≥80% of your evidence entries to contain a `filename:LINE` "
+        "pattern. Results without file:line evidence will be rejected and you will have to "
+        "redo the entire verification.\n\n"
+        "## Output Schema\n\n"
         "```json\n"
         "{\n"
-        '  "verdict": "PASS",\n'
+        '  "verdict": "PASS or FAIL",\n'
         f'  "criteria_results": {criteria_schema},\n'
         f'  "request_satisfaction": {satisfaction_schema},\n'
-        '  "quality_gate": "pass",\n'
-        '  "issues": []\n'
+        '  "quality_gate": "pass or fail or skipped",\n'
+        '  "issues": ["list of any issues found"]\n'
         "}\n"
         "```\n"
         "\n"
-        "Each `criteria_results` entry MUST include:\n"
+        "### criteria_results entry fields (ALL required):\n"
         '- `"criterion_index"`: the AC-N label (e.g. "AC-1")\n'
-        '- `"criterion"`: the criterion text\n'
+        '- `"criterion"`: the FULL criterion text (not just "AC-1" — copy the actual requirement)\n'
         '- `"status"`: exactly "pass" or "fail"\n'
-        '- `"intent_match"`: true if the implementation does what the user actually meant '
-        '(not just the literal AC wording); false if the spirit of the requirement was missed\n'
-        '- `"ship_ready"`: true only if a senior Amazon/Apple engineer would stake their name on this; '
-        'false if there are stubs, TODOs, workarounds, partial implementations, or hardcoded values\n'
-        '- `"evidence"`: "file/path.ext:LINE — <quoted snippet>" (required for pass; explain why for fail)\n'
+        '- `"intent_match"`: true/false — does this match what the user actually meant?\n'
+        '- `"ship_ready"`: true/false — production-quality with no stubs/TODOs/workarounds?\n'
+        '- `"evidence"`: "file/path.ext:LINE — <quoted snippet from that line>" (MANDATORY for pass)\n'
         "\n"
-        "Each `request_satisfaction` entry MUST include:\n"
-        '- `"fragment_id"`: the REQ-F-N label (e.g. "REQ-F-1")\n'
+        "### request_satisfaction entry fields (ALL required):\n"
+        '- `"fragment_id"`: the REQ-F-N label\n'
         '- `"fragment_text"`: the original requirement fragment text\n'
         '- `"status"`: exactly "satisfied", "partial", or "missing"\n'
-        '- `"evidence"`: where in the codebase this is fulfilled, or reason for partial/missing\n'
+        '- `"evidence"`: specific file/path where this is fulfilled, or reason for partial/missing\n'
         "\n"
         "## User Journey Checks\n"
-        "For any task that involves a user-facing flow (forms, buttons, checkout, downloads):\n"
+        "For any task involving a user-facing flow (forms, buttons, checkout, downloads):\n"
         "- Confirm the UI element exists in the rendered page (href, form action, button onclick)\n"
         "- Confirm the action target points to a valid, implemented route\n"
         "- Confirm any referenced assets (PDFs, images, downloads) exist at their expected paths\n"
-        "  (check for R2/S3 object references in download routes and verify matching upload tasks)\n"
         "- Flag any flow where the user would hit a 404, broken link, or missing file\n"
         "- If a checkout/payment flow exists, verify the complete path: button → payment → delivery\n"
     )
