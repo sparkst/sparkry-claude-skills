@@ -1,96 +1,118 @@
-# How to Install and Use the QRALPH Multi-Agent Skill
+# QRALPH Installation and Usage Guide
 
-## Overview
+## What is QRALPH?
 
-QRALPH is a multi-agent swarm orchestration skill that spawns 5 parallel specialist agents to review and execute your requests. It includes self-healing, checkpointing, and UAT validation.
+QRALPH is a deterministic 13-phase multi-agent pipeline for Claude Code. It enforces proper software design process on every run — requirements decomposition, TDD, quality gates, and independent verification — so you stop babysitting AI and start shipping verified software.
 
-------------------------------------------------------------------------
+**The problem it solves:** AI coding assistants skip steps. They write code without tests. They validate their own work by saying "looks good" instead of actually checking. They forget requirements mid-run. On complex tasks, you end up doing manual follow-ups for every step the AI skipped. QRALPH eliminates this by wrapping Claude Code's capabilities in a pipeline that blocks progression until each phase is genuinely complete.
+
+---
 
 ## Installation
 
 ### Step 1: Add the Sparkry Marketplace
 
-```
+```bash
 /plugin marketplace add sparkst/sparkry-claude-skills
 ```
 
-You should see:
+### Step 2: Install QRALPH
 
-```
-Successfully added marketplace: sparkry-claude-skills
-```
-
-### Step 2: Install the Orchestration Workflow Skill
-
-```
-/plugin install orchestration-workflow@sparkry-claude-skills
+```bash
+/plugin install qralph@sparkry-claude-skills
 ```
 
 ### Step 3: Verify Installation
 
-```
+```bash
 /plugin list
 ```
 
-You should see `orchestration-workflow` in your installed skills.
+You should see `qralph` in your installed plugins.
 
-------------------------------------------------------------------------
+---
 
 ## Usage
 
-### Basic Syntax
+### Basic
 
-```
-qralph( <your request here> )
-```
-
-### Examples
-
-**Feature Development:**
-
-```
-qralph( Add dark mode toggle to settings page )
+```bash
+QRALPH "Add user authentication with OAuth2 and session management"
 ```
 
-**Research/Planning (non-coding):**
+### With Mode
 
-```
-qralph( Compare auth providers for B2B SaaS --mode planning )
-```
+```bash
+# Full 13-phase pipeline (default) — for production features
+QRALPH "Build a payment processing system" --thorough
 
-**Creative Tasks:**
-
-```
-qralph( write a haiku )
+# Quick mode (7 phases) — for developer tasks
+QRALPH "Add rate limiting to the API" --quick
 ```
 
-------------------------------------------------------------------------
+### With Target Directory
+
+```bash
+QRALPH "Build a landing page" --target-dir projects/my-site
+```
+
+---
 
 ## What Happens When You Run QRALPH
 
-1.  **Project Initialization** - Creates a project directory at `.qralph/projects/<id>-<slug>/`
+### Thorough Mode (13 phases)
 
-2.  **Agent Selection** - Automatically selects 5 specialist agents based on your request type:
+| Phase | What Happens | Why It Matters |
+|-------|-------------|----------------|
+| **IDEATE** | Brainstorms and validates the concept | Catches bad ideas before any code is written |
+| **PERSONA** | Generates 2-3 user archetypes | Pressure-tests the feature from real user perspectives |
+| **CONCEPT_REVIEW** | Multi-agent review (architect, PM, developer) | Surfaces P0/P1/P2 issues in the design, not in production |
+| **PLAN** | Creates tasks with indexed acceptance criteria | Every AC gets a tracking number (AC-1, AC-2, ...) |
+| **EXECUTE** | Parallel agent groups implement with TDD | Tests are written first, code makes them pass |
+| **SIMPLIFY** | Reviews implementation for unnecessary complexity | Prevents over-engineering while the code is fresh |
+| **QUALITY_LOOP** | Discovery finds issues, fix rounds address them | Automated code review with real fixes, not just comments |
+| **POLISH** | Bug fixes, wiring checks, requirements trace | Confirms every requirement has a test and implementation |
+| **VERIFY** | Fresh-context agent checks every AC against source files | Independent verification with file:line evidence — no rubber-stamping |
+| **DEPLOY** | Preflight checklist, deploy command, verify URL | Only deploys when you explicitly asked for it |
+| **SMOKE** | Parallel HTTP tests hit the live site | Confirms the deployed version actually works |
+| **LEARN** | Captures learnings for future projects | Each project makes the next one better |
+| **COMPLETE** | Final summary with metrics | Clean wrap-up with everything documented |
 
-    | Request Type | Agents Selected |
-    |--------------|-----------------|
-    | Feature Dev | architecture, security, UX, requirements, sde-iii |
-    | Code Review | security, code-quality, architecture, requirements, pe-reviewer |
-    | Research | research-director, fact-checker, source-evaluator, industry-scout, synthesis-writer |
-    | Content | synthesis-writer, UX, PM, strategic-advisor, research-director |
-    | Planning | PM, pe-designer, requirements, finance, strategic-advisor |
+### Quick Mode (7 phases)
 
-3.  **Parallel Review** - All 5 agents run simultaneously, each analyzing your request from their specialty
+Skips IDEATE, PERSONA, CONCEPT_REVIEW, QUALITY_LOOP, POLISH. Goes straight from PLAN to EXECUTE to VERIFY.
 
-4.  **Synthesis** - Findings are consolidated into a unified report with P0/P1/P2 priorities
+---
 
-5.  **Execution** - For coding tasks, implements fixes based on findings
+## Key Guarantees
 
-6.  **UAT** - Generates and validates acceptance test scenarios
+**Requirements are never silently dropped.** Your request is decomposed into atomic fragments (REQ-F-1, REQ-F-2, ...) at plan time. The verifier must account for every fragment.
 
-7.  **Finalize** - Creates summary and archives the project
+**Every AC is individually verified.** The verification agent reads actual source files with the Read tool and records `file:line — "quoted code"` evidence for each criterion. Generic evidence like "verified in execution outputs" is rejected by the pipeline.
 
-------------------------------------------------------------------------
+**Quality gates are hard blocks.** Tests, lint, and typecheck must pass before the pipeline advances. Failures trigger automatic fix attempts with retry limits.
+
+**Verification is independent.** The verifier has zero knowledge of how the implementation was done. It validates from source code alone.
+
+**Nothing deploys without consent.** Unless you explicitly said "deploy to X" in your request, the pipeline asks first.
+
+---
+
+## Multi-Project Concurrency (v6.7.0)
+
+Run multiple QRALPH projects simultaneously in separate Claude Code sessions:
+
+```bash
+# Terminal 1
+QRALPH "Redesign the checkout flow"
+
+# Terminal 2 (separate Claude Code session)
+QRALPH "Add notification system"
+```
+
+Each session tracks its own project state. Projects with non-overlapping files can run in parallel without conflicts.
+
+---
 
 ## Project Outputs
 
@@ -98,90 +120,96 @@ After completion, find your outputs at:
 
 ```
 .qralph/projects/<project-id>/
-├── SUMMARY.md           # Final summary
-├── SYNTHESIS.md         # Consolidated findings
-├── UAT.md               # Acceptance test scenarios
-├── CONTROL.md           # Intervention commands (if needed)
-├── decisions.log        # Decision audit trail
-├── agent-outputs/       # Individual agent reviews
-│   ├── security-reviewer.md
-│   ├── architecture-advisor.md
-│   └── ...
-├── checkpoints/         # Recovery checkpoints
-└── healing-attempts/    # Self-heal logs (if errors occurred)
+├── IDEATION.md              # Refined concept
+├── personas/                # User archetypes
+├── CONCEPT-SYNTHESIS.md     # Consolidated concept review
+├── PLAN.md                  # Implementation plan
+├── manifest.json            # Tasks with acceptance criteria
+├── execution-outputs/       # Per-task implementation results
+├── quality-reports/         # Per-round quality dashboards
+├── POLISH-REPORT.md         # Bug fixes and requirements trace
+├── verification/
+│   └── result.md            # Per-AC verification with evidence
+├── DEPLOY-REPORT.md         # Deploy output and live URL
+├── smoke-tests/             # Per-category smoke test results
+├── SMOKE-REPORT.md          # Aggregated smoke verdict
+├── learning-summary.md      # What this project taught QRALPH
+├── SUMMARY.md               # Final summary with metrics
+├── decisions.log            # Full decision audit trail
+└── state.json               # Pipeline state (for recovery)
 ```
 
-------------------------------------------------------------------------
+---
 
-## Advanced Commands
+## Recovery
 
-### Resume a Paused Project
+If a session crashes or you close the terminal mid-run:
 
-```
-qralph resume 001
-```
-
-### Check Project Status
-
-```
-qralph status
+```bash
+# Resume from where you left off
+python3 .qralph/tools/qralph-pipeline.py next --project <project-id>
 ```
 
-### Specify Custom Agents
+The pipeline checkpoints at every phase transition. You never lose more than the current step.
 
-```
-qralph( review my API --agents security,architecture,pm )
-```
+---
 
-------------------------------------------------------------------------
+## Escalation
 
-## Intervention (While Running)
+When auto-fix fails (after retry limits), QRALPH escalates to you with plain-language options:
 
-Edit `.qralph/projects/<id>/CONTROL.md` and add one of:
+- **Fix and retry** — You fix the issue, pipeline retries
+- **Accept current state** — Move forward with what's done
+- **Go back for more fixes** — Return to an earlier phase
+- **Stop here** — End the pipeline
 
-| Command  | Effect                        |
-|----------|-------------------------------|
-| `PAUSE`  | Stop after current step       |
-| `SKIP`   | Skip current operation        |
-| `ABORT`  | Graceful shutdown, save state |
-| `STATUS` | Force status dump             |
+You never see raw error traces or TypeScript stack dumps. QRALPH translates everything into decisions you can make.
 
-------------------------------------------------------------------------
+---
+
+## Cost
+
+QRALPH uses model tiering to minimize cost:
+- **Haiku** — Smoke tests, simple validation
+- **Sonnet** — Analysis, review, verification, implementation
+- **Opus** — Complex synthesis (concept review, planning)
+
+Typical cost: $3-12 per project depending on complexity and mode.
+
+---
 
 ## Troubleshooting
 
-### "Marketplace already installed"
+### Update to Latest Version
 
-```
-/plugin marketplace remove sparkry-claude-skills
-/plugin marketplace add sparkst/sparkry-claude-skills
-```
-
-### PAUSE detected unexpectedly
-
-Check that your `CONTROL.md` file doesn't contain the word "PAUSE" in its instructions. Clear the file contents if needed.
-
-### Resume after crash
-
-```
-qralph resume <project-id>
+```bash
+/plugin marketplace update sparkry-claude-skills
 ```
 
-The system checkpoints at every phase, so you can recover from where you left off.
+### Stale Session Lock
 
-------------------------------------------------------------------------
+If you see "Another QRALPH session is already running":
 
-## Cost Optimization
+```bash
+# Check if the PID is actually alive
+cat .qralph/projects/<id>/session.lock
 
-QRALPH uses model tiering to minimize costs:
-- **Haiku** - Simple validation tasks
-- **Sonnet** - Analysis and review tasks
-- **Opus** - Complex synthesis only
+# If the process is dead, delete the lock
+rm .qralph/projects/<id>/session.lock
+rm .qralph/active-session.lock  # legacy global lock
+```
 
-Typical run cost: $3-8 depending on complexity.
+### Reset and Reinstall
 
-------------------------------------------------------------------------
+```bash
+/plugin uninstall qralph@sparkry-claude-skills
+/plugin marketplace update sparkry-claude-skills
+/plugin install qralph@sparkry-claude-skills
+```
+
+---
 
 ## Questions?
 
-Contact Sparkry.AI support or visit our documentation at [sparkry.ai/docs](https://sparkry.ai/docs).
+- **Issues:** [GitHub Issues](https://github.com/sparkst/sparkry-claude-skills/issues)
+- **Email:** support@sparkry.ai
