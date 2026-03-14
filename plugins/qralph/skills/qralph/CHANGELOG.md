@@ -1,5 +1,11 @@
 # QRALPH Changelog
 
+## v6.9.0 (2026-03-14)
+
+### Fixed — Silent Quality Loop Degradation
+- **Hard dependency on `quality-dashboard.py`**: Previously, if `quality-dashboard.py` was missing, the pipeline silently set `parse_findings`, `check_convergence`, `should_agent_continue`, `generate_dashboard`, and `deduplicate_findings` to `None`. This caused the quality loop to auto-converge with zero structured findings — all P1s and P2s were silently dropped. Now raises `FileNotFoundError` at startup with a clear message to update the QRALPH plugin.
+- **Incident**: Jarvis project 025 ran a quality review that surfaced 12 P0s but silently lost 20+ P1s and 10+ P2s due to the missing module.
+
 ## v6.8.1 (2026-03-14)
 
 ### Improved — Skill Quality and Model Guidance
