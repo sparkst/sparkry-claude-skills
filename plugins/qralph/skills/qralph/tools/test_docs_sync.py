@@ -239,3 +239,34 @@ class TestInstallGuide:
                 f"Installation guide is missing phase '{phase}'. "
                 f"Add it to docs/QRALPH-INSTALLATION-GUIDE.md"
             )
+
+
+# ── 9. Critical dependency files ──────────────────────────────────────
+
+# These files are imported by qralph-pipeline.py at startup. If any are
+# missing, the pipeline either crashes or silently degrades (e.g. the
+# quality loop auto-converges with zero findings, dropping all P1/P2s).
+# This test catches missing files in CI before users hit runtime errors.
+
+_CRITICAL_DEPS = [
+    "quality-dashboard.py",
+    "qralph-state.py",
+    "qralph-config.py",
+    "confidence-scorer.py",
+    "self-healing.py",
+    "learning-capture.py",
+    "persona-generator.py",
+    "plugin-detector.py",
+]
+
+
+class TestCriticalDependencies:
+    """All files that qralph-pipeline.py imports must be present."""
+
+    @pytest.mark.parametrize("filename", _CRITICAL_DEPS)
+    def test_dependency_exists(self, filename):
+        path = os.path.join(_TOOLS_DIR, filename)
+        assert os.path.isfile(path), (
+            f"Critical dependency {filename!r} is missing from tools/. "
+            f"The pipeline will fail or silently degrade without it."
+        )
