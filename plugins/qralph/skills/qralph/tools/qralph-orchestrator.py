@@ -1506,6 +1506,8 @@ def extract_summary(content: str) -> str:
     return match.group(1).strip() if match else "(No summary found)"
 
 
+_GHOST_SEPARATOR_RE = re.compile(r'^-{2,}\s*$')
+
 def extract_findings(content: str, priority: str) -> list:
     """Extract bullet-point findings under a ### priority heading (P0/P1/P2)."""
     pattern = rf'### {priority}[^\n]*\n(.*?)(?=\n###|\n##|\Z)'
@@ -1514,7 +1516,13 @@ def extract_findings(content: str, priority: str) -> list:
         findings_text = match.group(1)
         findings = re.findall(r'^[-*]\s*(.+)$', findings_text, re.MULTILINE)
         skip = {"none identified", "none", "n/a", "no issues", "no findings"}
-        return [f.strip() for f in findings if f.strip() and not f.startswith('(') and f.strip().lower() not in skip]
+        return [
+            f.strip() for f in findings
+            if f.strip()
+            and not f.startswith('(')
+            and f.strip().lower() not in skip
+            and not _GHOST_SEPARATOR_RE.match(f.strip())
+        ]
     return []
 
 
@@ -2239,17 +2247,56 @@ def _cmd_remediate_locked():
     return output
 
 
-def cmd_remediate_done(task_ids: str, notes: str = "", batch: bool = False):
-    """Mark specific remediation tasks as fixed."""
+def _is_valid_p0_evidence(evidence_str: str) -> bool:
+    """Return True if evidence_str qualifies as P0-grade evidence.
+
+    Accepted formats:
+    - File:line reference — contains a colon followed by a digit (e.g. 'src/auth.py:42')
+    - Pytest node ID — contains '::' (e.g. 'tests/test_auth.py::test_login')
+    - Test function name — contains 'test_'
+    """
+    import re as _re
+    if _re.search(r':\d+', evidence_str):
+        return True
+    if "::" in evidence_str:
+        return True
+    if "test_" in evidence_str:
+        return True
+    return False
+
+
+def cmd_remediate_done(
+    task_ids: str,
+    notes: str = "",
+    batch: bool = False,
+    evidence: "dict | None" = None,
+):
+    """Mark specific remediation tasks as fixed.
+
+    evidence — dict mapping task_id to evidence string. Required when batch=True.
+    For P0 tasks, evidence must be a file:line reference (e.g. 'src/auth.py:42')
+    or a test name / pytest node ID (e.g. 'test_login_rejects_sql_injection').
+    For P1/P2 tasks, any non-empty workstream-level note is accepted.
+    Single-task non-batch calls without evidence are allowed for backward compatibility.
+    """
     with qralph_state.exclusive_state_lock():
-        return _cmd_remediate_done_locked(task_ids, notes, batch)
+        return _cmd_remediate_done_locked(task_ids, notes, batch, evidence)
 
 
-def _cmd_remediate_done_locked(task_ids: str, notes: str = "", batch: bool = False):
+def _cmd_remediate_done_locked(
+    task_ids: str,
+    notes: str = "",
+    batch: bool = False,
+    evidence: "dict | None" = None,
+):
     """Inner remediate-done logic, called under exclusive lock.
 
     v5.1: COE analysis and pattern sweep are REQUIRED before marking tasks fixed.
     v6.6.2: Bulk-stamp bypass prevention — max 5 tasks per call unless --batch.
+    v6.7.0: Per-task evidence required. batch=True requires evidence dict.
+            P0 tasks require file:line or test-name evidence.
+            P1/P2 tasks accept any non-empty workstream-level note.
+            Single-task non-batch calls without evidence remain allowed.
     """
     state = load_state()
     if not state:
@@ -2263,6 +2310,15 @@ def _cmd_remediate_done_locked(task_ids: str, notes: str = "", batch: bool = Fal
         return _error_result(
             f"Cannot mark more than {MAX_BULK_REMEDIATE} tasks as fixed in a single call. "
             "Use --batch to override (not recommended)."
+        )
+
+    # v6.7.0: Batch mode requires an evidence dict — no self-reported completion
+    if batch and evidence is None:
+        return _error_result(
+            "Batch remediation requires per-task evidence. "
+            "Provide evidence={task_id: 'file:line or test name'} for P0 tasks "
+            "and evidence={task_id: 'workstream note'} for P1/P2 tasks. "
+            "Self-reported batch completion without evidence is not accepted."
         )
 
     # v5.1: Enforce COE analysis and pattern sweep before allowing remediate-done
@@ -2295,6 +2351,39 @@ def _cmd_remediate_done_locked(task_ids: str, notes: str = "", batch: bool = Fal
             f"Run: pattern-sweep --task <ID> for each."
         )
 
+    # v6.7.0: Validate per-task evidence for P0 tasks.
+    # Single-task non-batch calls without evidence are exempt (backward compat).
+    is_single_non_batch = len(ids) == 1 and not batch
+    if evidence is not None or not is_single_non_batch:
+        ev = evidence or {}
+        task_priority_map = {t["id"]: t.get("priority", "P2") for t in tasks}
+        p0_ids_missing_evidence: list = []
+        p0_ids_weak_evidence: list = []
+
+        for tid in ids:
+            priority = task_priority_map.get(tid, "P2")
+            if priority == "P0":
+                ev_text = ev.get(tid, "").strip()
+                if not ev_text:
+                    p0_ids_missing_evidence.append(tid)
+                elif not _is_valid_p0_evidence(ev_text):
+                    p0_ids_weak_evidence.append(tid)
+
+        if p0_ids_missing_evidence:
+            return _error_result(
+                f"P0 tasks require per-task evidence (file:line reference or test name). "
+                f"Missing evidence for: {', '.join(p0_ids_missing_evidence)}. "
+                f"Provide evidence={{'{p0_ids_missing_evidence[0]}': 'src/file.py:42 — description'}}."
+            )
+
+        if p0_ids_weak_evidence:
+            return _error_result(
+                f"P0 evidence must be a file:line reference (e.g. 'src/auth.py:42') "
+                f"or a test name (e.g. 'test_login_rejects_sql_injection'). "
+                f"Weak evidence provided for: {', '.join(p0_ids_weak_evidence)}."
+            )
+
+    ev = evidence or {}
     marked = []
     for task in tasks:
         if task["id"] in ids:
@@ -2302,6 +2391,9 @@ def _cmd_remediate_done_locked(task_ids: str, notes: str = "", batch: bool = Fal
             task["fixed_at"] = datetime.now().isoformat()
             if notes:
                 task["notes"] = notes
+            ev_text = ev.get(task["id"], "").strip()
+            if ev_text:
+                task["evidence"] = ev_text
             marked.append(task["id"])
 
     state["remediation_tasks"] = tasks

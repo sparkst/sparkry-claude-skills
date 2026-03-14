@@ -50,8 +50,169 @@ def test_suggest_archetypes_ecommerce():
 
 def test_suggest_archetypes_default():
     from persona_generator import suggest_archetypes
-    archetypes = suggest_archetypes("create a CLI tool for file processing")
+    # When NO domain keywords match, falls back to Riley/Sam
+    archetypes = suggest_archetypes("make something nice happen")
     assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" in names
+    assert "Sam" in names
+
+
+# ---------------------------------------------------------------------------
+# REQ-201: CLI/DevTools domain personas
+# ---------------------------------------------------------------------------
+
+def test_suggest_archetypes_cli_tool():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("build a CLI tool for deployments")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    # Must NOT fall back to generic Riley/Sam
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+def test_suggest_archetypes_cli_via_plugin_keyword():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("create a plugin sdk for editors")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+# ---------------------------------------------------------------------------
+# REQ-202: API/Backend domain personas
+# ---------------------------------------------------------------------------
+
+def test_suggest_archetypes_api_backend():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("design a REST API with graphql endpoints")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+def test_suggest_archetypes_backend_server_keyword():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("build a backend server for data processing")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+# ---------------------------------------------------------------------------
+# REQ-203: Mobile domain personas
+# ---------------------------------------------------------------------------
+
+def test_suggest_archetypes_mobile():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("build a mobile app for iOS and Android")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+def test_suggest_archetypes_mobile_via_flutter():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("create a flutter cross-platform app")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+# ---------------------------------------------------------------------------
+# REQ-204: Security/Audit domain personas
+# ---------------------------------------------------------------------------
+
+def test_suggest_archetypes_security():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("build a vulnerability audit tool for compliance")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+def test_suggest_archetypes_security_via_pentest():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("create a pentest reporting dashboard")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+# ---------------------------------------------------------------------------
+# REQ-205: Content/Marketing domain personas
+# ---------------------------------------------------------------------------
+
+def test_suggest_archetypes_content_marketing():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("build a blog and landing page with seo optimization")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+def test_suggest_archetypes_marketing_via_copy():
+    from persona_generator import suggest_archetypes
+    archetypes = suggest_archetypes("write marketing copy for a campaign")
+    assert len(archetypes) >= 2
+    names = [a["name"] for a in archetypes]
+    assert "Riley" not in names
+    assert "Sam" not in names
+
+
+# ---------------------------------------------------------------------------
+# REQ-206: All returned personas have required fields
+# ---------------------------------------------------------------------------
+
+_REQUIRED_FIELDS = ["name", "role", "goals", "pain_points", "tech_comfort", "success_criteria"]
+
+def _assert_valid_persona(persona: dict) -> None:
+    for field in _REQUIRED_FIELDS:
+        assert field in persona, f"Persona missing field: {field}"
+    assert isinstance(persona["goals"], list) and len(persona["goals"]) > 0
+    assert isinstance(persona["pain_points"], list) and len(persona["pain_points"]) > 0
+    assert persona["tech_comfort"] in ("low", "medium", "high")
+    assert isinstance(persona["success_criteria"], str) and persona["success_criteria"]
+
+
+def test_all_domain_personas_have_required_fields():
+    from persona_generator import suggest_archetypes
+    requests = [
+        "build a CLI tool",
+        "design a REST API",
+        "create a mobile app",
+        "build a security audit tool",
+        "write marketing content for seo",
+        "build a SaaS dashboard",
+        "create an ecommerce store with cart",
+        "make something nice happen",  # fallback
+    ]
+    for req in requests:
+        archetypes = suggest_archetypes(req)
+        assert len(archetypes) >= 2, f"Too few archetypes for: {req}"
+        for persona in archetypes:
+            _assert_valid_persona(persona)
+
+
+# ---------------------------------------------------------------------------
+# REQ-207: Import shim works
+# ---------------------------------------------------------------------------
+
+def test_import_shim_works():
+    import importlib
+    import persona_generator as pg
+    assert callable(pg.suggest_archetypes)
+    assert callable(pg.generate_persona_template)
+    assert callable(pg.generate_persona_review_prompt)
 
 
 def test_persona_template_has_all_sections():

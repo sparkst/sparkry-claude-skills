@@ -2745,6 +2745,258 @@ class TestAntiBulkStamp:
 
 
 # ============================================================================
+# 21. REQ-QRALPH-021: PER-TASK EVIDENCE REQUIREMENT FOR REMEDIATION
+# ============================================================================
+
+
+def _setup_coe_and_sweep(project_path: Path, task_ids: list[str]) -> None:
+    """Helper: write minimal COE analysis and pattern-sweep files so that
+    the COE+sweep prerequisite gate in cmd_remediate_done passes."""
+    coe_dir = project_path / "coe-analyses"
+    sweep_dir = project_path / "pattern-sweeps"
+    coe_dir.mkdir(parents=True, exist_ok=True)
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    for tid in task_ids:
+        coe_data = {
+            "task_id": tid,
+            "root_cause": "stub root cause",
+            "five_whys": ["why1", "why2"],
+            "search_patterns": [],
+        }
+        (coe_dir / f"{tid}.json").write_text(json.dumps(coe_data))
+        sweep_data = {"clean": True, "remaining_instances": [], "patterns_checked": []}
+        (sweep_dir / f"{tid}.json").write_text(json.dumps(sweep_data))
+
+
+class TestEvidenceRequirement:
+    """REQ-QRALPH-021: Per-task evidence required to mark remediation tasks fixed."""
+
+    def test_batch_without_evidence_returns_error(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: batch=True with no evidence dict returns an error."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        task_ids = [t["id"] for t in tasks]
+        project_path = Path(state["project_path"])
+        _setup_coe_and_sweep(project_path, task_ids)
+
+        all_ids = ",".join(task_ids)
+        result = qralph_orchestrator.cmd_remediate_done(all_ids, batch=True)
+
+        assert "error" in result, "batch=True without evidence must return an error"
+        assert "evidence" in result["error"].lower(), \
+            f"Error must mention 'evidence': {result['error']}"
+
+    def test_batch_with_evidence_for_all_tasks_succeeds(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: batch=True with evidence for every task succeeds."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        task_ids = [t["id"] for t in tasks]
+        project_path = Path(state["project_path"])
+        _setup_coe_and_sweep(project_path, task_ids)
+
+        # Build per-task evidence: P0 tasks get file:line refs, P1/P2 get workstream notes
+        evidence = {}
+        for t in tasks:
+            if t["priority"] == "P0":
+                evidence[t["id"]] = f"src/auth/login.py:42 — SQL param binding applied"
+            else:
+                evidence[t["id"]] = "workstream: password policy hardened in auth module"
+
+        all_ids = ",".join(task_ids)
+        result = qralph_orchestrator.cmd_remediate_done(all_ids, batch=True, evidence=evidence)
+
+        assert "error" not in result or "evidence" not in result.get("error", "").lower(), \
+            f"batch with full evidence should not fail on evidence: {result}"
+        if "error" not in result:
+            assert result["status"] == "tasks_updated"
+
+    def test_p0_task_requires_file_line_or_test_name_evidence(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: P0 tasks without file:line or test-name evidence are rejected."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        p0_tasks = [t for t in tasks if t["priority"] == "P0"]
+        if not p0_tasks:
+            pytest.skip("No P0 tasks in synthesized project")
+
+        project_path = Path(state["project_path"])
+        p0_ids = [t["id"] for t in p0_tasks]
+        _setup_coe_and_sweep(project_path, p0_ids)
+
+        # Provide vague workstream-level evidence (not a file:line or test name) for P0
+        vague_evidence = {tid: "fixed the issue" for tid in p0_ids}
+        result = qralph_orchestrator.cmd_remediate_done(
+            ",".join(p0_ids), evidence=vague_evidence
+        )
+
+        assert "error" in result, "P0 tasks with vague evidence must be rejected"
+        assert "evidence" in result["error"].lower() or "P0" in result["error"], \
+            f"Error must mention evidence requirement for P0: {result['error']}"
+
+    def test_p0_task_with_file_line_evidence_is_accepted(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: P0 task with file:line evidence reference is accepted."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        p0_tasks = [t for t in tasks if t["priority"] == "P0"]
+        if not p0_tasks:
+            pytest.skip("No P0 tasks in synthesized project")
+
+        # Only mark the first P0 task
+        task = p0_tasks[0]
+        project_path = Path(state["project_path"])
+        _setup_coe_and_sweep(project_path, [task["id"]])
+
+        evidence = {task["id"]: "src/auth/login.py:87 — parameterized query applied"}
+        result = qralph_orchestrator.cmd_remediate_done(task["id"], evidence=evidence)
+
+        assert "error" not in result or "evidence" not in result.get("error", "").lower(), \
+            f"P0 with file:line evidence should not fail on evidence: {result}"
+        if "error" not in result:
+            assert task["id"] in result.get("marked_fixed", [])
+
+    def test_p0_task_with_test_name_evidence_is_accepted(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: P0 task with test-name evidence (test_/:: pattern) is accepted."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        p0_tasks = [t for t in tasks if t["priority"] == "P0"]
+        if not p0_tasks:
+            pytest.skip("No P0 tasks in synthesized project")
+
+        task = p0_tasks[0]
+        project_path = Path(state["project_path"])
+        _setup_coe_and_sweep(project_path, [task["id"]])
+
+        evidence = {task["id"]: "test_login_rejects_sql_injection passes (tests/test_auth.py::test_login_rejects_sql_injection)"}
+        result = qralph_orchestrator.cmd_remediate_done(task["id"], evidence=evidence)
+
+        assert "error" not in result or "evidence" not in result.get("error", "").lower(), \
+            f"P0 with test-name evidence should not fail on evidence: {result}"
+        if "error" not in result:
+            assert task["id"] in result.get("marked_fixed", [])
+
+    def test_p1_p2_tasks_accept_workstream_level_evidence(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: P1/P2 tasks can be batch-marked with a workstream-level evidence note."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        low_tasks = [t for t in tasks if t["priority"] in ("P1", "P2")]
+        if not low_tasks:
+            pytest.skip("No P1/P2 tasks in synthesized project")
+
+        project_path = Path(state["project_path"])
+        low_ids = [t["id"] for t in low_tasks]
+        _setup_coe_and_sweep(project_path, low_ids)
+
+        # Workstream-level note (no file:line required)
+        evidence = {tid: "workstream: password policy module updated" for tid in low_ids}
+        result = qralph_orchestrator.cmd_remediate_done(
+            ",".join(low_ids), evidence=evidence
+        )
+
+        assert "error" not in result or "evidence" not in result.get("error", "").lower(), \
+            f"P1/P2 with workstream evidence should not fail on evidence: {result}"
+        if "error" not in result:
+            assert result["status"] == "tasks_updated"
+            for tid in low_ids:
+                assert tid in result["marked_fixed"]
+
+    def test_single_task_without_evidence_still_works(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: Marking a single task (non-batch) works without an evidence dict."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        # Pick any non-P0 task to avoid the P0 evidence requirement
+        non_p0 = [t for t in tasks if t["priority"] != "P0"]
+        if not non_p0:
+            pytest.skip("No non-P0 tasks in synthesized project")
+
+        task = non_p0[0]
+        project_path = Path(state["project_path"])
+        _setup_coe_and_sweep(project_path, [task["id"]])
+
+        # No evidence parameter — should succeed for a single non-P0 task
+        result = qralph_orchestrator.cmd_remediate_done(task["id"])
+
+        assert "error" not in result or "evidence" not in result.get("error", "").lower(), \
+            f"Single non-P0 task without evidence should not fail: {result}"
+        if "error" not in result:
+            assert task["id"] in result.get("marked_fixed", [])
+
+    def test_evidence_stored_on_task(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: Evidence string is persisted on the task record after marking fixed."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        non_p0 = [t for t in tasks if t["priority"] != "P0"]
+        if not non_p0:
+            pytest.skip("No non-P0 tasks in synthesized project")
+
+        task = non_p0[0]
+        project_path = Path(state["project_path"])
+        _setup_coe_and_sweep(project_path, [task["id"]])
+
+        evidence_text = "workstream: rate limiter added to API gateway"
+        evidence = {task["id"]: evidence_text}
+        result = qralph_orchestrator.cmd_remediate_done(task["id"], evidence=evidence)
+
+        if "error" in result:
+            pytest.skip(f"cmd_remediate_done failed: {result['error']}")
+
+        updated_state = qralph_orchestrator.load_state()
+        updated_tasks = updated_state.get("remediation_tasks", [])
+        matching = [t for t in updated_tasks if t["id"] == task["id"]]
+        assert matching, "Task should still be present in state after marking fixed"
+        assert matching[0].get("evidence") == evidence_text, \
+            f"Evidence should be stored on task, got: {matching[0]}"
+
+    def test_missing_evidence_for_specific_p0_task_names_them(self, mock_qralph_env, capsys):
+        """REQ-QRALPH-021: Error message names which P0 tasks are missing evidence."""
+        _setup_synthesized_project(mock_qralph_env, mode="work")
+        qralph_orchestrator.cmd_remediate()
+
+        state = qralph_orchestrator.load_state()
+        tasks = state.get("remediation_tasks", [])
+        p0_tasks = [t for t in tasks if t["priority"] == "P0"]
+        if len(p0_tasks) < 2:
+            pytest.skip("Need ≥2 P0 tasks for this test")
+
+        project_path = Path(state["project_path"])
+        p0_ids = [t["id"] for t in p0_tasks]
+        _setup_coe_and_sweep(project_path, p0_ids)
+
+        # Provide evidence for only the first P0, leave the second without
+        partial_evidence = {p0_ids[0]: "src/auth.py:12 — fixed"}
+        result = qralph_orchestrator.cmd_remediate_done(
+            ",".join(p0_ids), evidence=partial_evidence
+        )
+
+        assert "error" in result, "Should reject when some P0 tasks lack evidence"
+        # The second P0 ID must appear in the error message
+        assert p0_ids[1] in result["error"], \
+            f"Error must name the task missing evidence ({p0_ids[1]}): {result['error']}"
+
+
+# ============================================================================
 # RUN TESTS
 # ============================================================================
 

@@ -1,4 +1,4 @@
-# QRALPH v6.7.0 — Deterministic Multi-Agent Pipeline (Idea to Production)
+# QRALPH v6.8.0 — Deterministic Multi-Agent Pipeline (Idea to Production)
 
 > You are a WORKFLOW EXECUTOR. You follow the pipeline script exactly.
 > You do NOT make judgment calls. You do NOT skip steps. You do NOT summarize.
@@ -32,8 +32,8 @@
 
 | Mode | Flag | Phases | Audience |
 |------|------|--------|----------|
-| Thorough | `--thorough` (default) | IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN | No-code users |
-| Quick | `--quick` | PLAN → EXECUTE → SIMPLIFY → VERIFY → DEPLOY → SMOKE → LEARN | Developers |
+| Thorough | `--thorough` (default) | IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY → QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN | No-code users |
+| Quick | `--quick` | PLAN → EXECUTE → SIMPLIFY → VERIFY → DEMO → DEPLOY → SMOKE → LEARN | Developers |
 
 Add `--with-business` to `--quick` mode for business insights without the full lifecycle.
 
@@ -69,19 +69,20 @@ ideation]        personas]         concept]           template]
      │ (converge / early_terminate / max_rounds)
      │  backtrack ──▶ PLAN (max 2x)
      ▼
-┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-│  POLISH  │────▶│  VERIFY  │────▶│  DEPLOY  │────▶│  SMOKE   │
-│          │     │          │     │          │     │          │
-│bug_fixer │     │fresh-ctx │     │preflight │     │parallel  │
-│wiring    │     │verifier  │     │checklist │     │HTTP tests│
-│req_tracer│     │all ACs   │     │wrangler  │     │hit live  │
-│          │     │          │     │deploy    │     │URL       │
-└──────────┘     └──────────┘     └──────────┘     └──────────┘
-                      │                │                │
-                   FAIL ──▶         [GATE:           FAIL ──▶
-                   block          confirm_deploy     show to
-                                  OR auto if         user
-                                  explicit]
+┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
+│  POLISH  │────▶│  VERIFY  │────▶│   DEMO   │────▶│  DEPLOY  │────▶│  SMOKE   │
+│          │     │          │     │          │     │          │     │          │
+│bug_fixer │     │fresh-ctx │     │present + │     │preflight │     │parallel  │
+│wiring    │     │verifier  │     │feedback  │     │checklist │     │HTTP tests│
+│req_tracer│     │all ACs   │     │marshal   │     │wrangler  │     │hit live  │
+│          │     │          │     │→ PLAN    │     │deploy    │     │URL       │
+└──────────┘     └──────────┘     └──────────┘     └──────────┘     └──────────┘
+                      │                │                │                │
+                   FAIL ──▶        [GATE:            [GATE:           FAIL ──▶
+                   block          confirm_          confirm_          show to
+                                   demo]             deploy]           user
+                                  feedback            OR auto if
+                                  → PLAN             explicit]
                                                         │
                                                         ▼
                                   ┌──────────┐     ┌──────────┐
@@ -124,6 +125,9 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm] --project <project_id>
 | `spawn_agents` | For EACH agent: spawn with `name=agent.name, model=agent.model, prompt=agent.prompt`. Write EXACT return to `{output_dir}/{agent.name}.md`. If `parallel: true`, spawn ALL agents simultaneously. |
 | `define_tasks` | Read `analyses_summary` from the action response. Read EXISTING `manifest.json` at `manifest_path`, ADD a `tasks` array (preserving all other fields), write back. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
 | `confirm_plan` | Show `PLAN.md` + tasks to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
+| `confirm_demo` | Show demo checklist to user. Use AskUserQuestion. STOP. If user approves: `next --confirm`. If user provides feedback: `next --confirm --feedback "<user text>"`. |
+| `demo_feedback` | Pipeline recorded feedback and is marshaling it back to PLAN for revision. Tell user their feedback is being addressed. Call `next`. |
+| `demo_replan` | Pipeline is revising the plan based on demo feedback. Tell user: "Your feedback has been recorded. The pipeline is revising the implementation." Call `next`. |
 | `confirm_deploy` | Show pre-deploy checklist (secrets, env vars, DNS, placeholders) to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm`. Note: if user explicitly said "deploy to X" in their original request, the pipeline auto-deploys and this gate is skipped. |
 | `smoke_results` | Show smoke test results to user (all passed). Celebrate the successful deployment. Call `next`. |
 | `smoke_failure` | Show failed smoke tests to user. Let user decide: (a) fix issues and redeploy, (b) accept current state and continue. Pass user's choice via `next`. |
@@ -222,6 +226,8 @@ project-NNN/
 ├── POLISH-REPORT.md         # Bug fix + wiring + requirements trace
 ├── verification/            # Fresh-context verification
 │   └── result.md
+├── demo/                    # Demo phase feedback files
+│   └── feedback.md
 ├── DEPLOY-REPORT.md         # Deploy command output + live URL
 ├── smoke-tests/             # Per-category smoke test results
 │   ├── smoke-pages.md

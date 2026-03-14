@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.6.2 Pipeline — deterministic multi-agent orchestration, idea to production.
+QRALPH v6.8.0 Pipeline — deterministic multi-agent orchestration, idea to production.
 
 Full pipeline: IDEATE → PERSONA → CONCEPT → PLAN → EXECUTE → SIMPLIFY →
-               QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
+               QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → COMPLETE
 Python does the orchestration. Claude does the thinking.
 
 Commands:
@@ -57,7 +57,12 @@ try:
 except (ImportError, FileNotFoundError, AttributeError, OSError):
     detect_all_plugins = None
 
-# Import persona generator (optional — may not exist yet)
+# Import persona generator via the underscore shim (persona_generator.py) which
+# re-exports from the canonical hyphenated file (persona-generator.py).  The shim
+# exists because Python cannot import filenames containing hyphens directly.
+# When the shim or canonical file is missing (e.g. first install before persona
+# support is added), the pipeline degrades gracefully — IDEATE/PERSONA phases are
+# skipped and suggest_archetypes returns None to callers.
 try:
     _persona_gen_path = Path(__file__).parent / "persona_generator.py"
     _persona_gen_spec = importlib.util.spec_from_file_location("persona_generator", _persona_gen_path)
@@ -81,11 +86,13 @@ try:
     check_convergence = _qd_mod.check_convergence
     should_agent_continue = _qd_mod.should_agent_continue
     generate_dashboard = _qd_mod.generate_dashboard
+    deduplicate_findings = _qd_mod.deduplicate_findings
 except (ImportError, FileNotFoundError, AttributeError, OSError):
     parse_findings = None
     check_convergence = None
     should_agent_continue = None
     generate_dashboard = None
+    deduplicate_findings = None
 
 # Import confidence scorer (optional — may not exist yet)
 try:
@@ -125,7 +132,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.7.0"
+__version__ = "6.8.0"
 
 QUALITY_STANDARD = """
 ## Quality Standard
@@ -277,8 +284,15 @@ def _maybe_clear_stale_lock(lock_path: Optional[Path] = None) -> None:
     )
 
 
+_lock_released = False
+
+
 def _release_session_lock(project_id: Optional[str] = None) -> None:
-    """Remove session lock file. Hooks will silently allow everything."""
+    """Remove session lock file (idempotent — safe to call multiple times)."""
+    global _lock_released
+    if _lock_released:
+        return
+    _lock_released = True
     lock_path = _project_session_lock(project_id)
     lock_path.unlink(missing_ok=True)
     # Clean up global lock only if no other per-project locks exist
@@ -286,6 +300,7 @@ def _release_session_lock(project_id: Optional[str] = None) -> None:
         active_locks = list(PROJECTS_DIR.glob("*/session.lock"))
         if not active_locks:
             SESSION_LOCK.unlink(missing_ok=True)
+
 
 atexit.register(_release_session_lock)
 
@@ -309,8 +324,12 @@ MIN_AGENT_OUTPUT_LENGTH = 100
 # Pipeline phases
 PHASES = ["IDEATE", "PERSONA", "CONCEPT_REVIEW", "PLAN", "EXECUTE",
           "SIMPLIFY", "QUALITY_LOOP", "POLISH", "VERIFY",
+          "DEMO",  # v6.8.0: user-facing demo + feedback gate
           "DEPLOY", "SMOKE",  # v7.0: idea-to-production
           "LEARN", "COMPLETE"]
+
+# Maximum DEMO feedback cycles before auto-advancing to DEPLOY
+MAX_DEMO_CYCLES = 2
 
 # Max concurrent worktree agents
 MAX_PARALLEL_AGENTS = 4
@@ -955,6 +974,7 @@ def generate_plan_agent_prompt(
     mode: str = "",
     ideation_md: str = "",
     concept_md: str = "",
+    feedback_context: str = "",
 ) -> dict:
     """Generate a deterministic prompt for a plan-phase agent.
 
@@ -990,6 +1010,15 @@ def generate_plan_agent_prompt(
                 f"It contains prioritized feedback from multiple reviewers:\n\n"
                 f"{concept_md}"
             )
+
+    # Inject DEMO feedback context when looping back from DEMO phase
+    if feedback_context:
+        base_context += (
+            f"\n\n## DEMO Feedback (Revision Cycle)\n"
+            f"The user reviewed a demo of the previous implementation and provided "
+            f"the following feedback. Your plan MUST address these concerns:\n\n"
+            f"{feedback_context}"
+        )
 
     prompts = {
         "researcher": {
@@ -1249,19 +1278,65 @@ def generate_concept_review_agents(
     return agents
 
 
+_GHOST_SEP_RE = re.compile(r'^-{2,}\s*$')
+
+# Severity extraction patterns tried in priority order.
+# Each pattern must capture two groups: (severity_digit, finding_text).
+_SEVERITY_PATTERNS: list[re.Pattern] = [
+    # [P0] Title  (bracket format)
+    re.compile(r'\[P([012])\]\s+(.+)'),
+    # **P0** — Title  or  **P0**: Title  (bold format)
+    re.compile(r'\*\*P([012])\*\*\s*[—:\-]\s*(.+)'),
+    # ### P0-1: Title  or  ## P0: Title  (heading format)
+    re.compile(r'^#+\s+P([012])[\s\-:]+(.+)'),
+    # P0: Title  or  P0 - Title  or  P0 — Title  (plain format)
+    re.compile(r'(?<!\[)P([012])\s*[:\-—]\s*(.+)'),
+]
+
+
+def _extract_severity(line: str) -> tuple[int, str] | None:
+    """Return (severity_level, finding_text) for a line containing a severity marker.
+
+    Tries all recognised severity formats in priority order. Returns None if
+    the line contains no recognisable finding.
+    """
+    stripped = line.strip()
+    if not stripped or _GHOST_SEP_RE.match(stripped):
+        return None
+    for pat in _SEVERITY_PATTERNS:
+        m = pat.search(stripped)
+        if m:
+            level = int(m.group(1))
+            text = m.group(2).strip()
+            if text and not _GHOST_SEP_RE.match(text):
+                return (level, text)
+    return None
+
+
 def synthesize_concept_reviews(reviews: dict[str, str]) -> str:
     """Consolidate concept review outputs into CONCEPT-SYNTHESIS.md content."""
-    severity_pattern = re.compile(r'\[P([012])\]\s*(.*)')
-
-    findings: dict[str, list[tuple[str, str]]] = {"P0": [], "P1": [], "P2": []}
+    raw_findings: list[dict] = []
 
     for agent_name, content in reviews.items():
         for line in content.splitlines():
-            m = severity_pattern.search(line)
-            if m:
-                level = f"P{m.group(1)}"
-                detail = m.group(2).strip()
-                findings[level].append((agent_name, detail))
+            result = _extract_severity(line)
+            if result is not None:
+                level_int, detail = result
+                level = f"P{level_int}"
+                raw_findings.append({"severity": level, "title": detail, "agent": agent_name})
+
+    # Deduplicate: collapse identical findings reported by multiple agents
+    if deduplicate_findings:
+        deduped = deduplicate_findings(raw_findings)
+    else:
+        deduped = raw_findings
+
+    # Group back by severity for section rendering
+    grouped: dict[str, list[dict]] = {"P0": [], "P1": [], "P2": []}
+    for f in deduped:
+        level = f["severity"]
+        if level in grouped:
+            grouped[level].append(f)
 
     sections = [
         ("P0", "Critical"),
@@ -1273,10 +1348,12 @@ def synthesize_concept_reviews(reviews: dict[str, str]) -> str:
     for level, label in sections:
         lines.append(f"## {level} — {label}")
         lines.append("")
-        items = findings[level]
+        items = grouped[level]
         if items:
-            for agent_name, detail in items:
-                lines.append(f"- **[{agent_name}]** {detail}")
+            for f in items:
+                confirmed = f.get("confirmed_by", [f.get("agent", "")])
+                agent_label = ", ".join(confirmed) if confirmed else f.get("agent", "")
+                lines.append(f"- **[{agent_label}]** {f['title']}")
         else:
             lines.append("No findings.")
         lines.append("")
@@ -2533,29 +2610,66 @@ def cmd_verify() -> dict:
 
 
 def _compute_evidence_metrics(project_path: Path, state: dict, pipeline: dict) -> dict:
-    """Scan agent-outputs/ and compute evidence quality metrics for SUMMARY.md."""
-    outputs_dir = project_path / "agent-outputs"
+    """Scan agent-outputs/ and execution-outputs/ and compute evidence quality metrics for SUMMARY.md.
+
+    Execution outputs are weighted higher (1.5x) because they represent actual implementation
+    work rather than planning-phase outputs.
+    """
+    from datetime import timezone
+
+    EXECUTION_WEIGHT = 1.5  # execution outputs count more toward EQS
+
     total_agents = 0
     agents_with_output = 0
     total_words = 0
     agent_status: dict = {}
 
-    if outputs_dir.exists():
-        md_files = list(outputs_dir.glob("*.md"))
-        total_agents = len(md_files)
+    newest_agent_mtime: float | None = None
+    newest_execution_mtime: float | None = None
+
+    def _scan_dir(directory: Path, weight: float = 1.0, mtime_bucket: str = "agent") -> float:
+        """Scan *.md files in directory; return running newest mtime. Updates outer counters."""
+        nonlocal total_agents, agents_with_output, total_words, newest_agent_mtime, newest_execution_mtime
+        newest: float | None = None
+        if not directory.exists():
+            return newest  # type: ignore[return-value]
+        md_files = list(directory.glob("*.md"))
         for md_file in md_files:
+            total_agents += 1
+            file_mtime = md_file.stat().st_mtime
+            if newest is None or file_mtime > newest:
+                newest = file_mtime
             agent_name = md_file.stem
             try:
                 content = md_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 content = ""
             words = len(content.split())
+            weighted_words = int(words * weight)
             if words > 0:
                 agents_with_output += 1
-                total_words += words
-                agent_status[agent_name] = {"words": words, "status": "present"}
+                total_words += weighted_words
+                agent_status[agent_name] = {
+                    "words": words,
+                    "weighted_words": weighted_words,
+                    "status": "present",
+                    "source": mtime_bucket,
+                }
             else:
-                agent_status[agent_name] = {"words": 0, "status": "empty"}
+                agent_status[agent_name] = {
+                    "words": 0,
+                    "weighted_words": 0,
+                    "status": "empty",
+                    "source": mtime_bucket,
+                }
+        if mtime_bucket == "agent":
+            newest_agent_mtime = newest
+        else:
+            newest_execution_mtime = newest
+        return newest  # type: ignore[return-value]
+
+    _scan_dir(project_path / "agent-outputs", weight=1.0, mtime_bucket="agent")
+    _scan_dir(project_path / "execution-outputs", weight=EXECUTION_WEIGHT, mtime_bucket="execution")
 
     eqs = round(agents_with_output / max(total_agents, 1) * 100)
 
@@ -2570,6 +2684,24 @@ def _compute_evidence_metrics(project_path: Path, state: dict, pipeline: dict) -
 
     quality_loop_rounds = pipeline.get("quality_loop", {}).get("rounds_history", [])
 
+    # Staleness: True if newest output file is older than any verification result
+    staleness_warning = False
+    verify_result = project_path / "verification" / "result.md"
+    if verify_result.exists():
+        verify_mtime = verify_result.stat().st_mtime
+        candidate_mtimes = [m for m in (newest_agent_mtime, newest_execution_mtime) if m is not None]
+        if candidate_mtimes:
+            newest_output_mtime = max(candidate_mtimes)
+            staleness_warning = newest_output_mtime < verify_mtime
+        else:
+            # No output files at all → cannot confirm freshness
+            staleness_warning = True
+
+    def _iso(mtime: float | None) -> str | None:
+        if mtime is None:
+            return None
+        return datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     return {
         "agents_with_output": agents_with_output,
         "total_agents": total_agents,
@@ -2578,6 +2710,9 @@ def _compute_evidence_metrics(project_path: Path, state: dict, pipeline: dict) -
         "eqs": eqs,
         "confidence": confidence,
         "quality_loop_rounds": quality_loop_rounds,
+        "staleness_warning": staleness_warning,
+        "newest_agent_output": _iso(newest_agent_mtime),
+        "newest_execution_output": _iso(newest_execution_mtime),
     }
 
 
@@ -2587,7 +2722,7 @@ def cmd_finalize() -> dict:
     if not state:
         return {"error": "No active project."}
 
-    allowed_finalize_phases = {"VERIFY", "DEPLOY", "SMOKE", "LEARN"}
+    allowed_finalize_phases = {"VERIFY", "DEMO", "DEPLOY", "SMOKE", "LEARN"}
     if state.get("phase") not in allowed_finalize_phases:
         return {"error": f"Cannot finalize in phase {state.get('phase')}. Must be in one of: {', '.join(sorted(allowed_finalize_phases))}."}
 
@@ -2792,10 +2927,12 @@ VALID_SUB_PHASES = {
     "QUALITY_DISCOVERY", "QUALITY_FIX", "QUALITY_DASHBOARD",
     "POLISH_RUN", "POLISH_WAITING", "POLISH_REVIEW",
     "VERIFY_WAIT",
+    "DEMO_PRESENT", "DEMO_FEEDBACK", "DEMO_MARSHAL",
     "DEPLOY_PREFLIGHT", "DEPLOY_GATE", "DEPLOY_RUN",
     "SMOKE_GENERATE", "SMOKE_WAIT", "SMOKE_VERDICT", "SMOKE_FAILURE_GATE",
     "LEARN_CAPTURE", "LEARN_COMPLETE",
     "BACKTRACK_REPLAN",
+    "QUALITY_REVERIFY", "QUALITY_REVERIFY_WAITING",
     "COMPLETE",
 }
 
@@ -2883,7 +3020,7 @@ def _has_deploy_intent(request: str) -> bool:
             or any(phrase in lower for phrase in DEPLOY_IMPLICIT))
 
 
-_PHASES_QUICK = ["PLAN", "EXECUTE", "SIMPLIFY", "VERIFY", "DEPLOY", "SMOKE", "LEARN", "COMPLETE"]
+_PHASES_QUICK = ["PLAN", "EXECUTE", "SIMPLIFY", "VERIFY", "DEMO", "DEPLOY", "SMOKE", "LEARN", "COMPLETE"]
 _PHASES_THOROUGH = PHASES  # all 13
 
 
@@ -2905,7 +3042,7 @@ def _build_phase_progress(state: dict, pipeline: dict) -> dict:
     }
 
 
-def cmd_next(confirm: bool = False, project_id: Optional[str] = None) -> dict:
+def cmd_next(confirm: bool = False, project_id: Optional[str] = None, feedback: str = "") -> dict:
     """Return the next pipeline action. Validates previous step before advancing.
 
     Args:
@@ -2913,6 +3050,8 @@ def cmd_next(confirm: bool = False, project_id: Optional[str] = None) -> dict:
         project_id: If provided, operate on this specific project instead of
             the global current-project.json. Enables running multiple projects
             concurrently in separate sessions.
+        feedback: User feedback text for DEMO phase revision. If non-empty during
+            a confirm_demo gate, routes to DEMO_FEEDBACK instead of DEPLOY.
     """
     state_file = _project_state_file(project_id)
     state = qralph_state.load_state(state_file=state_file)
@@ -2926,6 +3065,11 @@ def cmd_next(confirm: bool = False, project_id: Optional[str] = None) -> dict:
         return {"action": "error", "message": str(e)}
     pipeline = state.get("pipeline", {})
     sub_phase = pipeline.get("sub_phase", "INIT")
+
+    # Store feedback text in pipeline state for DEMO phase consumption
+    if feedback:
+        pipeline["demo_feedback_text"] = feedback
+        _save_pipeline_state(state, pipeline, project_path)
 
     # --- Gap 3: Staleness detection ---
     # If we're in a WAITING sub-phase and last_activity_at is >30min old,
@@ -3041,6 +3185,14 @@ def _dispatch_next(sub_phase: str, state: dict, pipeline: dict, project_path: Pa
 
     elif sub_phase == "VERIFY_WAIT":
         return _next_verify_wait(state, pipeline, project_path)
+
+    # --- DEMO phase handlers ---
+    elif sub_phase == "DEMO_PRESENT":
+        return _next_demo_present(state, pipeline, project_path, confirm)
+    elif sub_phase == "DEMO_FEEDBACK":
+        return _next_demo_feedback(state, pipeline, project_path)
+    elif sub_phase == "DEMO_MARSHAL":
+        return _next_demo_marshal(state, pipeline, project_path)
 
     # --- DEPLOY phase handlers ---
     elif sub_phase == "DEPLOY_PREFLIGHT":
@@ -3937,6 +4089,10 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
             # No output at all — keep for retry
             still_active.append(agent_name)
 
+    # Deduplicate findings: collapse identical issues reported by multiple agents
+    if deduplicate_findings:
+        all_findings = deduplicate_findings(all_findings)
+
     # Build round result and add to history
     round_result = {
         "round": round_num,
@@ -3954,7 +4110,7 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
     if check_convergence:
         conv = check_convergence(all_findings, prev_findings=prev_findings)
     else:
-        conv = {"converged": len(all_findings) == 0, "p0_count": 0, "p1_count": 0, "p2_count": 0, "total": len(all_findings)}
+        conv = {"converged": len(all_findings) == 0, "p0_count": 0, "p1_count": 0, "p2_count": 0, "total": len(all_findings), "stagnant": False, "regressed": False}
 
     if detect_consensus:
         consensus = detect_consensus(agent_results)
@@ -4097,6 +4253,31 @@ def _next_quality_reverify(state: dict, pipeline: dict, project_path: Path) -> d
     }
 
 
+_SOURCE_EXTENSIONS = (
+    "ts|tsx|js|jsx|py|go|rs|rb|java|kt|swift|c|cpp|h|hpp|cs|php|vue|svelte|"
+    "html|css|scss|json|yaml|yml|toml|md|sh|sql|tf|hcl|ex|exs|hs|ml|mli|"
+    "r|R|jl|lua|pl|pm|scala|clj|erl|zig|nim|v|d|m|mm|ps1|bat|cmake|mk"
+)
+_EVIDENCE_PATTERN = re.compile(
+    rf"[\w/.-]+\.(?:{_SOURCE_EXTENSIONS}):\d+", re.IGNORECASE
+)
+_EVIDENCE_REQUIRED_MSG = (
+    "Evidence required. Include file references like 'src/api/auth.ts:42' "
+    "to prove the fix was applied."
+)
+
+
+def _validate_remediation_evidence(verdict_text: str) -> tuple[bool, str]:
+    """Return (True, '') when verdict_text contains at least one file:line reference.
+
+    Deterministic regex check — no LLM judgment involved.
+    Pattern: filename.ext:NN  e.g. auth.ts:42, src/lib/utils.py:15
+    """
+    if _EVIDENCE_PATTERN.search(verdict_text):
+        return True, ""
+    return False, _EVIDENCE_REQUIRED_MSG
+
+
 def _next_quality_reverify_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
     """QUALITY_REVERIFY_WAITING: Collect verifier output and update finding statuses."""
     ql = pipeline.get("quality_loop", {})
@@ -4110,17 +4291,29 @@ def _next_quality_reverify_waiting(state: dict, pipeline: dict, project_path: Pa
     prev_findings = rounds_history[-1]["findings"] if rounds_history else []
     p0_p1_findings = [f for f in prev_findings if f.get("severity") in ("P0", "P1")]
 
-    # Parse RESOLVED / UNRESOLVED verdicts from verifier output
+    # Parse RESOLVED / UNRESOLVED verdicts from verifier output.
+    # RESOLVED verdicts must include at least one file:line evidence reference
+    # (e.g. src/api/auth.ts:42).  Bare RESOLVED lines without proof are
+    # downgraded to unresolved so agents cannot bulk-mark findings as fixed
+    # without demonstrating where the fix lives.
     resolved_ids: set[str] = set()
     unresolved_ids: set[str] = set()
     if content:
-        for line in content.splitlines():
-            line = line.strip()
-            if line.upper().startswith("RESOLVED:"):
-                fid = line.split(":", 1)[1].strip()
-                resolved_ids.add(fid)
-            elif line.upper().startswith("UNRESOLVED:"):
-                fid = line.split(":", 1)[1].strip()
+        lines = content.splitlines()
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.upper().startswith("RESOLVED:"):
+                fid = stripped.split(":", 1)[1].strip()
+                # Gather context: the verdict line itself plus the next two lines
+                context_block = "\n".join(lines[i : i + 3])
+                evidence_ok, _ = _validate_remediation_evidence(context_block)
+                if evidence_ok:
+                    resolved_ids.add(fid)
+                else:
+                    # Downgrade: no file:line proof supplied
+                    unresolved_ids.add(fid)
+            elif stripped.upper().startswith("UNRESOLVED:"):
+                fid = stripped.split(":", 1)[1].strip()
                 unresolved_ids.add(fid)
 
     # Mark findings with their verification status
@@ -4647,15 +4840,171 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
 
     # Verification passed — reset retry counter
     pipeline["verify_retries"] = 0
-    _log_decision(project_path, "VERIFY: Verdict is PASS and all criteria validated — advancing to DEPLOY")
+    _log_decision(project_path, "VERIFY: Verdict is PASS and all criteria validated — advancing to DEMO")
 
-    # Advance to DEPLOY phase (v7.0: idea-to-production)
+    # Advance to DEMO phase (v6.8.0: user-facing demo + feedback gate)
+    state["phase"] = "DEMO"
+    pipeline["sub_phase"] = "DEMO_PRESENT"
+    _save_pipeline_state(state, pipeline, project_path)
+
+    # Auto-advance into DEMO_PRESENT immediately
+    return _next_demo_present(state, pipeline, project_path)
+
+
+# ─── DEMO Phase Handlers (v6.8.0) ────────────────────────────────────────────
+
+
+def _next_demo_present(state: dict, pipeline: dict, project_path: Path, confirm: bool = False) -> dict:
+    """DEMO_PRESENT: Two-call confirmation gate — show demo checklist, then advance on confirm."""
+    if not confirm:
+        # First call: build demo checklist from manifest and show gate
+        manifest = qralph_state.safe_read_json(project_path / "manifest.json", {})
+        tasks = manifest.get("tasks", [])
+
+        # Read execution output summaries (first 200 chars of each)
+        exec_dir = project_path / "execution-outputs"
+        task_summaries: dict[str, str] = {}
+        if exec_dir.exists():
+            for f in sorted(exec_dir.iterdir()):
+                if f.is_file() and f.suffix == ".md":
+                    content = f.read_text().strip()
+                    task_summaries[f.stem] = content[:200] if content else "(empty)"
+
+        # Build deterministic checklist from manifest tasks
+        demo_checklist = []
+        for task in tasks:
+            task_id = task.get("id", "unknown")
+            # Find matching output
+            summary = ""
+            for stem, text in task_summaries.items():
+                if task_id in stem:
+                    summary = text
+                    break
+            demo_checklist.append({
+                "task_id": task_id,
+                "title": task.get("summary", task.get("title", "Untitled")),
+                "acceptance_criteria": task.get("acceptance_criteria", []),
+                "output_summary": summary,
+                "has_output": bool(summary),
+            })
+
+        pipeline["awaiting_confirmation"] = "confirm_demo"
+        _save_pipeline_state(state, pipeline, project_path)
+
+        demo_cycles = pipeline.get("demo_cycles", 0)
+
+        return {
+            "action": "confirm_demo",
+            "message": "Demo ready for review. Please review the completed work and confirm to proceed to deployment, or provide feedback for revision.",
+            "demo_checklist": demo_checklist,
+            "phase": "DEMO",
+            "demo_cycles_remaining": MAX_DEMO_CYCLES - demo_cycles,
+        }
+
+    # Second call (confirm=True): gate check
+    if pipeline.get("awaiting_confirmation") != "confirm_demo":
+        return {"action": "error", "message": "Gate violation: must call next (without --confirm) first to review demo."}
+
+    del pipeline["awaiting_confirmation"]
+
+    # Check for feedback text — if present, route to DEMO_FEEDBACK instead of DEPLOY
+    feedback_text = pipeline.get("demo_feedback_text", "")
+    if feedback_text:
+        _log_decision(project_path, "DEMO: User provided feedback — routing to DEMO_FEEDBACK")
+        pipeline["sub_phase"] = "DEMO_FEEDBACK"
+        _save_pipeline_state(state, pipeline, project_path)
+        return {"action": "demo_feedback", "phase": "DEMO", "sub_phase": "DEMO_FEEDBACK",
+                "message": "Feedback received. Marshaling it back to the plan for revision."}
+
+    # User approved — no feedback, advance to DEPLOY
+    _log_decision(project_path, "DEMO: User approved demo — advancing to DEPLOY")
     state["phase"] = "DEPLOY"
     pipeline["sub_phase"] = "DEPLOY_PREFLIGHT"
     _save_pipeline_state(state, pipeline, project_path)
 
-    # Auto-advance into DEPLOY_PREFLIGHT immediately
-    return _next_deploy_preflight(state, pipeline, project_path)
+    return {"action": "advance", "phase": "DEPLOY", "sub_phase": "DEPLOY_PREFLIGHT"}
+
+
+def _next_demo_feedback(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """DEMO_FEEDBACK: Write user feedback to file and route to DEMO_MARSHAL."""
+    feedback_text = pipeline.get("demo_feedback_text", "")
+    # Sanitize feedback before it enters the pipeline (prevents prompt injection)
+    feedback_text = _sanitize_agent_output(feedback_text)
+    feedback_round = pipeline.get("demo_cycles", 0) + 1
+
+    demo_dir = project_path / "demo"
+    demo_dir.mkdir(parents=True, exist_ok=True)
+
+    feedback_file = demo_dir / f"feedback-round-{feedback_round}.md"
+    feedback_file.write_text(
+        f"# Demo Feedback — Round {feedback_round}\n\n"
+        f"{feedback_text}\n"
+    )
+
+    _log_decision(project_path, f"DEMO: Feedback round {feedback_round} recorded")
+    pipeline["sub_phase"] = "DEMO_MARSHAL"
+    _save_pipeline_state(state, pipeline, project_path)
+
+    return {
+        "action": "demo_feedback",
+        "phase": "DEMO",
+        "sub_phase": "DEMO_MARSHAL",
+        "feedback_file": str(feedback_file),
+        "message": "Your feedback has been recorded. The pipeline is revising the implementation to address your requests.",
+    }
+
+
+def _next_demo_marshal(state: dict, pipeline: dict, project_path: Path) -> dict:
+    """DEMO_MARSHAL: Route feedback back to PLAN or auto-advance to DEPLOY after max cycles."""
+    demo_cycles = pipeline.get("demo_cycles", 0)
+
+    # Safety cap: after MAX_DEMO_CYCLES feedback cycles, force-advance to DEPLOY
+    if demo_cycles >= MAX_DEMO_CYCLES:
+        _log_decision(project_path, f"DEMO: Maximum feedback cycles reached ({MAX_DEMO_CYCLES} of {MAX_DEMO_CYCLES}) — advancing to DEPLOY")
+        state["phase"] = "DEPLOY"
+        pipeline["sub_phase"] = "DEPLOY_PREFLIGHT"
+        _save_pipeline_state(state, pipeline, project_path)
+        return {
+            "action": "advance",
+            "message": f"Maximum feedback cycles reached ({MAX_DEMO_CYCLES} of {MAX_DEMO_CYCLES}). Proceeding to deployment.",
+            "phase": "DEPLOY",
+            "sub_phase": "DEPLOY_PREFLIGHT",
+        }
+
+    # Increment cycle counter
+    pipeline["demo_cycles"] = demo_cycles + 1
+
+    # Read latest feedback from demo/feedback-round-N.md (round = cycles, since we just incremented)
+    feedback_round = pipeline["demo_cycles"]
+    feedback_file = project_path / "demo" / f"feedback-round-{feedback_round}.md"
+    feedback_text = ""
+    if feedback_file.exists():
+        feedback_text = _sanitize_agent_output(feedback_file.read_text().strip())
+
+    # Store feedback context for plan agents
+    pipeline["feedback_context"] = feedback_text
+
+    # Clear agent_timing for fresh plan agent starts
+    pipeline["agent_timing"] = {"agent_start_times": {}, "respawn_counts": {}}
+
+    # Clear demo_feedback_text so it doesn't carry over
+    pipeline.pop("demo_feedback_text", None)
+
+    # Route back to PLAN phase — plan agents will get feedback_context via generate_plan_agent_prompt
+    # (do NOT mutate existing prompts; they are regenerated fresh in PLAN/INIT)
+    state["phase"] = "PLAN"
+    pipeline["sub_phase"] = "INIT"
+    _save_pipeline_state(state, pipeline, project_path)
+    _log_decision(project_path, f"DEMO: Feedback cycle {demo_cycles + 1}/{MAX_DEMO_CYCLES} — routing back to PLAN with feedback")
+
+    return {
+        "action": "demo_replan",
+        "phase": "PLAN",
+        "sub_phase": "INIT",
+        "demo_cycles": demo_cycles + 1,
+        "message": "Your feedback has been recorded. The pipeline is revising the implementation to address your requests.",
+        "feedback_context": feedback_text,
+    }
 
 
 def generate_verify_prompt_v2(manifest: dict, mode: str, has_playwright: bool) -> str:
@@ -5082,6 +5431,9 @@ def _next_deploy_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     _log_decision(project_path, f"DEPLOY: Running '{deploy_cmd}'")
 
     # Run deploy command (shell=False for safety, cwd handles directory)
+    deploy_dir = deploy_info.get("deploy_dir", str(PROJECT_ROOT))
+    if not _is_safe_gate_cwd(deploy_dir):
+        deploy_dir = str(PROJECT_ROOT)
     try:
         result = subprocess.run(
             shlex.split(deploy_cmd),
@@ -5089,7 +5441,7 @@ def _next_deploy_run(state: dict, pipeline: dict, project_path: Path) -> dict:
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout
-            cwd=deploy_info.get("deploy_dir", str(PROJECT_ROOT)),
+            cwd=deploy_dir,
         )
         deploy_output = result.stdout + "\n" + result.stderr
         deploy_exit_code = result.returncode
@@ -5369,6 +5721,7 @@ def main():
 
     next_parser = subparsers.add_parser("next", help="Get next pipeline action")
     next_parser.add_argument("--confirm", action="store_true", help="Confirm gate (template/plan approval)")
+    next_parser.add_argument("--feedback", default="", help="User feedback text for DEMO phase revision")
     next_parser.add_argument("--project", dest="project_id", default=None,
                              help="Project ID to operate on (enables multi-project concurrency)")
 
@@ -5394,7 +5747,7 @@ def main():
         "finalize": cmd_finalize,
         "resume": cmd_resume,
         "status": lambda: cmd_status(project_id=project_id),
-        "next": lambda: cmd_next(confirm=args.confirm, project_id=project_id),
+        "next": lambda: cmd_next(confirm=args.confirm, project_id=project_id, feedback=getattr(args, "feedback", "")),
     }
 
     handler = commands.get(args.command)

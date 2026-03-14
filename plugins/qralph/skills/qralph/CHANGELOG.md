@@ -1,5 +1,18 @@
 # QRALPH Changelog
 
+## v6.8.0 (2026-03-14)
+
+### Added — DEMO Phase, Domain Personas, Evidence Hardening
+- **DEMO phase**: New 14th pipeline phase between VERIFY and DEPLOY. Presents completed work to user with feedback loop (max 2 cycles). Sub-phases: DEMO_PRESENT → DEMO_FEEDBACK → DEMO_MARSHAL.
+- **Domain persona archetypes**: `suggest_archetypes()` maps project keywords to pre-built persona sets (SaaS, ecommerce, CLI, API, mobile, security, content). Used in PERSONA phase for automatic generation.
+- **Evidence pattern hardening**: `_EVIDENCE_PATTERN` now uses a whitelist of source file extensions, preventing URLs (`example.com:443`) and IP:port pairs from bypassing the evidence gate.
+- **QUALITY_REVERIFY sub-phases**: Added to `VALID_SUB_PHASES` — state machine no longer rejects reverify transitions.
+- **Idempotent lock release**: `_release_session_lock()` uses a guard flag to prevent double-release anti-pattern from atexit + explicit calls.
+- **Convergence fallback completeness**: Fallback dict when `check_convergence` is unavailable now includes `stagnant` and `regressed` keys, preventing silent skip of stagnation detection.
+- **CLI keyword specificity**: Replaced generic "tool" with "cli-tool", "shell", "argv" in persona archetype matching to reduce false positives.
+- **Persona shim documentation**: Import shim for hyphenated filename now explains why it exists and how degradation works.
+- **547 tests passing** (8 new: 3 evidence false-positive, 1 VALID_SUB_PHASES, 1 lock idempotency, 2 CLI keyword, 1 convergence fallback).
+
 ## v6.6.3 (2026-03-06)
 
 ### Added — Quality Bar Enforcement (Project 045)

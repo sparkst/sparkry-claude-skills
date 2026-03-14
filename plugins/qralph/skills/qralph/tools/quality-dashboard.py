@@ -8,31 +8,68 @@ from __future__ import annotations
 import re
 
 
+_GHOST_SEPARATOR_RE = re.compile(r"^-{2,}\s*$")
+
+# Patterns tried in priority order — each captures (severity, id_or_empty, title).
+# Groups: (1) severity digit, (2) optional finding-ID token, (3) title text.
+_FINDING_PATTERNS: list[re.Pattern] = [
+    # [P0] ID-NNN: title  (canonical bracket + ID format)
+    re.compile(r"\[(P[012])\]\s+(\S+):\s+(.+)"),
+    # [P0] title  (bracket format without ID)
+    re.compile(r"\[(P[012])\]\s+()(.+)"),
+    # **P0** — title  or  **P0**: title  (bold format)
+    re.compile(r"\*\*(P[012])\*\*\s*[—:\-]\s*()(.+)"),
+    # ### P0-1: title  or  ## P0: title  (heading format)
+    re.compile(r"^#+\s+(P[012])[\s\-:]+()(.+)"),
+    # P0: title  or  P0 - title  or  P0 — title  (plain format)
+    re.compile(r"(?<!\[)(P[012])\s*[:\-—]\s*()(.+)"),
+]
+
+
 def parse_findings(output: str, agent_name: str = "") -> list[dict]:
     """Extract P0/P1/P2 findings from agent output.
 
-    Parses lines matching ``[P0] ID-NNN: title`` and extracts confidence
-    from ``**Confidence:** high`` patterns in the text following each finding.
+    Accepts findings in multiple severity formats:
+    - ``[P0] ID-NNN: title`` (canonical bracket + ID)
+    - ``[P0] title`` (bracket without ID)
+    - ``**P0** — title`` / ``**P0**: title`` (bold format)
+    - ``### P0: title`` (heading format)
+    - ``P0: title`` / ``P0 - title`` (plain format)
+
+    Extracts confidence from ``**Confidence:** high`` patterns in the text
+    following each finding.
+
+    Lines that are pure markdown separators (``--``, ``---``, etc.) are
+    discarded before pattern matching so they never inflate finding counts.
     """
-    pattern = re.compile(r"\[(P[012])\]\s+(\S+):\s+(.+)")
     confidence_pattern = re.compile(r"\*\*Confidence:\*\*\s+(high|medium|low)", re.IGNORECASE)
 
     findings: list[dict] = []
     lines = output.split("\n")
 
+    def _match_finding(line: str):
+        """Return the first pattern match for a finding line, or None."""
+        for pat in _FINDING_PATTERNS:
+            m = pat.search(line)
+            if m:
+                return m
+        return None
+
     for i, line in enumerate(lines):
-        match = pattern.search(line)
+        if _GHOST_SEPARATOR_RE.match(line.strip()):
+            continue
+        match = _match_finding(line)
         if not match:
             continue
 
         severity = match.group(1)
-        finding_id = match.group(2)
+        finding_id = match.group(2)  # may be empty string for non-ID formats
         title = match.group(3).strip()
 
         # Look ahead for confidence until next finding or end
         confidence = "medium"
         for j in range(i + 1, len(lines)):
-            if pattern.search(lines[j]):
+            if _match_finding(lines[j]):
                 break
             conf_match = confidence_pattern.search(lines[j])
             if conf_match:
@@ -96,6 +133,51 @@ def should_agent_continue(agent_findings: list[dict]) -> bool:
     Returns True if any finding is P0 or P1.
     """
     return any(f["severity"] in ("P0", "P1") for f in agent_findings)
+
+
+def deduplicate_findings(findings: list[dict]) -> list[dict]:
+    """Collapse identical findings reported by multiple agents into one entry.
+
+    Two findings are considered identical when their (severity, normalized_text)
+    pair matches. Normalization: lowercase, strip punctuation, collapse whitespace.
+    Different severities for the same title are kept separate per the AC.
+
+    Each resulting entry gains a ``confirmed_by`` list of all agent names that
+    reported the finding. The first occurrence in the input order is kept as the
+    base record.
+
+    Purely deterministic — no LLM calls, no embeddings.
+    """
+    _punct_re = re.compile(r"[^\w\s]")
+    _ws_re = re.compile(r"\s+")
+
+    def _normalize(text: str) -> str:
+        text = text.lower()
+        text = _punct_re.sub("", text)
+        text = _ws_re.sub(" ", text).strip()
+        return text
+
+    seen: dict[tuple[str, str], int] = {}  # (severity, normalized_title) → index in result
+    result: list[dict] = []
+
+    for finding in findings:
+        severity = finding.get("severity", "")
+        title = finding.get("title", "")
+        key = (severity, _normalize(title))
+
+        if key in seen:
+            idx = seen[key]
+            agent = finding.get("agent", "")
+            if agent and agent not in result[idx]["confirmed_by"]:
+                result[idx]["confirmed_by"].append(agent)
+        else:
+            entry = dict(finding)
+            agent = finding.get("agent", "")
+            entry["confirmed_by"] = [agent] if agent else []
+            seen[key] = len(result)
+            result.append(entry)
+
+    return result
 
 
 def compute_finding_deltas(prev_findings: list[dict], curr_findings: list[dict]) -> dict[str, str]:
