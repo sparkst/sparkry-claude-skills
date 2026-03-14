@@ -324,6 +324,12 @@ def _drive_pipeline(qp, qs, tmp_path, mode, fixtures, stop_condition=None):
                         content = fixtures.get(("EXEC", agent_name), MOCK_EXECUTION_OUTPUT)
                         _write_output(output_dir, f"{agent_name}.md", content)
 
+            elif action == "confirm_demo":
+                # Auto-confirm DEMO gate (approve, no feedback)
+                result = qp.cmd_next(confirm=True)
+                action2 = result.get("action", "")
+                history.append((action2, "confirm_demo_CONFIRM"))
+
             elif action in ("confirm_ideation", "confirm_personas", "confirm_concept"):
                 # Auto-confirm review gates
                 result = qp.cmd_next(confirm=True)
@@ -703,6 +709,10 @@ class TestSimulationDeploySmokePath:
                 if action == "complete":
                     # Shouldn't complete without hitting deploy
                     break
+                elif action == "confirm_demo":
+                    result = qp.cmd_next(confirm=True)
+                    if _track_deploy(result.get("action", ""), result, sub_phase, qs):
+                        break
                 elif action == "confirm_template":
                     result = qp.cmd_next(confirm=True)
                     if result.get("action") == "spawn_agents":
