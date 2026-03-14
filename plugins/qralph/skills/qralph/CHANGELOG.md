@@ -1,5 +1,14 @@
 # QRALPH Changelog
 
+## v6.8.1 (2026-03-14)
+
+### Improved — Skill Quality and Model Guidance
+- **YAML frontmatter**: Added `name` and `description` fields for proper skill auto-triggering. Previously the skill could only be invoked via explicit `/qralph` command.
+- **Explanatory tone**: Replaced commanding language ("You are a dumb executor", "non-negotiable") with reasoning that explains *why* determinism matters — specifically how freelancing wastes tokens when 5+ parallel agents receive invalid context from a deviated executor.
+- **Progressive disclosure**: Extracted verification troubleshooting, quality loop internals, and smoke test details into `references/phase-troubleshooting.md`. SKILL.md reduced from 286 to 231 lines while preserving all functionality.
+- **Deduplicated instructions**: "Don't leave the pipeline loop" was stated 3 times; consolidated into single "Session Ownership" section with architectural reasoning.
+- **Test fix**: `test_version_in_title` now handles YAML frontmatter by searching for the first `# ` heading instead of checking `first_line`.
+
 ## v6.8.0 (2026-03-14)
 
 ### Added — DEMO Phase, Domain Personas, Evidence Hardening

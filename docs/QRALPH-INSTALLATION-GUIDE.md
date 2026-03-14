@@ -1,8 +1,8 @@
-# QRALPH v6.8.0 — Installation and Usage Guide
+# QRALPH v6.8.1 — Installation and Usage Guide
 
 ## What is QRALPH?
 
-QRALPH is a deterministic 14-phase multi-agent pipeline for Claude Code (v6.8.0). It enforces proper software design process on every run — requirements decomposition, TDD, quality gates, and independent verification — so you stop babysitting AI and start shipping verified software.
+QRALPH is a deterministic 14-phase multi-agent pipeline for Claude Code (v6.8.1). It enforces proper software design process on every run — requirements decomposition, TDD, quality gates, and independent verification — so you stop babysitting AI and start shipping verified software.
 
 **The problem it solves:** AI coding assistants skip steps. They write code without tests. They validate their own work by saying "looks good" instead of actually checking. They forget requirements mid-run. On complex tasks, you end up doing manual follow-ups for every step the AI skipped. QRALPH eliminates this by wrapping Claude Code's capabilities in a pipeline that blocks progression until each phase is genuinely complete.
 

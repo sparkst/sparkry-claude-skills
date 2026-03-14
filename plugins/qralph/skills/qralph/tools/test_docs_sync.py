@@ -108,10 +108,17 @@ class TestSkillMd:
 
     def test_version_in_title(self):
         path = os.path.join(_TOOLS_DIR, "..", "SKILL.md")
-        first_line = _read(path).split("\n")[0]
-        assert f"v{VERSION}" in first_line, (
-            f"SKILL.md title does not mention v{VERSION}. "
-            f"Update the first line of plugins/qralph/skills/qralph/SKILL.md"
+        text = _read(path)
+        # Find the first markdown heading (# ...), skipping YAML frontmatter
+        heading = None
+        for line in text.split("\n"):
+            if line.startswith("# "):
+                heading = line
+                break
+        assert heading is not None, "SKILL.md has no markdown heading (# ...)"
+        assert f"v{VERSION}" in heading, (
+            f"SKILL.md heading does not mention v{VERSION}. "
+            f"Update the heading in plugins/qralph/skills/qralph/SKILL.md"
         )
 
 
