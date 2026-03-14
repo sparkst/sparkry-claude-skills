@@ -1,28 +1,45 @@
-# QRALPH v6.8.0 — Deterministic Multi-Agent Pipeline (Idea to Production)
+---
+name: qralph
+description: Deterministic multi-agent pipeline that takes ideas from concept to deployed production code. Handles the full lifecycle — ideation, persona generation, concept review, planning, parallel execution, quality loops, verification, demo, deployment, and smoke testing. Use this whenever the user says /qralph, QRALPH, asks to "run the pipeline", or wants end-to-end multi-agent project execution. Also use when the user references pipeline phases, project orchestration, or wants to build something from scratch with automated quality gates.
+---
 
-> You are a WORKFLOW EXECUTOR. You follow the pipeline script exactly.
-> You do NOT make judgment calls. You do NOT skip steps. You do NOT summarize.
+# QRALPH v6.8.1 — Deterministic Multi-Agent Pipeline
 
-## EXCLUSIVE MODE — READ THIS FIRST
+## How This Works (read this first)
 
-**When QRALPH is active, it owns the entire session.**
+QRALPH is a **state machine**. The pipeline script (`qralph-pipeline.py`) has already encoded all the decision-making — which agents to spawn, in what order, with what prompts, and what quality gates to enforce. Your job is to be the **faithful executor**: call `next`, do exactly what the pipeline tells you, relay results to the user, repeat.
 
-- Do NOT invoke, load, or follow any other skill (brainstorming, frontend-design, writing, etc.) from the outer loop. QRALPH IS the workflow — not a step in another workflow.
-- The ONLY thing you do is run `plan` then loop `next` until `complete`. Nothing else.
-- Skills and plugins (frontend-design, etc.) MAY appear inside agent prompts that the pipeline generates. That is fine — agents spawned by the pipeline can use whatever tools and skills they need. But YOU, the outer executor, never break out of the `next` loop to go do something else.
-- If another skill's trigger seems to match (e.g., "build a landing page" triggering frontend-design), IGNORE IT. The pipeline handles all of that through its own agents.
-- Do NOT run EnterPlanMode, brainstorming skills, or any pre-work. Go straight to the pipeline `plan` command.
+This matters because QRALPH spawns many agents in parallel. If you improvise — reordering steps, skipping a gate, adding your own analysis, or invoking external skills — the downstream agents receive stale or incorrect context. We've seen this waste thousands of tokens: 5 agents complete work based on assumptions that were invalid because the executor deviated from the pipeline's instructions. The pipeline prevents this by managing state transitions, so trust it.
 
-## Rules (non-negotiable)
-1. Spawn ALL agents returned by the pipeline. Never skip any.
-2. Use the EXACT model from each agent config. Never substitute.
-3. Write each agent's COMPLETE return text to disk verbatim. Never summarize or paraphrase.
-4. **TWO-CALL GATE PROTOCOL:** At ALL confirm gates, the pipeline returns the gate action on the FIRST call. You MUST use AskUserQuestion to show the output and get the user's explicit approval. Only AFTER the user responds in a SEPARATE TURN do you call `next --confirm`. The pipeline enforces this — it rejects `--confirm` if the gate wasn't returned in a prior call. Calling `next --confirm` in the same turn as showing the gate is a VIOLATION.
-5. Never call pipeline commands directly. Only use `next`.
-6. If blocked or confused, STOP and ask the user. Do not guess.
-7. For no-code users (`--thorough`): use plain language only. Never show error traces, type errors, or technical jargon.
-8. NEVER leave the pipeline loop to invoke other skills or workflows. You are a dumb executor — call `next`, do what it says, repeat.
-9. When spawning smoke test agents, spawn ALL in parallel for maximum speed.
+**Your role in one sentence:** Call the pipeline, do what it says, show results to the user at gates, and never freelance.
+
+## Why Determinism Matters
+
+The pipeline's phases build on each other. Each phase produces artifacts that downstream phases consume. When the executor skips ahead, adds its own interpretation, or calls external skills:
+
+- Agents spawn with prompts built from the wrong state
+- Parallel agent groups do work that has to be thrown away
+- Quality gates can't validate work that didn't follow the expected path
+- The user pays for wasted tokens and gets a worse result
+
+The pipeline already handles complexity, error recovery, and backtracking internally. It will escalate to the user when it genuinely needs human judgment. Your restraint is what makes the system reliable.
+
+## Session Ownership
+
+When QRALPH is active, it orchestrates everything — brainstorming, frontend design, code review, deployment — through its own pipeline phases and spawned agents. Those agents can use whatever tools and skills they need. But the executor (you) stays in the `plan` → `next` loop.
+
+If another skill's trigger seems to match the user's request (e.g., "build a landing page" triggering frontend-design), the pipeline already handles that domain through its own agents. Invoking external skills would create parallel, conflicting work streams. Skip pre-work like EnterPlanMode or brainstorming skills — go straight to `plan`.
+
+## Executor Guidelines
+
+1. **Spawn every agent the pipeline returns.** The pipeline has already decided which agents are needed based on project complexity. Skipping one means downstream phases get incomplete inputs.
+2. **Use the exact model from each agent config.** Model selection is intentional — haiku for fast checks, opus for deep analysis. Substituting changes cost and quality characteristics the pipeline planned around.
+3. **Write each agent's complete return text to disk verbatim.** Later phases read these files. Summarizing or paraphrasing loses the detail that verification and quality loops depend on.
+4. **Two-call gate protocol:** At confirm gates, the pipeline returns the gate action on the first call. Show the output to the user via AskUserQuestion and stop. Only after the user responds in a separate turn do you call `next --confirm`. The pipeline enforces this — it rejects `--confirm` if the gate wasn't returned in a prior call. This prevents accidentally auto-confirming past the user.
+5. **Only use `next` to advance.** The pipeline manages phase transitions internally. Calling other pipeline commands directly can corrupt state or skip gates.
+6. **If blocked or confused, ask the user.** Guessing at the right action risks sending agents down the wrong path, which compounds into wasted work.
+7. **For `--thorough` mode users:** Use plain language only. These are non-technical users — never show error traces, type errors, or jargon.
+8. **Spawn smoke test agents in parallel** for maximum speed (they're independent and use haiku).
 
 ## Trigger
 
@@ -105,7 +122,7 @@ python3 .qralph/tools/qralph-config.py setup
 python3 .qralph/tools/qralph-pipeline.py plan "<request>" [--thorough|--quick] [--target-dir <path>]
 ```
 
-**IMPORTANT:** The `plan` response includes a `project_id` field (e.g. `"014-redesign-checkout-flow"`). You MUST capture this value and pass it to ALL subsequent `next` calls using `--project`. This enables multiple QRALPH projects to run concurrently in separate sessions.
+The `plan` response includes a `project_id` field (e.g. `"014-redesign-checkout-flow"`). Capture this and pass it to all subsequent `next` calls via `--project`. This is how QRALPH isolates state when multiple projects run concurrently.
 
 ## Loop
 
@@ -114,94 +131,64 @@ Repeat until action is `"complete"`:
 python3 .qralph/tools/qralph-pipeline.py next [--confirm] --project <project_id>
 ```
 
-## Actions
+## Action Reference
 
 | Action | What to do |
 |--------|-----------|
-| `confirm_ideation` | Show `IDEATION.md` to user. Use AskUserQuestion. STOP. Only after user confirms in a separate turn: `next --confirm` |
-| `confirm_personas` | Show `personas/*.md` to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
-| `confirm_concept` | Show `CONCEPT-SYNTHESIS.md` to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
-| `confirm_template` | Show template + agents to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
-| `spawn_agents` | For EACH agent: spawn with `name=agent.name, model=agent.model, prompt=agent.prompt`. Write EXACT return to `{output_dir}/{agent.name}.md`. If `parallel: true`, spawn ALL agents simultaneously. |
-| `define_tasks` | Read `analyses_summary` from the action response. Read EXISTING `manifest.json` at `manifest_path`, ADD a `tasks` array (preserving all other fields), write back. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
-| `confirm_plan` | Show `PLAN.md` + tasks to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm` |
-| `confirm_demo` | Show demo checklist to user. Use AskUserQuestion. STOP. If user approves: `next --confirm`. If user provides feedback: `next --confirm --feedback "<user text>"`. |
-| `demo_feedback` | Pipeline recorded feedback and is marshaling it back to PLAN for revision. Tell user their feedback is being addressed. Call `next`. |
-| `demo_replan` | Pipeline is revising the plan based on demo feedback. Tell user: "Your feedback has been recorded. The pipeline is revising the implementation." Call `next`. |
-| `confirm_deploy` | Show pre-deploy checklist (secrets, env vars, DNS, placeholders) to user. Use AskUserQuestion. STOP. Only after user confirms: `next --confirm`. Note: if user explicitly said "deploy to X" in their original request, the pipeline auto-deploys and this gate is skipped. |
-| `smoke_results` | Show smoke test results to user (all passed). Celebrate the successful deployment. Call `next`. |
-| `smoke_failure` | Show failed smoke tests to user. Let user decide: (a) fix issues and redeploy, (b) accept current state and continue. Pass user's choice via `next`. |
-| `quality_dashboard` | Show `quality-reports/round-N.md` to user. If converging (P0 count dropping): tell user quality is improving, call `next`. If stuck or P0s persist at round 3: explain to user in plain language, then call `next` (pipeline handles backtrack). |
-| `respawn_agent` | An agent timed out. Re-spawn the agent named in `agent_name` with its original prompt and model. Write output to the file in `output_file`. If the response includes `heal_suggestion`, mention to user that auto-recovery is being attempted. Then call `next`. |
-| `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose an option. If `heal_suggestion` is present, show it as a recommended action. Pass their choice via `next --confirm`. Never add technical detail — use exactly what the pipeline provides. |
-| `backtrack_replan` | Tell user: "The current approach isn't working. The pipeline is going back to create a revised plan with what we learned." Call `next`. The pipeline routes back to PLAN with failure context. |
+| `confirm_ideation` | Show `IDEATION.md` to user via AskUserQuestion. Stop. After user confirms in a separate turn: `next --confirm` |
+| `confirm_personas` | Show `personas/*.md` to user via AskUserQuestion. Stop. After user confirms: `next --confirm` |
+| `confirm_concept` | Show `CONCEPT-SYNTHESIS.md` to user via AskUserQuestion. Stop. After user confirms: `next --confirm` |
+| `confirm_template` | Show template + agents to user via AskUserQuestion. Stop. After user confirms: `next --confirm` |
+| `spawn_agents` | For each agent: spawn with `name=agent.name, model=agent.model, prompt=agent.prompt`. Write the complete return text to `{output_dir}/{agent.name}.md`. If `parallel: true`, spawn all agents simultaneously. |
+| `define_tasks` | Read `analyses_summary` from the action response. Read existing `manifest.json` at `manifest_path`, add a `tasks` array (preserving all other fields), write back. Each task: `{"id": "T-001", "summary": "...", "files": ["path/to/file"], "acceptance_criteria": ["criterion 1"], "depends_on": [], "tests_needed": true}`. Then call `next`. |
+| `confirm_plan` | Show `PLAN.md` + tasks to user via AskUserQuestion. Stop. After user confirms: `next --confirm` |
+| `confirm_demo` | Show demo checklist to user via AskUserQuestion. Stop. If user approves: `next --confirm`. If user provides feedback: `next --confirm --feedback "<user text>"`. |
+| `demo_feedback` | Pipeline recorded feedback and is routing it back to PLAN for revision. Tell the user their feedback is being addressed. Call `next`. |
+| `demo_replan` | Pipeline is revising the plan based on demo feedback. Tell user their feedback has been recorded and the implementation is being revised. Call `next`. |
+| `confirm_deploy` | Show pre-deploy checklist to user via AskUserQuestion. Stop. After user confirms: `next --confirm`. (If user explicitly said "deploy to X" in their original request, the pipeline auto-deploys and skips this gate.) |
+| `smoke_results` | Show smoke test results to user (all passed). Call `next`. |
+| `smoke_failure` | Show failed smoke tests to user. Let user decide: (a) fix issues and redeploy, (b) accept current state. Pass choice via `next`. |
+| `quality_dashboard` | Show `quality-reports/round-N.md` to user. If P0 count is dropping, note quality is improving and call `next`. If stuck at round 3, explain in plain language and call `next` (pipeline handles backtrack). |
+| `respawn_agent` | An agent timed out. Re-spawn the agent named in `agent_name` with its original prompt and model. Write output to `output_file`. If `heal_suggestion` is present, mention auto-recovery is being attempted. Call `next`. |
+| `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose. If `heal_suggestion` is present, show it as a recommendation. Pass choice via `next --confirm`. Use exactly what the pipeline provides — don't add technical detail. |
+| `backtrack_replan` | Tell user the current approach isn't working and the pipeline is revising the plan with lessons learned. Call `next`. |
 | `learn_complete` | Show `learning-summary.md` to user. Summarize what the project taught QRALPH. Call `next`. |
-| `error` | **Read the error carefully.** If this is a verification error (during VERIFY phase), the `message` field tells you exactly what failed — missing criteria, weak evidence, failed ACs, etc. You MUST feed these specific failures back into the next verification attempt. Delete `verification/result.md`, then re-run `next` so the pipeline regenerates the verification agent. The verifier will try again with a fresh prompt. If the error is about implementation bugs (not verification format), fix the code first, then re-run `next`. If the fix is unclear, show the error to the user and ask. |
+| `error` | Read the error `message` carefully. For verification errors: delete `verification/result.md` and call `next` so the pipeline regenerates the verifier. For implementation bugs: fix the code, then call `next`. If unclear: show the error to the user and ask. See `references/phase-troubleshooting.md` for detailed guidance. |
 | `complete` | Show `SUMMARY.md` to user. Done. |
 
 ## Deploy Behavior
 
-The DEPLOY phase is intelligent about when to ask:
+The pipeline is intelligent about when to ask:
 
-- **User said "deploy to Cloudflare Workers"** → Explicit intent detected. Pipeline auto-deploys (skips `confirm_deploy` gate). Smoke tests run against live URL.
-- **User said "build me a landing page"** (no deploy language) → No deploy intent. Pipeline skips DEPLOY and SMOKE entirely, goes straight to LEARN.
-- **User said "build and maybe deploy later"** → Implicit intent. Pipeline shows `confirm_deploy` gate with checklist. User decides.
+- **"deploy to Cloudflare Workers"** → Explicit intent. Auto-deploys, skips `confirm_deploy`. Smoke tests run against live URL.
+- **"build me a landing page"** → No deploy language. Skips DEPLOY and SMOKE entirely, goes to LEARN.
+- **"build and maybe deploy later"** → Implicit intent. Shows `confirm_deploy` gate with checklist.
 
-The pipeline auto-detects the deploy command from project config:
-- `wrangler.toml` → `npx wrangler deploy`
-- `vercel.json` → `npx vercel --prod`
-- `package.json` with `deploy` script → `npm run deploy`
+Deploy command auto-detection: `wrangler.toml` → wrangler, `vercel.json` → vercel, `package.json` deploy script → npm.
 
-## Smoke Test Behavior
+## Safety Guarantees (--thorough mode)
 
-After successful deployment, the pipeline generates **parallel smoke test agents** that hit the live URL:
+These invariants are enforced by the pipeline:
 
-- Agents are categorized: pages, API, security, SEO, errors
-- All agents run **simultaneously** using haiku model (fast + cheap)
-- Agents use WebFetch/curl — no source code reading
-- Each criterion: PASS (with evidence), FAIL (with details), or SKIP (needs browser JS)
-- All PASS → advance to LEARN
-- Any FAIL → show to user with options
+1. **Pipeline never exits with failing tests.** It fixes or escalates.
+2. **Every requirement has a test.** The requirements tracer enforces this in POLISH.
+3. **Plain-language escalation.** When auto-fix fails, the user gets simple options, not technical error messages.
+4. **No broken builds.** VERIFY is a hard gate — all checks pass before proceeding.
+5. **No silent deploys.** Unless the user explicitly requested deployment, the pipeline asks first.
+6. **Production is verified.** Smoke tests confirm the live site works after deployment.
+7. **Learning accumulates.** Each project captures lessons for future projects.
 
-## Verification Phase Behavior (CRITICAL — read this carefully)
+## What the Pipeline Handles (so you don't need to)
 
-The VERIFY phase is the #1 source of pipeline failures. The verifier agent must check **each acceptance criterion individually** by reading actual source files. Here's what goes wrong and how to handle it:
-
-**Common failure: rubber-stamping.** The verifier writes generic evidence like "Verified in execution outputs" instead of reading files and citing `file:line` references. The pipeline's validation layer catches this and returns an `error` action with specific block reasons (e.g., "evidence depth too weak: 20/25 entries lack file:line references").
-
-**When you receive an `error` during VERIFY phase:**
-1. Read the `message` field — it tells you exactly what failed (missing AC results, weak evidence, failed criteria, etc.)
-2. Delete `verification/result.md` so the pipeline regenerates a fresh verification prompt
-3. Call `next` — the pipeline will re-enter VERIFY and spawn a new verifier agent
-4. The new verifier starts fresh and must do the work properly this time
-
-**What "properly" means for verification:**
-- The verifier reads each source file with the Read tool (not just execution reports)
-- Each AC gets its own read→verify→record cycle — no batching
-- Evidence must be `filename.ext:LINE — "quoted code snippet"`
-- The pipeline validates: ≥80% of evidence must have `file:line` patterns
-- All 6 fields per criterion are required: criterion_index, criterion, status, intent_match, ship_ready, evidence
-
-**Max retries:** 3 verification attempts. After 3 failures, the pipeline escalates to the user with options: accept current state, go back for more fixes, or stop.
-
-## Quality Loop Behavior
-
-The quality loop has two sub-phases. You do not control this logic — the pipeline manages it — but understand what's happening:
-
-**Discovery** (expensive, capped):
-- Agents review code in parallel, report P0/P1/P2 findings with confidence scores
-- Agents that find nothing drop out (code-reviewer stays 1 extra round)
-- Max rounds scale by complexity: 2 (simple), 3 (moderate/complex)
-- Early exit on consensus: all agents high confidence + no P0s
-
-**Fix+Verify** (cheap, loops until clean):
-- Each finding becomes a fix requirement with a REQ-ID
-- TDD: failing test first, then fix, then simplify
-- Full test suite must stay green after each fix
-- If a fix breaks other tests 3 times: backtrack to replan
-- If a fix fails 3 times: escalate to user
-
-**Replan limit:** Max 2 replans per project. After that, escalate to user.
+- Critical agents (sde-iii, architecture-advisor) are included regardless of template
+- Quality gate (tests/lint/typecheck) runs automatically after execution
+- Verification verdict must be explicit PASS — ambiguous or FAIL blocks finalization
+- Gate two-call protocol enforcement
+- Deploy intent detection and command auto-detection
+- Smoke test parallelization and verdict aggregation
+- Agent scaling by complexity
+- Confidence-based consensus for early discovery termination
+- State checkpointing at every transition for crash recovery
 
 ## Project Artifacts
 
@@ -209,77 +196,36 @@ The quality loop has two sub-phases. You do not control this logic — the pipel
 project-NNN/
 ├── IDEATION.md              # Refined concept + business validation
 ├── personas/                # Persona prompt templates
-│   ├── persona-1-sarah.md
-│   └── persona-2-alex.md
 ├── concept-reviews/         # Isolated concept review outputs
-│   ├── persona-sarah.md
-│   ├── business-advisor.md
-│   └── ...
 ├── CONCEPT-SYNTHESIS.md     # Consolidated concept findings (P0/P1/P2)
 ├── agent-outputs/           # Planning agent outputs
 ├── PLAN.md                  # Implementation plan
 ├── manifest.json            # Project manifest with tasks
 ├── execution-outputs/       # Per-task implementation outputs
 ├── quality-reports/         # Per-round quality dashboards
-│   ├── round-1.md
-│   └── round-2.md
 ├── POLISH-REPORT.md         # Bug fix + wiring + requirements trace
-├── verification/            # Fresh-context verification
-│   └── result.md
-├── demo/                    # Demo phase feedback files
-│   └── feedback.md
-├── DEPLOY-REPORT.md         # Deploy command output + live URL
+├── verification/result.md   # Fresh-context verification
+├── demo/feedback.md         # Demo phase feedback
+├── DEPLOY-REPORT.md         # Deploy output + live URL
 ├── smoke-tests/             # Per-category smoke test results
-│   ├── smoke-pages.md
-│   ├── smoke-api.md
-│   ├── smoke-security.md
-│   └── smoke-seo.md
 ├── SMOKE-REPORT.md          # Aggregated smoke test verdict
 ├── learning-summary.md      # What this project taught QRALPH
-├── SUMMARY.md               # Final summary with metrics
-└── ...
+└── SUMMARY.md               # Final summary with metrics
 ```
 
-## No-Code User Safety Guarantees (--thorough mode)
-
-These invariants are enforced by the pipeline. You must never circumvent them:
-
-1. **Pipeline never exits with failing tests.** If tests fail, it fixes or escalates.
-2. **Every requirement has a test.** The requirements tracer enforces this in POLISH.
-3. **Plain-language escalation.** When auto-fix fails, the user gets simple options — never "fix this TypeScript error."
-4. **No broken builds.** VERIFY is a hard gate — all checks must pass.
-5. **No silent deploys.** Unless user explicitly requested deployment, the pipeline always asks first.
-6. **Production is verified.** After deployment, smoke tests confirm the live site works.
-7. **Learning accumulates.** Each project improves future projects via LEARN phase.
-
-## What the pipeline enforces (you don't need to)
-- Critical agents (sde-iii, architecture-advisor) are always included regardless of template
-- Quality gate (tests/lint/typecheck) runs automatically after execution, before verification
-- Verification verdict must be explicit PASS — ambiguous or FAIL blocks finalize
-- Gate two-call protocol — `--confirm` rejected if gate wasn't returned in prior call
-- Deploy intent detection — explicit ("deploy to X") vs implicit vs none
-- Deploy command auto-detection from project config (wrangler.toml, vercel.json, package.json)
-- Smoke test parallelization and verdict aggregation
-- Agent scaling by complexity (fewer agents for simple projects, more for complex)
-- Confidence-based consensus for early discovery termination
-- State is checkpointed at every transition for crash recovery
-
 ## Recovery
+
 ```bash
 python3 .qralph/tools/qralph-pipeline.py next --project <project_id>
 ```
-(Picks up where it left off — state is in the project directory.)
+State is checkpointed — this picks up where it left off.
 
 ## Status
+
 ```bash
 python3 .qralph/tools/qralph-pipeline.py status --project <project_id>
 ```
 
 ## Multi-Project Concurrency
 
-Multiple QRALPH projects can run simultaneously in separate Claude Code sessions. Each session passes `--project <id>` to isolate state:
-
-- Session 1: `next --project 014-redesign-checkout-flow`
-- Session 2: `next --project 015-add-notifications`
-
-State is stored per-project in `.qralph/projects/<id>/state.json`. Session locks are also per-project, so projects don't block each other.
+Multiple QRALPH projects can run simultaneously in separate Claude Code sessions. Each session passes `--project <id>` to isolate state. State is stored per-project in `.qralph/projects/<id>/state.json`.
