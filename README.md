@@ -57,11 +57,9 @@ QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → C
 QRALPH "Add user authentication with OAuth2 and session management"
 ```
 
-### What's New in v6.8.1
+### What's New in v6.9.0
 
-- **DEMO phase**: New 14th pipeline phase between VERIFY and DEPLOY. Presents completed work to the user with a feedback loop (max 2 cycles) before deploying.
-- **Domain persona archetypes**: `suggest_archetypes()` maps project keywords to pre-built persona sets (SaaS, ecommerce, CLI, API, mobile, security, content) for automatic generation in the PERSONA phase.
-- **Evidence hardening**: Source file extension whitelist prevents URLs and IP:port pairs from bypassing the evidence gate.
+- **Hard dependency on `quality-dashboard.py`**: Previously, if `quality-dashboard.py` was missing, the quality loop silently degraded — auto-converging with zero findings and dropping all P1s and P2s. Now fails hard at startup with a clear error message to update the plugin.
 - **547 tests passing.**
 
 ### Multi-Project Concurrency (v6.7.0)
@@ -97,7 +95,7 @@ QRALPH "Add notification system"
 
 | Plugin | Install | Description |
 |--------|---------|-------------|
-| **qralph** | `/plugin install qralph@sparkry-claude-skills` | Deterministic 14-phase multi-agent pipeline (v6.8.1) |
+| **qralph** | `/plugin install qralph@sparkry-claude-skills` | Deterministic 14-phase multi-agent pipeline (v6.9.0) |
 | **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
 | **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, quality scoring |
