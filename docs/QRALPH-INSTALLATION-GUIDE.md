@@ -2,7 +2,7 @@
 
 ## What is QRALPH?
 
-QRALPH is a deterministic 13-phase multi-agent pipeline for Claude Code. It enforces proper software design process on every run — requirements decomposition, TDD, quality gates, and independent verification — so you stop babysitting AI and start shipping verified software.
+QRALPH is a deterministic 14-phase multi-agent pipeline for Claude Code. It enforces proper software design process on every run — requirements decomposition, TDD, quality gates, and independent verification — so you stop babysitting AI and start shipping verified software.
 
 **The problem it solves:** AI coding assistants skip steps. They write code without tests. They validate their own work by saying "looks good" instead of actually checking. They forget requirements mid-run. On complex tasks, you end up doing manual follow-ups for every step the AI skipped. QRALPH eliminates this by wrapping Claude Code's capabilities in a pipeline that blocks progression until each phase is genuinely complete.
 
@@ -43,7 +43,7 @@ QRALPH "Add user authentication with OAuth2 and session management"
 ### With Mode
 
 ```bash
-# Full 13-phase pipeline (default) — for production features
+# Full 14-phase pipeline (default) — for production features (includes DEMO)
 QRALPH "Build a payment processing system" --thorough
 
 # Quick mode (7 phases) — for developer tasks
@@ -73,6 +73,7 @@ QRALPH "Build a landing page" --target-dir projects/my-site
 | **QUALITY_LOOP** | Discovery finds issues, fix rounds address them | Automated code review with real fixes, not just comments |
 | **POLISH** | Bug fixes, wiring checks, requirements trace | Confirms every requirement has a test and implementation |
 | **VERIFY** | Fresh-context agent checks every AC against source files | Independent verification with file:line evidence — no rubber-stamping |
+| **DEMO** | Present completed work to user with feedback loop (max 2 cycles) | User sees and approves the result before deployment |
 | **DEPLOY** | Preflight checklist, deploy command, verify URL | Only deploys when you explicitly asked for it |
 | **SMOKE** | Parallel HTTP tests hit the live site | Confirms the deployed version actually works |
 | **LEARN** | Captures learnings for future projects | Each project makes the next one better |
@@ -130,6 +131,7 @@ After completion, find your outputs at:
 ├── POLISH-REPORT.md         # Bug fixes and requirements trace
 ├── verification/
 │   └── result.md            # Per-AC verification with evidence
+├── DEMO-REPORT.md           # Demo presentation and user feedback
 ├── DEPLOY-REPORT.md         # Deploy output and live URL
 ├── smoke-tests/             # Per-category smoke test results
 ├── SMOKE-REPORT.md          # Aggregated smoke verdict

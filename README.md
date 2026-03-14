@@ -6,9 +6,9 @@ Production-ready Claude Code plugins for deterministic software delivery, resear
 
 **The problem:** Claude Code is powerful, but it cuts corners. It skips tests. It rubber-stamps its own validation. It forgets requirements mid-run. It says "done" when it's not. On long runs you end up babysitting — manually checking that tests were written, that they actually ran, that acceptance criteria were verified one-by-one against real files instead of bulk-approved with "looks good."
 
-**QRALPH fixes this.** It wraps Claude Code in a deterministic 13-phase pipeline that enforces every step of proper software design — from requirements decomposition through fresh-context verification. Every acceptance criterion gets individually checked against actual source files with file:line evidence. Every requirement fragment gets tracked from plan to implementation to proof. Tests must be written, must run, must pass. The quality gate is a hard block, not a suggestion.
+**QRALPH fixes this.** It wraps Claude Code in a deterministic 14-phase pipeline that enforces every step of proper software design — from requirements decomposition through fresh-context verification and user demo. Every acceptance criterion gets individually checked against actual source files with file:line evidence. Every requirement fragment gets tracked from plan to implementation to proof. Tests must be written, must run, must pass. The quality gate is a hard block, not a suggestion.
 
-**Why not just use Claude Code with plugins?** Plugins give Claude better tools. QRALPH gives it a process. Without QRALPH, Claude decides what steps to follow, what to skip, and when "good enough" is good enough. With QRALPH, the pipeline decides. Claude does the creative work — architecture, coding, problem-solving — but the pipeline enforces that every deliverable goes through ideation, planning, implementation, simplification, quality review, polish, and independent verification before it ships. It still uses Claude's latest capabilities (Superpowers skills, MCP tools, parallel agents) — it just makes sure they're applied in the right order with the right gates.
+**Why not just use Claude Code with plugins?** Plugins give Claude better tools. QRALPH gives it a process. Without QRALPH, Claude decides what steps to follow, what to skip, and when "good enough" is good enough. With QRALPH, the pipeline decides. Claude does the creative work — architecture, coding, problem-solving — but the pipeline enforces that every deliverable goes through ideation, planning, implementation, simplification, quality review, polish, independent verification, and a user demo before it ships. It still uses Claude's latest capabilities (Superpowers skills, MCP tools, parallel agents) — it just makes sure they're applied in the right order with the right gates.
 
 ### What QRALPH Enforces
 
@@ -20,17 +20,17 @@ Production-ready Claude Code plugins for deterministic software delivery, resear
 - Verification requires `file:line — "quoted code"` evidence for each criterion (no "verified in execution outputs" rubber-stamping)
 - Deploy only happens with explicit user intent; smoke tests hit the live URL after deployment
 
-### The 13-Phase Pipeline
+### The 14-Phase Pipeline
 
 ```
 IDEATE → PERSONA → CONCEPT_REVIEW → PLAN → EXECUTE → SIMPLIFY →
-QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
+QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → COMPLETE
 ```
 
 | Phase | What Happens |
 |-------|-------------|
 | IDEATE | Brainstorm and validate the concept |
-| PERSONA | Generate user archetypes to pressure-test the idea |
+| PERSONA | Generate domain-specific user archetypes to pressure-test the idea |
 | CONCEPT_REVIEW | Multi-agent review from architect, PM, and developer perspectives |
 | PLAN | Create implementation plan with tasks, ACs, and acceptance criteria |
 | EXECUTE | Parallel agent groups implement tasks with TDD |
@@ -38,6 +38,7 @@ QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
 | QUALITY_LOOP | Discovery rounds find P0/P1/P2 issues, fix rounds address them |
 | POLISH | Bug fixes, wiring checks, requirements traceability |
 | VERIFY | Fresh-context agent verifies every AC with file:line evidence |
+| DEMO | Present completed work to user with feedback loop (max 2 cycles) |
 | DEPLOY | Preflight checklist, deploy command, verify live URL |
 | SMOKE | Parallel HTTP tests hit the deployed site |
 | LEARN | Capture learnings for future projects |
@@ -55,6 +56,13 @@ QUALITY_LOOP → POLISH → VERIFY → DEPLOY → SMOKE → LEARN → COMPLETE
 # Run it
 QRALPH "Add user authentication with OAuth2 and session management"
 ```
+
+### What's New in v6.8.0
+
+- **DEMO phase**: New 14th pipeline phase between VERIFY and DEPLOY. Presents completed work to the user with a feedback loop (max 2 cycles) before deploying.
+- **Domain persona archetypes**: `suggest_archetypes()` maps project keywords to pre-built persona sets (SaaS, ecommerce, CLI, API, mobile, security, content) for automatic generation in the PERSONA phase.
+- **Evidence hardening**: Source file extension whitelist prevents URLs and IP:port pairs from bypassing the evidence gate.
+- **547 tests passing.**
 
 ### Multi-Project Concurrency (v6.7.0)
 
@@ -89,7 +97,7 @@ QRALPH "Add notification system"
 
 | Plugin | Install | Description |
 |--------|---------|-------------|
-| **qralph** | `/plugin install qralph@sparkry-claude-skills` | Deterministic 13-phase multi-agent pipeline (v6.7.0) |
+| **qralph** | `/plugin install qralph@sparkry-claude-skills` | Deterministic 14-phase multi-agent pipeline (v6.8.0) |
 | **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
 | **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, quality scoring |
