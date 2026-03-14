@@ -76,23 +76,21 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     generate_persona_template = None
     generate_persona_review_prompt = None
 
-# Import quality dashboard (optional — may not exist yet)
-try:
-    _qd_path = Path(__file__).parent / "quality-dashboard.py"
-    _qd_spec = importlib.util.spec_from_file_location("quality_dashboard", _qd_path)
-    _qd_mod = importlib.util.module_from_spec(_qd_spec)
-    _qd_spec.loader.exec_module(_qd_mod)
-    parse_findings = _qd_mod.parse_findings
-    check_convergence = _qd_mod.check_convergence
-    should_agent_continue = _qd_mod.should_agent_continue
-    generate_dashboard = _qd_mod.generate_dashboard
-    deduplicate_findings = _qd_mod.deduplicate_findings
-except (ImportError, FileNotFoundError, AttributeError, OSError):
-    parse_findings = None
-    check_convergence = None
-    should_agent_continue = None
-    generate_dashboard = None
-    deduplicate_findings = None
+# Import quality dashboard (required — quality loop is useless without it)
+_qd_path = Path(__file__).parent / "quality-dashboard.py"
+if not _qd_path.exists():
+    raise FileNotFoundError(
+        f"quality-dashboard.py not found at {_qd_path}. "
+        "The quality loop cannot run without it — update your QRALPH plugin."
+    )
+_qd_spec = importlib.util.spec_from_file_location("quality_dashboard", _qd_path)
+_qd_mod = importlib.util.module_from_spec(_qd_spec)
+_qd_spec.loader.exec_module(_qd_mod)
+parse_findings = _qd_mod.parse_findings
+check_convergence = _qd_mod.check_convergence
+should_agent_continue = _qd_mod.should_agent_continue
+generate_dashboard = _qd_mod.generate_dashboard
+deduplicate_findings = _qd_mod.deduplicate_findings
 
 # Import confidence scorer (optional — may not exist yet)
 try:
@@ -132,7 +130,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.8.1"
+__version__ = "6.9.0"
 
 QUALITY_STANDARD = """
 ## Quality Standard
