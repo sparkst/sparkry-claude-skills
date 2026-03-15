@@ -130,7 +130,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.10.0"
+__version__ = "6.10.1"
 
 QUALITY_STANDARD = """
 ## Quality Standard
@@ -3500,6 +3500,46 @@ def _save_pipeline_state(state: dict, pipeline: dict, project_path: Path):
 def _next_init(state: dict, pipeline: dict, project_path: Path, confirm: bool) -> dict:
     """INIT: Show template + agents. --confirm advances to PLAN_WAITING."""
     agents = pipeline.get("plan_agents", [])
+
+    # Safety: regenerate agents if plan_agents was lost (state coherence issue
+    # seen in thorough mode when state files diverge between saves).
+    if not agents:
+        request = state.get("request", "")
+        config = qralph_config.load_config() or {}
+        mode = pipeline.get("mode", "thorough")
+        suggested = state.get("template", "")
+        if not suggested:
+            suggested, _ = suggest_template(request)
+            state["template"] = suggested
+        template = TASK_TEMPLATES.get(suggested, TASK_TEMPLATES["new-feature"])
+        estimated_sp = state.get("estimated_sp", estimate_story_points(request))
+        request_domains = _classify_request_domains(request)
+        base_agent_types = _enforce_critical_agents(template["plan_agents"])
+        plan_agent_types = _filter_agents_by_relevance(base_agent_types, request_domains, estimated_sp)
+
+        ideation_md = ""
+        concept_md = ""
+        if mode == "thorough":
+            ideation_path = project_path / "IDEATION.md"
+            concept_path = project_path / "CONCEPT-SYNTHESIS.md"
+            if ideation_path.exists():
+                ideation_md = ideation_path.read_text().strip()
+            if concept_path.exists():
+                concept_md = concept_path.read_text().strip()
+
+        agents = []
+        for agent_type in plan_agent_types:
+            agent_config = generate_plan_agent_prompt(
+                agent_type, request, str(project_path), config,
+                mode=mode, ideation_md=ideation_md, concept_md=concept_md,
+            )
+            agents.append(agent_config)
+
+        pipeline["plan_agents"] = agents
+        state["agents"] = [a["name"] for a in agents]
+        _save_pipeline_state(state, pipeline, project_path)
+        _log_decision(project_path, f"INIT: Regenerated {len(agents)} plan agents (plan_agents was empty)")
+
     output_dir = str(project_path / "agent-outputs")
 
     if not confirm:

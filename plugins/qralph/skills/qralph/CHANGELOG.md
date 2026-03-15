@@ -1,5 +1,11 @@
 # QRALPH Changelog
 
+## v6.10.1 (2026-03-15)
+
+### Fixed — Empty plan_agents in thorough mode
+- **Self-healing `_next_init`**: When `pipeline["plan_agents"]` is empty (state coherence issue seen in thorough mode when state files diverge between saves), the INIT handler now regenerates agents from the template and request rather than returning `spawn_agents` with an empty array. Includes ideation/concept context if available.
+- **Incident**: Jarvis project 028 hit this — `plan` returned agents in the response but `state.json` had `agents: []` by the time `_next_init` ran.
+
 ## v6.10.0 (2026-03-14)
 
 ### Added — CLI Orchestrator (prototype, IDEATE through PLAN)
