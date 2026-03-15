@@ -1,52 +1,22 @@
 # QRALPH Changelog
 
+## v6.10.0 (2026-03-14)
+
+### Added — CLI Orchestrator (prototype, IDEATE through PLAN)
+- **`qralph` CLI**: Python-driven pipeline orchestration that replaces the LLM-as-executor SKILL.md. Drives the state machine directly, spawning `claude -p` sessions only when judgment is needed.
+- **Three-tier escalation**: Deterministic (auto-advance) → Decision agent (`claude -p` with step-specific rules) → Human (terminal prompt). Decision agents can auto-confirm, reject, or escalate to user.
+- **Session reuse**: `claude -p --resume` reuses sessions within a phase. Phase transitions invalidate old sessions to prevent context clash.
+- **Step-specific agentic rules**: Each pipeline phase gets injected decision context explaining what "good" looks like, when to confirm/reject, and when to escalate.
+- **Confidence-based auto-confirm**: Template gates auto-confirm when heuristic score margin >= 2. Plan review always escalates (highest-value decision).
+- **New files**: `qralph-cli.py`, `cli_escalation.py`, `cli_handlers.py`, `cli_rules.py`, `qralph` launcher script.
+- **57 tests** covering session store, escalation engine, rules, handlers, main loop, and end-to-end integration.
+
 ## v6.9.0 (2026-03-14)
 
 ### Fixed — Silent Quality Loop Degradation
 - **Hard dependency on `quality-dashboard.py`**: Previously, if `quality-dashboard.py` was missing, the pipeline silently set `parse_findings`, `check_convergence`, `should_agent_continue`, `generate_dashboard`, and `deduplicate_findings` to `None`. This caused the quality loop to auto-converge with zero structured findings — all P1s and P2s were silently dropped. Now raises `FileNotFoundError` at startup with a clear message to update the QRALPH plugin.
-- **Incident**: Jarvis project 025 ran a quality review that surfaced 12 P0s but silently lost 20+ P1s and 10+ P2s due to the missing module.
 
-## v6.8.1 (2026-03-14)
-
-### Improved — Skill Quality and Model Guidance
-- **YAML frontmatter**: Added `name` and `description` fields for proper skill auto-triggering. Previously the skill could only be invoked via explicit `/qralph` command.
-- **Explanatory tone**: Replaced commanding language ("You are a dumb executor", "non-negotiable") with reasoning that explains *why* determinism matters — specifically how freelancing wastes tokens when 5+ parallel agents receive invalid context from a deviated executor.
-- **Progressive disclosure**: Extracted verification troubleshooting, quality loop internals, and smoke test details into `references/phase-troubleshooting.md`. SKILL.md reduced from 286 to 231 lines while preserving all functionality.
-- **Deduplicated instructions**: "Don't leave the pipeline loop" was stated 3 times; consolidated into single "Session Ownership" section with architectural reasoning.
-- **Test fix**: `test_version_in_title` now handles YAML frontmatter by searching for the first `# ` heading instead of checking `first_line`.
-
-## v6.8.0 (2026-03-14)
-
-### Added — DEMO Phase, Domain Personas, Evidence Hardening
-- **DEMO phase**: New 14th pipeline phase between VERIFY and DEPLOY. Presents completed work to user with feedback loop (max 2 cycles). Sub-phases: DEMO_PRESENT → DEMO_FEEDBACK → DEMO_MARSHAL.
-- **Domain persona archetypes**: `suggest_archetypes()` maps project keywords to pre-built persona sets (SaaS, ecommerce, CLI, API, mobile, security, content). Used in PERSONA phase for automatic generation.
-- **Evidence pattern hardening**: `_EVIDENCE_PATTERN` now uses a whitelist of source file extensions, preventing URLs (`example.com:443`) and IP:port pairs from bypassing the evidence gate.
-- **QUALITY_REVERIFY sub-phases**: Added to `VALID_SUB_PHASES` — state machine no longer rejects reverify transitions.
-- **Idempotent lock release**: `_release_session_lock()` uses a guard flag to prevent double-release anti-pattern from atexit + explicit calls.
-- **Convergence fallback completeness**: Fallback dict when `check_convergence` is unavailable now includes `stagnant` and `regressed` keys, preventing silent skip of stagnation detection.
-- **CLI keyword specificity**: Replaced generic "tool" with "cli-tool", "shell", "argv" in persona archetype matching to reduce false positives.
-- **Persona shim documentation**: Import shim for hyphenated filename now explains why it exists and how degradation works.
-- **547 tests passing** (8 new: 3 evidence false-positive, 1 VALID_SUB_PHASES, 1 lock idempotency, 2 CLI keyword, 1 convergence fallback).
-
-## v6.6.3 (2026-03-06)
-
-### Added — Quality Bar Enforcement (Project 045)
-- **QUALITY_STANDARD constant**: Module-level production quality bar injected into every agent prompt (6 points: execution, verify, quality loop, 3 POLISH agents). Includes anti-shortcut patterns preventing AI from assuming speed over quality.
-- **Request fragmentation**: `_fragment_request()` splits user requests into numbered REQ-F-N tuples at sentence/clause boundaries, numbered lists, semicolons. Stored in pipeline state at plan time so dropped requirements cannot escape detection.
-- **3-dimension verification**: Every AC graded on IMPLEMENTED + INTENT_MATCH + SHIP_READY. Verifier must ask: "Did we deliver what this person wanted, or what was convenient?"
-- **Hard structural enforcement**: `intent_match=false` or `ship_ready=false` is a hard FAIL. Evidence depth must be 80%+ strong (file:line references). Missing/partial request fragments block finalization.
-- **POLISH retry enforcement**: NEEDS_ATTENTION verdict triggers retry (cap: 2) with gap logging to decisions.log. After cap, escalates to user with plain-language explanation instead of silently advancing.
-- **12 canonical tests** proving the quality bar cannot be bypassed. 469 total tests passing.
-
-## v6.6.2 (2026-03-05)
-
-### Fixed — Pipeline Determinism (COE from Project 019)
-- **Quality re-verification**: New QUALITY_REVERIFY sub-phase spawns haiku verifier per P0/P1 finding before advancing to dashboard. Conservative default: findings without evidence remain unresolved.
-- **P0 escalation at max rounds**: When quality rounds exhausted with P0s still open, pipeline escalates to user with plain-language options instead of silently advancing to POLISH.
-- **Evidence metrics**: `_compute_evidence_metrics()` scans agent-outputs/ for real word counts and EQS. No more `?/?` placeholders in SUMMARY.md. Orchestrator recomputes EQS at finalize time.
-- **Deterministic shutdown**: `_pipeline_shutdown()` releases session lock, records timestamp, clears agents. SUMMARY.md includes Lifecycle section confirming cleanup.
-- **Anti-bulk-stamp**: `MAX_BULK_REMEDIATE = 5` rejects mass remediation without `--batch` flag. Suspicious timing (all tasks fixed within 60s window) detected and logged to decisions.log.
-- **Test coverage**: 20 new tests covering all 5 determinism fixes. 603 total tests passing.
+## v6.6.2 (2026-03-02)
 
 ### Fixed (COE from Project 041)
 - **Agent watchdog**: Per-agent timeout detection with model-tier thresholds (opus=900s, sonnet=400s, haiku=180s). First timeout re-spawns with `.hung.md` preservation; second escalates to user.

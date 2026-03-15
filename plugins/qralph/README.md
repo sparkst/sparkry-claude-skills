@@ -1,4 +1,4 @@
-# QRALPH v6.9.0
+# QRALPH v6.10.0
 
 Deterministic multi-agent pipeline for Claude Code. Python enforces the process. Claude does the creative work.
 
@@ -23,7 +23,7 @@ QRALPH --quick "Create a hello world Node.js HTTP server with tests"
 
 QRALPH handles everything: requirements decomposition, template selection, agent spawning, parallel execution groups, quality gates, fresh-context verification, user demo, deployment, and smoke testing.
 
-## Architecture (v6.9.0)
+## Architecture (v6.10.0)
 
 ### 14-Phase Pipeline
 
@@ -41,9 +41,9 @@ QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → C
 
 | Feature | Description |
 |---------|-------------|
-| **DEMO phase** (v6.9.0) | Present completed work to user with feedback loop (max 2 cycles) before deploy |
-| **Domain personas** (v6.9.0) | Auto-suggest persona archetypes based on project keywords (SaaS, ecommerce, CLI, etc.) |
-| **Evidence hardening** (v6.9.0) | Source file extension whitelist prevents URLs/IPs from bypassing evidence gate |
+| **DEMO phase** (v6.10.0) | Present completed work to user with feedback loop (max 2 cycles) before deploy |
+| **Domain personas** (v6.10.0) | Auto-suggest persona archetypes based on project keywords (SaaS, ecommerce, CLI, etc.) |
+| **Evidence hardening** (v6.10.0) | Source file extension whitelist prevents URLs/IPs from bypassing evidence gate |
 | **Requirements fragmentation** | Atomic REQ-F-N fragments tracked from plan to verification |
 | **3-dimension verification** | Every AC graded on IMPLEMENTED + INTENT_MATCH + SHIP_READY |
 | **Deploy + smoke** | Preflight → deploy → parallel HTTP smoke tests on live URL |

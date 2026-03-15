@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# QRALPH CLI launcher — run from any project directory.
+# Install: ln -sf /path/to/.qralph/tools/qralph ~/.local/bin/qralph
+SCRIPT="$0"
+# Resolve symlinks (macOS-compatible, no readlink -f)
+while [ -L "$SCRIPT" ]; do
+  DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+  SCRIPT="$(readlink "$SCRIPT")"
+  [[ "$SCRIPT" != /* ]] && SCRIPT="$DIR/$SCRIPT"
+done
+DIR="$(cd -P "$(dirname "$SCRIPT")" && pwd)"
+exec python3 "$DIR/qralph-cli.py" "$@"

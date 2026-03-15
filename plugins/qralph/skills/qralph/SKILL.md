@@ -3,7 +3,7 @@ name: qralph
 description: Deterministic multi-agent pipeline that takes ideas from concept to deployed production code. Handles the full lifecycle — ideation, persona generation, concept review, planning, parallel execution, quality loops, verification, demo, deployment, and smoke testing. Use this whenever the user says /qralph, QRALPH, asks to "run the pipeline", or wants end-to-end multi-agent project execution. Also use when the user references pipeline phases, project orchestration, or wants to build something from scratch with automated quality gates.
 ---
 
-# QRALPH v6.9.0 — Deterministic Multi-Agent Pipeline
+# QRALPH v6.10.0 — Deterministic Multi-Agent Pipeline
 
 ## How This Works (read this first)
 

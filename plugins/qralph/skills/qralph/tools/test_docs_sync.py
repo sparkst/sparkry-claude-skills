@@ -257,6 +257,10 @@ _CRITICAL_DEPS = [
     "learning-capture.py",
     "persona-generator.py",
     "plugin-detector.py",
+    "qralph-cli.py",
+    "cli_escalation.py",
+    "cli_handlers.py",
+    "cli_rules.py",
 ]
 
 
