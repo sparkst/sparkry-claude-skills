@@ -219,9 +219,13 @@ def _drive_pipeline(qp, qs, tmp_path, mode, fixtures, stop_condition=None):
     Returns:
         list of (action, sub_phase) tuples for the full run.
     """
-    # Patch subprocess to avoid real shell calls
+    # Patch subprocess to avoid real shell calls, and mock git/metrics (no real repo in simulation)
     with patch.object(qp, "_run_shell_chain", return_value=(0, "PASS")), \
-         patch.object(qp, "detect_quality_gate", return_value={"cmd": "", "cwd": "", "effective": True}):
+         patch.object(qp, "detect_quality_gate", return_value={"cmd": "", "cwd": "", "effective": True}), \
+         patch.object(qp, "git_create_branch", None), \
+         patch.object(qp, "git_commit_changes", None), \
+         patch.object(qp, "git_push_and_create_pr", None), \
+         patch.object(qp, "ProjectMetrics", None):
 
         # Init
         result = qp.cmd_plan("build a landing page with contact form", mode=mode)

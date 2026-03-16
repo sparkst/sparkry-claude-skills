@@ -7783,5 +7783,450 @@ class TestV680Integration:
         assert msg != ""
 
 
+# ─── Early-Start Parallel Groups Tests ──────────────────────────────────────
+
+class TestBuildTaskFileMap:
+    """Helper that builds task_id -> file set mapping."""
+
+    def test_basic_mapping(self):
+        tasks = [
+            {"id": "T-001", "files": ["auth.ts", "db.ts"]},
+            {"id": "T-002", "files": ["api.ts"]},
+        ]
+        result = qralph_pipeline._build_task_file_map(tasks)
+        assert result == {
+            "T-001": {"auth.ts", "db.ts"},
+            "T-002": {"api.ts"},
+        }
+
+    def test_missing_files_key(self):
+        tasks = [{"id": "T-001"}]
+        result = qralph_pipeline._build_task_file_map(tasks)
+        assert result == {"T-001": set()}
+
+    def test_empty_tasks(self):
+        assert qralph_pipeline._build_task_file_map([]) == {}
+
+
+class TestEarlyStartParallelGroups:
+
+    def test_eligible_task_no_overlap(self):
+        """REQ-PAR-001: Task from next group with no file overlap can start early."""
+        groups = [["T-001", "T-002"], ["T-003", "T-004"]]
+        current_group_index = 0
+        completed_tasks = {"T-002"}
+        running_tasks = {"T-001"}
+        task_files = {
+            "T-001": {"auth.ts"},
+            "T-002": {"utils.ts"},
+            "T-003": {"auth.ts"},      # overlaps T-001 (blocked)
+            "T-004": {"api.ts"},        # no overlap (eligible)
+        }
+
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks, task_files,
+        )
+        assert result == ["T-004"]
+
+    def test_no_eligible_when_all_overlap(self):
+        """REQ-PAR-002: No early start when all next-group tasks overlap."""
+        groups = [["T-001"], ["T-002", "T-003"]]
+        current_group_index = 0
+        completed_tasks = set()
+        running_tasks = {"T-001"}
+        task_files = {
+            "T-001": {"shared.ts"},
+            "T-002": {"shared.ts"},
+            "T-003": {"shared.ts"},
+        }
+
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks, task_files,
+        )
+        assert result == []
+
+    def test_no_eligible_when_group_complete(self):
+        """REQ-PAR-003: Returns empty when current group fully complete."""
+        groups = [["T-001", "T-002"], ["T-003"]]
+        current_group_index = 0
+        completed_tasks = {"T-001", "T-002"}
+        running_tasks = set()
+        task_files = {
+            "T-001": {"a.ts"},
+            "T-002": {"b.ts"},
+            "T-003": {"c.ts"},
+        }
+
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks, task_files,
+        )
+        assert result == []
+
+    def test_already_early_started_not_returned(self):
+        """REQ-PAR-004: Tasks in early_started set are excluded."""
+        groups = [["T-001"], ["T-002", "T-003"]]
+        current_group_index = 0
+        completed_tasks = {"T-002"}  # T-002 already completed (was early-started)
+        running_tasks = {"T-001"}
+        task_files = {
+            "T-001": {"auth.ts"},
+            "T-002": {"api.ts"},
+            "T-003": {"utils.ts"},
+        }
+
+        # T-003 would be eligible but T-002 is already completed
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks, task_files,
+        )
+        assert result == ["T-003"]
+
+        # Now if T-003 is also already completed
+        completed_tasks2 = {"T-002", "T-003"}
+        result2 = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks2, running_tasks, task_files,
+        )
+        assert result2 == []
+
+    def test_skips_early_started_in_next_group(self):
+        """REQ-PAR-005: When advancing to next group, skip already-completed early starts.
+
+        This tests the integration in _next_exec_waiting: when all tasks in
+        the current group are done and we advance, tasks already in early_started
+        should be excluded from the spawn list for the next group.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            projects_dir = tmp_path / "projects"
+            project_path = projects_dir / "001-test"
+            project_path.mkdir(parents=True)
+            (project_path / "execution-outputs").mkdir()
+            (project_path / "checkpoints").mkdir()
+
+            manifest = {
+                "tasks": [
+                    {"id": "T-001", "summary": "task1", "files": ["a.ts"]},
+                    {"id": "T-002", "summary": "task2", "files": ["a.ts"]},
+                    {"id": "T-003", "summary": "task3", "files": ["b.ts"]},
+                ],
+                "parallel_groups": [["T-001"], ["T-002", "T-003"]],
+            }
+            (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+            # T-001 done, T-003 was early-started and done
+            (project_path / "execution-outputs" / "T-001.md").write_text("x" * 200)
+            (project_path / "execution-outputs" / "T-003.md").write_text("x" * 200)
+
+            # Group 0 is complete (T-001). Group 1 has T-002 and T-003.
+            # T-003 was already early-started and completed.
+            state = {
+                "project_id": "001-test",
+                "project_path": str(project_path),
+                "phase": "EXECUTE",
+                "pipeline": {
+                    "sub_phase": "EXEC_WAITING",
+                    "execution_groups": [
+                        {
+                            "task_ids": ["T-001"],
+                            "agents": [{"task_id": "T-001", "name": "T-001", "model": "sonnet", "prompt": "do T-001"}],
+                        },
+                        {
+                            "task_ids": ["T-002", "T-003"],
+                            "agents": [
+                                {"task_id": "T-002", "name": "T-002", "model": "sonnet", "prompt": "do T-002"},
+                                {"task_id": "T-003", "name": "T-003", "model": "sonnet", "prompt": "do T-003"},
+                            ],
+                        },
+                    ],
+                    "current_group_index": 0,
+                    "early_started": ["T-003"],
+                },
+            }
+            pipeline = state["pipeline"]
+
+            with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+                 mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+                 mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+                 mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir):
+                result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+
+            assert result["action"] == "spawn_agents"
+            spawned_names = [a["name"] for a in result["agents"]]
+            # T-003 was early-started, so only T-002 should be spawned
+            assert "T-002" in spawned_names
+            assert "T-003" not in spawned_names
+
+    def test_skips_entire_group_if_all_early_started(self):
+        """REQ-PAR-005b: If ALL tasks in next group were early-started, skip to group after."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            projects_dir = tmp_path / "projects"
+            project_path = projects_dir / "001-test"
+            project_path.mkdir(parents=True)
+            (project_path / "execution-outputs").mkdir()
+            (project_path / "checkpoints").mkdir()
+
+            manifest = {
+                "tasks": [
+                    {"id": "T-001", "summary": "t1", "files": ["a.ts"]},
+                    {"id": "T-002", "summary": "t2", "files": ["b.ts"]},
+                    {"id": "T-003", "summary": "t3", "files": ["a.ts", "b.ts"]},
+                ],
+                "parallel_groups": [["T-001"], ["T-002"], ["T-003"]],
+            }
+            (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+            # All tasks done
+            for tid in ["T-001", "T-002", "T-003"]:
+                (project_path / "execution-outputs" / f"{tid}.md").write_text("x" * 200)
+
+            state = {
+                "project_id": "001-test",
+                "project_path": str(project_path),
+                "phase": "EXECUTE",
+                "pipeline": {
+                    "sub_phase": "EXEC_WAITING",
+                    "execution_groups": [
+                        {"task_ids": ["T-001"], "agents": [{"task_id": "T-001", "name": "T-001", "model": "sonnet", "prompt": "do"}]},
+                        {"task_ids": ["T-002"], "agents": [{"task_id": "T-002", "name": "T-002", "model": "sonnet", "prompt": "do"}]},
+                        {"task_ids": ["T-003"], "agents": [{"task_id": "T-003", "name": "T-003", "model": "sonnet", "prompt": "do"}]},
+                    ],
+                    "current_group_index": 0,
+                    "early_started": ["T-002", "T-003"],
+                },
+            }
+            pipeline = state["pipeline"]
+
+            with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+                 mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+                 mock.patch.object(qralph_pipeline.qralph_state, "exclusive_state_lock", return_value=mock.MagicMock()), \
+                 mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+                 mock.patch.object(qralph_pipeline, "cmd_execute_collect", return_value={"status": "execute_complete"}), \
+                 mock.patch.object(qralph_pipeline, "detect_quality_gate", return_value=""):
+                result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+
+            # Group 1 (T-002) and group 2 (T-003) both early-started and complete
+            # Should proceed to execute-collect/simplify, not spawn anything
+            assert result["action"] != "error" or "Missing" not in result.get("message", "")
+
+    def test_multiple_groups_ahead(self):
+        """REQ-PAR-006: Can early-start from group N+2 if N+1 is all blocked."""
+        groups = [["T-001"], ["T-002"], ["T-003"]]
+        current_group_index = 0
+        completed_tasks = set()
+        running_tasks = {"T-001"}
+        task_files = {
+            "T-001": {"shared.ts"},
+            "T-002": {"shared.ts"},     # blocked by T-001
+            "T-003": {"unrelated.ts"},   # eligible from group N+2
+        }
+
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks, task_files,
+        )
+        assert result == ["T-003"]
+
+    def test_early_start_spawn_in_exec_waiting(self):
+        """REQ-PAR-007: _next_exec_waiting spawns early-start tasks when current group incomplete."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            projects_dir = tmp_path / "projects"
+            project_path = projects_dir / "001-test"
+            project_path.mkdir(parents=True)
+            (project_path / "execution-outputs").mkdir()
+            (project_path / "checkpoints").mkdir()
+
+            manifest = {
+                "tasks": [
+                    {"id": "T-001", "summary": "slow task", "files": ["auth.ts"]},
+                    {"id": "T-002", "summary": "fast task", "files": ["utils.ts"]},
+                    {"id": "T-003", "summary": "next group blocked", "files": ["auth.ts"]},
+                    {"id": "T-004", "summary": "next group eligible", "files": ["api.ts"],
+                     "acceptance_criteria": ["API works"]},
+                ],
+                "parallel_groups": [["T-001", "T-002"], ["T-003", "T-004"]],
+                "target_directory": str(project_path),
+            }
+            (project_path / "manifest.json").write_text(json.dumps(manifest))
+
+            # T-002 is done, T-001 still running
+            (project_path / "execution-outputs" / "T-002.md").write_text("x" * 200)
+
+            state = {
+                "project_id": "001-test",
+                "project_path": str(project_path),
+                "phase": "EXECUTE",
+                "pipeline": {
+                    "sub_phase": "EXEC_WAITING",
+                    "execution_groups": [
+                        {
+                            "task_ids": ["T-001", "T-002"],
+                            "agents": [
+                                {"task_id": "T-001", "name": "T-001", "model": "sonnet", "prompt": "do T-001"},
+                                {"task_id": "T-002", "name": "T-002", "model": "sonnet", "prompt": "do T-002"},
+                            ],
+                        },
+                        {
+                            "task_ids": ["T-003", "T-004"],
+                            "agents": [
+                                {"task_id": "T-003", "name": "T-003", "model": "sonnet", "prompt": "do T-003"},
+                                {"task_id": "T-004", "name": "T-004", "model": "sonnet", "prompt": "do T-004"},
+                            ],
+                        },
+                    ],
+                    "current_group_index": 0,
+                    "agent_timing": {"agent_start_times": {}, "respawn_counts": {}},
+                },
+            }
+            pipeline = state["pipeline"]
+
+            with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+                 mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+                 mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+                 mock.patch.object(qralph_pipeline, "_check_agent_timeout", return_value=None):
+                result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+
+            # Should early-start T-004 (no overlap with running T-001)
+            assert result["action"] == "spawn_agents"
+            spawned_ids = [a.get("task_id") or a.get("name") for a in result["agents"]]
+            assert "T-004" in spawned_ids
+            assert "T-003" not in spawned_ids
+            # T-004 should be recorded in early_started
+            assert "T-004" in pipeline.get("early_started", [])
+
+    def test_no_double_early_start(self):
+        """REQ-PAR-008: If early_started already has a task, don't spawn it again."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            projects_dir = tmp_path / "projects"
+            project_path = projects_dir / "001-test"
+            project_path.mkdir(parents=True)
+            (project_path / "execution-outputs").mkdir()
+            (project_path / "checkpoints").mkdir()
+
+            manifest = {
+                "tasks": [
+                    {"id": "T-001", "summary": "slow", "files": ["auth.ts"]},
+                    {"id": "T-002", "summary": "fast", "files": ["utils.ts"]},
+                    {"id": "T-003", "summary": "eligible", "files": ["api.ts"]},
+                ],
+                "parallel_groups": [["T-001", "T-002"], ["T-003"]],
+            }
+            (project_path / "manifest.json").write_text(json.dumps(manifest))
+            (project_path / "execution-outputs" / "T-002.md").write_text("x" * 200)
+
+            state = {
+                "project_id": "001-test",
+                "project_path": str(project_path),
+                "phase": "EXECUTE",
+                "pipeline": {
+                    "sub_phase": "EXEC_WAITING",
+                    "execution_groups": [
+                        {
+                            "task_ids": ["T-001", "T-002"],
+                            "agents": [
+                                {"task_id": "T-001", "name": "T-001", "model": "sonnet", "prompt": "do"},
+                                {"task_id": "T-002", "name": "T-002", "model": "sonnet", "prompt": "do"},
+                            ],
+                        },
+                        {
+                            "task_ids": ["T-003"],
+                            "agents": [{"task_id": "T-003", "name": "T-003", "model": "sonnet", "prompt": "do"}],
+                        },
+                    ],
+                    "current_group_index": 0,
+                    "early_started": ["T-003"],  # Already early-started
+                    "agent_timing": {"agent_start_times": {}, "respawn_counts": {}},
+                },
+            }
+            pipeline = state["pipeline"]
+
+            with mock.patch.object(qralph_pipeline.qralph_state, "load_state", return_value=state), \
+                 mock.patch.object(qralph_pipeline.qralph_state, "save_state"), \
+                 mock.patch.object(qralph_pipeline, "PROJECTS_DIR", projects_dir), \
+                 mock.patch.object(qralph_pipeline, "_check_agent_timeout", return_value=None):
+                result = qralph_pipeline._next_exec_waiting(state, pipeline, project_path)
+
+            # T-003 already early-started, nothing new to spawn
+            # Should fall through to normal missing-output error for T-001
+            assert result["action"] == "error"
+            assert "T-001" in result["message"]
+
+
+class TestGitPipelineIntegration:
+    """REQ-GIT-040..042: _git_commit helper integration tests."""
+
+    def test_git_commit_helper_logs_on_commit(self, tmp_path):
+        """REQ-GIT-040: _git_commit logs when commit succeeds."""
+        project_path = tmp_path / "project"
+        project_path.mkdir()
+        (project_path / "decisions.log").write_text("")
+
+        state = {"target_directory": str(tmp_path), "project_id": "test-001"}
+        pipeline = {"git_branch": "qralph/test-001"}
+
+        fake_commit = mock.MagicMock(return_value={"committed": True, "success": True, "error": ""})
+        with mock.patch.object(qralph_pipeline, "git_commit_changes", fake_commit):
+            qralph_pipeline._git_commit(state, pipeline, project_path, "test commit")
+
+        fake_commit.assert_called_once()
+        log_content = (project_path / "decisions.log").read_text()
+        assert "GIT: test commit" in log_content
+
+    def test_git_commit_helper_silent_without_branch(self, tmp_path):
+        """REQ-GIT-041: _git_commit does nothing when no git_branch in pipeline."""
+        project_path = tmp_path / "project"
+        project_path.mkdir()
+
+        state = {"target_directory": str(tmp_path), "project_id": "test-001"}
+        pipeline = {}  # No git_branch
+
+        fake_commit = mock.MagicMock(return_value={"committed": True, "success": True, "error": ""})
+        with mock.patch.object(qralph_pipeline, "git_commit_changes", fake_commit):
+            qralph_pipeline._git_commit(state, pipeline, project_path, "test commit")
+
+        fake_commit.assert_not_called()
+
+    def test_git_commit_helper_silent_without_module(self, tmp_path):
+        """REQ-GIT-042: _git_commit does nothing when git module not loaded."""
+        project_path = tmp_path / "project"
+        project_path.mkdir()
+
+        state = {"target_directory": str(tmp_path), "project_id": "test-001"}
+        pipeline = {"git_branch": "qralph/test-001"}
+
+        with mock.patch.object(qralph_pipeline, "git_commit_changes", None):
+            # Should not raise
+            qralph_pipeline._git_commit(state, pipeline, project_path, "test commit")
+
+
+class TestMetricsPipelineIntegration:
+    """REQ-MET-050..052: _load_metrics/_save_metrics helper integration tests."""
+
+    def test_load_metrics_creates_new_when_no_file(self, tmp_path):
+        """REQ-MET-050: _load_metrics creates fresh ProjectMetrics when no file exists."""
+        m = qralph_pipeline._load_metrics(tmp_path, "test-001")
+        assert m is not None
+        assert m.project_id == "test-001"
+
+    def test_save_and_reload_metrics(self, tmp_path):
+        """REQ-MET-051: Metrics round-trip through save/load."""
+        m = qralph_pipeline._load_metrics(tmp_path, "test-001")
+        m.phase_start("PLAN")
+        m.record("mode", "quick")
+        qralph_pipeline._save_metrics(m, tmp_path)
+
+        assert (tmp_path / "metrics.json").exists()
+
+        m2 = qralph_pipeline._load_metrics(tmp_path, "test-001")
+        assert "PLAN" in m2._phases
+        assert m2._extras.get("mode") == "quick"
+
+    def test_load_metrics_none_without_module(self, tmp_path):
+        """REQ-MET-052: _load_metrics returns None when ProjectMetrics is None."""
+        with mock.patch.object(qralph_pipeline, "ProjectMetrics", None):
+            result = qralph_pipeline._load_metrics(tmp_path, "test-001")
+        assert result is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

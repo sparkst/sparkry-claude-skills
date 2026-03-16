@@ -64,8 +64,8 @@
     {
       "name": "qralph",
       "source": "./plugins/qralph",
-      "description": "Full-lifecycle 14-phase multi-agent pipeline with output extractor, 3-agent adversarial verification, research-backed prompts, and adaptive quality loops (QRALPH v6.11.0)",
-      "version": "6.11.0",
+      "description": "Full-lifecycle 14-phase multi-agent pipeline with git automation, structured telemetry, parallel early-start, 3-agent verification, and adaptive quality loops (QRALPH v6.12.0)",
+      "version": "6.12.0",
       "license": "MIT",
       "keywords": ["orchestration", "multi-agent", "qralph", "pipeline", "deterministic", "quality-gates", "enforcement-hooks"],
       "category": "orchestration",

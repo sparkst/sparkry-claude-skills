@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.11.0 Pipeline — deterministic multi-agent orchestration, idea to production.
+QRALPH v6.12.0 Pipeline — deterministic multi-agent orchestration, idea to production.
 
 Full pipeline: IDEATE → PERSONA → CONCEPT → PLAN → EXECUTE → SIMPLIFY →
                QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → COMPLETE
@@ -109,6 +109,30 @@ extract_reverify_verdicts = _oe_mod.extract_reverify_verdicts
 extract_smoke_results = _oe_mod.extract_smoke_results
 extract_polish_issues = _oe_mod.extract_polish_issues
 
+# Import git automation (optional — works without git)
+_git_path = Path(__file__).parent / "qralph-git.py"
+if _git_path.exists():
+    _git_spec = importlib.util.spec_from_file_location("qralph_git", _git_path)
+    _git_mod = importlib.util.module_from_spec(_git_spec)
+    _git_spec.loader.exec_module(_git_mod)
+    git_create_branch = _git_mod.create_branch
+    git_commit_changes = _git_mod.commit_changes
+    git_push_and_create_pr = _git_mod.push_and_create_pr
+else:
+    git_create_branch = None
+    git_commit_changes = None
+    git_push_and_create_pr = None
+
+# Import metrics (optional — works without)
+_met_path = Path(__file__).parent / "qralph-metrics.py"
+if _met_path.exists():
+    _met_spec = importlib.util.spec_from_file_location("qralph_metrics", _met_path)
+    _met_mod = importlib.util.module_from_spec(_met_spec)
+    _met_spec.loader.exec_module(_met_mod)
+    ProjectMetrics = _met_mod.ProjectMetrics
+else:
+    ProjectMetrics = None
+
 # Import confidence scorer (optional — may not exist yet)
 try:
     _cs_path = Path(__file__).parent / "confidence-scorer.py"
@@ -147,7 +171,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.11.0"
+__version__ = "6.12.0"
 
 QUALITY_STANDARD = """
 ## Quality Standard
@@ -1321,6 +1345,48 @@ def compute_parallel_groups(tasks: list[dict]) -> list[list[str]]:
     return groups
 
 
+def _build_task_file_map(tasks: list[dict]) -> dict[str, set[str]]:
+    """Build task_id -> set of files mapping from manifest tasks."""
+    return {t["id"]: set(t.get("files", [])) for t in tasks}
+
+
+def find_early_start_tasks(
+    groups: list[list[str]],
+    current_group_index: int,
+    completed_tasks: set[str],
+    running_tasks: set[str],
+    task_files: dict[str, set[str]],
+) -> list[str]:
+    """Find tasks from later groups eligible for early start.
+
+    A task is eligible when:
+    1. It's in a group after current_group_index
+    2. Its files have NO overlap with any still-running task's files
+    3. It hasn't already been completed or started
+
+    Returns empty list if current group is fully complete (no running tasks)
+    since normal group advancement handles that case.
+    """
+    if not running_tasks:
+        return []
+
+    # Collect all files touched by running tasks
+    running_files: set[str] = set()
+    for tid in running_tasks:
+        running_files |= task_files.get(tid, set())
+
+    eligible: list[str] = []
+    for future_group in groups[current_group_index + 1:]:
+        for tid in future_group:
+            if tid in completed_tasks or tid in running_tasks:
+                continue
+            task_f = task_files.get(tid, set())
+            if not (task_f & running_files):
+                eligible.append(tid)
+
+    return eligible
+
+
 _NPM_SCRIPT_PRIORITY = [
     "typecheck", "type-check", "tsc",
     "lint",
@@ -1527,6 +1593,12 @@ def _init_project(request: str, target_dir: Optional[str] = None) -> dict:
     log_path = project_path / "decisions.log"
     qralph_state.safe_write(log_path, f"[{datetime.now().isoformat()}] INIT: Project created — {request}\n")
 
+    # Initialize metrics
+    if ProjectMetrics:
+        m = ProjectMetrics(project_id)
+        m.record("mode", state.get("mode", "pipeline"))
+        _save_metrics(m, project_path)
+
     return state
 
 
@@ -1553,6 +1625,52 @@ def _save_checkpoint(project_path: Path, state: dict):
     checkpoint_dir.mkdir(exist_ok=True)
     checkpoint_file = checkpoint_dir / "state.json"
     qralph_state.safe_write_json(checkpoint_file, state)
+
+
+def _git_commit(state: dict, pipeline: dict, project_path: Path, message: str):
+    """Silently commit changes in target_dir. Logs result, never blocks pipeline."""
+    if not git_commit_changes:
+        return
+    if not pipeline.get("git_branch"):
+        return
+    target_dir = state.get("target_directory", str(PROJECT_ROOT))
+    result = git_commit_changes(target_dir, message, target_dir)
+    if result["committed"]:
+        _log_decision(project_path, f"GIT: {message}")
+
+
+def _load_metrics(project_path: Path, project_id: str):
+    """Load or create ProjectMetrics for a project."""
+    if not ProjectMetrics:
+        return None
+    metrics_file = project_path / "metrics.json"
+    if metrics_file.exists():
+        m = ProjectMetrics(project_id)
+        data = json.loads(metrics_file.read_text())
+        m._phases = data.get("phases", {})
+        m._agents = data.get("agents", {})
+        raw_groups = data.get("execution_groups", [])
+        if isinstance(raw_groups, list):
+            m._groups = {i: g for i, g in enumerate(raw_groups)}
+        else:
+            m._groups = raw_groups
+        raw_quality = data.get("quality_loop", [])
+        if isinstance(raw_quality, dict):
+            m._quality = raw_quality.get("rounds", [])
+        else:
+            m._quality = raw_quality
+        m._extras = {k: v for k, v in data.items()
+                     if k not in ("project_id", "created_at", "completed_at", "summary",
+                                  "phases", "agents", "execution_groups", "quality_loop")}
+        m.created_at = data.get("created_at", m.created_at)
+        return m
+    return ProjectMetrics(project_id)
+
+
+def _save_metrics(metrics, project_path: Path):
+    """Write metrics to disk."""
+    if metrics:
+        metrics.write(project_path)
 
 
 # ─── Story Point Estimation ──────────────────────────────────────────────────
@@ -2202,6 +2320,19 @@ def cmd_execute() -> dict:
             "parallel": len(group_ids) > 1,
         })
 
+    # Create git branch for this project
+    pipeline = state.get("pipeline", {})
+    if git_create_branch:
+        target_dir = manifest.get("target_directory", str(PROJECT_ROOT))
+        branch_result = git_create_branch(state["project_id"], target_dir)
+        if branch_result["success"]:
+            pipeline["git_branch"] = branch_result["branch"]
+            _log_decision(project_path, f"GIT: Created branch {branch_result['branch']}")
+        else:
+            _log_decision(project_path, f"GIT: Skipped — {branch_result.get('error', '')}")
+        # Persist pipeline with git_branch
+        _save_pipeline_state(state, pipeline, project_path)
+
     _log_decision(project_path, f"EXECUTE: {len(execution_groups)} groups prepared")
 
     return {
@@ -2682,6 +2813,35 @@ def cmd_finalize() -> dict:
     # Quality gate
     if manifest.get("quality_gate_cmd"):
         summary += f"## Quality Gate\n\n```\n{manifest['quality_gate_cmd']}\n```\n"
+
+    # Fallback PR creation (for paths that skip DEMO)
+    if not pipeline.get("pr_url") and pipeline.get("git_branch") and git_push_and_create_pr:
+        _git_commit(state, pipeline, project_path, f"complete: {state['project_id']}")
+        pr_result = git_push_and_create_pr(
+            branch=pipeline["git_branch"], project_id=state["project_id"],
+            request=state.get("request", ""),
+            cwd=state.get("target_directory", str(PROJECT_ROOT)),
+            version=__version__,
+        )
+        if pr_result.get("pr_url"):
+            pipeline["pr_url"] = pr_result["pr_url"]
+            _log_decision(project_path, f"GIT: PR created — {pr_result['pr_url']}")
+
+    # Include PR URL in summary
+    pr_url = pipeline.get("pr_url", "")
+    if pr_url:
+        summary += f"\n**Pull Request:** {pr_url}\n\n"
+
+    # Write final metrics + bottleneck summary
+    metrics = _load_metrics(project_path, state["project_id"])
+    if metrics:
+        bottlenecks = metrics.detect_bottlenecks()
+        if bottlenecks:
+            summary += "## Bottlenecks\n\n"
+            for b in bottlenecks:
+                summary += f"- **{b['agent']}**: {b['duration_s']:.0f}s ({b['ratio']:.1f}x group average)\n"
+            summary += "\n"
+        _save_metrics(metrics, project_path)
 
     # Mark COMPLETE before shutdown so state is saved correctly
     with qralph_state.exclusive_state_lock():
@@ -3606,6 +3766,69 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
                     if heal:
                         timeout_result["heal_suggestion"] = heal
                 return timeout_result
+
+        # ── Early-start optimization ────────────────────────────────────
+        # Some tasks in the current group are still running. Check if any
+        # tasks from later groups can start early (no file overlap with
+        # running tasks).
+        early_started_set = set(pipeline.get("early_started", []))
+        completed_in_group = set(expected_ids) - set(missing)
+        running_in_group = set(missing)
+
+        manifest_path = project_path / "manifest.json"
+        manifest = qralph_state.safe_read_json(manifest_path, {}) if manifest_path.exists() else {}
+        task_files = _build_task_file_map(manifest.get("tasks", []))
+
+        group_id_lists = [g.get("task_ids", []) for g in groups]
+        eligible = find_early_start_tasks(
+            group_id_lists, idx, completed_in_group | early_started_set,
+            running_in_group, task_files,
+        )
+        # Filter out tasks already early-started
+        new_eligible = [tid for tid in eligible if tid not in early_started_set]
+
+        if new_eligible:
+            # Build agent configs for early-start tasks
+            task_map = {t["id"]: t for t in manifest.get("tasks", [])}
+            early_agents = []
+            for future_group in groups[idx + 1:]:
+                for a in future_group.get("agents", []):
+                    a_tid = a.get("task_id") or a.get("name")
+                    if a_tid in new_eligible:
+                        early_agents.append(a)
+
+            # Record early-started tasks
+            early_started_list = pipeline.get("early_started", [])
+            early_started_list.extend(new_eligible)
+            pipeline["early_started"] = early_started_list
+
+            agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
+            for a in early_agents:
+                _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
+                pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
+            pipeline["last_activity_at"] = datetime.now().isoformat()
+            _save_pipeline_state(state, pipeline, project_path)
+
+            # Determine which future group the tasks come from
+            early_group_indices = set()
+            for gi, g in enumerate(group_id_lists):
+                if any(tid in new_eligible for tid in g):
+                    early_group_indices.add(gi + 1)
+            early_groups_label = ", ".join(str(g) for g in sorted(early_group_indices))
+            _log_decision(
+                project_path,
+                f"EARLY_START: Spawning {len(new_eligible)} tasks from group {early_groups_label} "
+                f"while group {idx + 1} completes",
+            )
+
+            return {
+                "action": "spawn_agents",
+                "agents": early_agents,
+                "output_dir": str(outputs_dir),
+                "early_start": True,
+            }
+        # ── End early-start optimization ────────────────────────────────
+
         return {
             "action": "error",
             "message": f"Missing outputs: {', '.join(missing)}",
@@ -3613,14 +3836,45 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             "expected": expected_ids,
         }
 
-    # Current group complete — check if more groups
+    # Current group complete — commit per-task changes
+    manifest_path = project_path / "manifest.json"
+    manifest_data = qralph_state.safe_read_json(manifest_path, {}) if manifest_path.exists() else {}
+    for tid in expected_ids:
+        task_summary = ""
+        for t in manifest_data.get("tasks", []):
+            if t.get("id") == tid:
+                task_summary = t.get("summary", "")[:60]
+                break
+        _git_commit(state, pipeline, project_path, f"{tid}: {task_summary}")
+
+    # Advance to next group(s)
+    early_started_set = set(pipeline.get("early_started", []))
     next_idx = idx + 1
+
+    # Skip groups where all tasks were already early-started and completed
+    while next_idx < len(groups):
+        next_group = groups[next_idx]
+        next_task_ids = next_group.get("task_ids", [])
+        remaining_tasks = [tid for tid in next_task_ids if tid not in early_started_set]
+        if remaining_tasks:
+            break
+        # All tasks in this group were early-started — skip it
+        _log_decision(project_path, f"NEXT: Skipping group {next_idx + 1} (all tasks early-started)")
+        next_idx += 1
+
     if next_idx < len(groups):
         pipeline["current_group_index"] = next_idx
         pipeline["sub_phase"] = "EXEC_WAITING"
         next_group = groups[next_idx]
+
+        # Filter out agents for tasks already early-started
+        agents_to_spawn = [
+            a for a in next_group.get("agents", [])
+            if (a.get("task_id") or a.get("name")) not in early_started_set
+        ]
+
         agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
-        for a in next_group.get("agents", []):
+        for a in agents_to_spawn:
             _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
             pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
         pipeline["last_activity_at"] = datetime.now().isoformat()
@@ -3629,7 +3883,7 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
 
         return {
             "action": "spawn_agents",
-            "agents": next_group.get("agents", []),
+            "agents": agents_to_spawn,
             "output_dir": str(outputs_dir),
         }
 
@@ -3796,6 +4050,8 @@ def _next_simplify_waiting(state: dict, pipeline: dict, project_path: Path) -> d
             "action": "error",
             "message": "Missing or too short simplifier output. Write to execution-outputs/simplifier.md and call next again.",
         }
+
+    _git_commit(state, pipeline, project_path, "simplify: reduce complexity")
 
     mode = pipeline.get("mode", "thorough")
 
@@ -4049,6 +4305,15 @@ def _next_quality_fix(state: dict, pipeline: dict, project_path: Path) -> dict:
     # Route to QUALITY_REVERIFY when continuing with P0/P1 findings so each
     # finding is independently confirmed as fixed before the next discovery round.
     p0_p1_findings = [f for f in all_findings if f.get("severity") in ("P0", "P1")]
+    _git_commit(state, pipeline, project_path, f"quality-fix: round {round_num}")
+
+    # Record quality round metrics
+    metrics = _load_metrics(project_path, state["project_id"])
+    if metrics:
+        metrics.quality_round(round_num, p0=conv.get("p0_count", 0), p1=conv.get("p1_count", 0),
+                              p2=conv.get("p2_count", 0), converged=conv["converged"])
+        _save_metrics(metrics, project_path)
+
     if dashboard_action == "continue" and p0_p1_findings:
         pipeline["sub_phase"] = "QUALITY_REVERIFY"
     else:
@@ -4479,6 +4744,8 @@ def _next_polish_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
     report_md = "\n".join(report_lines)
     (project_path / "POLISH-REPORT.md").write_text(report_md)
 
+    _git_commit(state, pipeline, project_path, "polish: bug fixes and wiring")
+
     pipeline["sub_phase"] = "POLISH_REVIEW"
     pipeline["polish_verdict"] = verdict
     _save_pipeline_state(state, pipeline, project_path)
@@ -4765,6 +5032,21 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
     # Verification passed — reset retry counter
     pipeline["verify_retries"] = 0
     _log_decision(project_path, "VERIFY: Verdict is PASS and all criteria validated — advancing to DEMO")
+
+    # Create PR if git branch exists
+    git_branch = pipeline.get("git_branch", "")
+    if git_branch and git_push_and_create_pr:
+        pr_result = git_push_and_create_pr(
+            branch=git_branch, project_id=state["project_id"],
+            request=state.get("request", ""),
+            cwd=state.get("target_directory", str(PROJECT_ROOT)),
+            version=__version__,
+        )
+        if pr_result["pr_url"]:
+            pipeline["pr_url"] = pr_result["pr_url"]
+            _log_decision(project_path, f"GIT: PR created — {pr_result['pr_url']}")
+        elif pr_result.get("message"):
+            _log_decision(project_path, f"GIT: {pr_result['message']}")
 
     # Advance to DEMO phase (v6.8.0: user-facing demo + feedback gate)
     state["phase"] = "DEMO"

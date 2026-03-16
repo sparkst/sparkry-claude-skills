@@ -1,5 +1,30 @@
 # QRALPH Changelog
 
+## v6.12.0 (2026-03-16)
+
+### Added — Silent Git Automation
+- **Feature branches**: Pipeline creates `qralph/<project-id>` branch at EXECUTE start
+- **Per-agent commits**: Each execution agent, simplify, quality-fix, and polish agent commits its work to the feature branch automatically
+- **PR before DEMO**: Branch is pushed and PR created before the demo gate, so the user reviews code changes alongside the demo
+- **Graceful fallback**: If target isn't a git repo or `gh` CLI is missing, pipeline continues normally — git is additive, never blocking
+- **Scoped staging**: Only files in the target directory are committed — prevents accidentally including `.qralph` state files
+
+### Added — Structured Telemetry
+- **`metrics.json` per project**: Phase timing, agent durations, execution group timing, quality loop convergence rounds
+- **Bottleneck detection**: Flags agents taking >2x the group average duration in SUMMARY.md
+- **Quality round metrics**: P0/P1/P2 counts and convergence status per quality loop round
+- **Cost tracking**: Budget estimates and story point estimates recorded in metrics
+
+### Added — Parallel Execution Optimization
+- **Early-start**: When some tasks in an execution group complete while others still run, tasks from the next group that have no file overlap with running tasks are spawned immediately
+- **Idle time reduction**: Groups with one slow task no longer block the entire pipeline — independent tasks from later groups start early
+- **Group skip**: If all tasks in the next group were early-started, the pipeline skips the group entirely on advancement
+
+### Stats
+- 3 new modules: `qralph-git.py` (40 tests), `qralph-metrics.py` (23 tests), parallel optimization (12 tests)
+- 6 pipeline integration tests
+- 1471 total tests passing
+
 ## v6.11.0 (2026-03-16)
 
 ### Added — Output Extractor (decouple LLM format from pipeline parsing)
