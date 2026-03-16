@@ -17,46 +17,43 @@ def _sanitize_branch_name(name: str) -> str:
     """Replace non-alphanumeric chars (except /, -, _) with dashes, collapse multiples."""
     result = re.sub(r"[^a-zA-Z0-9/_\-]", "-", name)
     result = re.sub(r"-{2,}", "-", result)
-    result = result.strip("-")
-    return result
+    return result.strip("-")
 
 
-def _run_git(args: list[str], cwd: str, timeout: int = 30) -> Tuple[int, str]:
-    """Run a git subprocess with shell=False. Returns (returncode, output)."""
+def _run_cmd(
+    cmd: list[str], cwd: str, timeout: int, propagate_not_found: bool = False,
+) -> Tuple[int, str]:
+    """Run a subprocess. Returns (returncode, output).
+
+    When propagate_not_found is True, FileNotFoundError re-raises instead of
+    being caught (used by _run_gh so callers can detect missing gh CLI).
+    """
     try:
         proc = subprocess.run(
-            ["git"] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
         )
-        output = proc.stdout + proc.stderr
-        return (proc.returncode, output)
+        return (proc.returncode, proc.stdout + proc.stderr)
     except FileNotFoundError as exc:
+        if propagate_not_found:
+            raise
         return (-1, f"FileNotFoundError: {exc}")
     except subprocess.TimeoutExpired:
         return (-1, f"Timeout expired after {timeout}s")
 
 
+def _run_git(args: list[str], cwd: str, timeout: int = 30) -> Tuple[int, str]:
+    """Run a git subprocess. Returns (returncode, output)."""
+    return _run_cmd(["git"] + args, cwd=cwd, timeout=timeout)
+
+
 def _run_gh(args: list[str], cwd: str, timeout: int = 60) -> Tuple[int, str]:
-    """Run a gh CLI subprocess with shell=False. Returns (returncode, output)."""
-    try:
-        proc = subprocess.run(
-            ["gh"] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=False,
-        )
-        output = proc.stdout + proc.stderr
-        return (proc.returncode, output)
-    except FileNotFoundError:
-        raise
-    except subprocess.TimeoutExpired:
-        return (-1, f"Timeout expired after {timeout}s")
+    """Run a gh CLI subprocess. Returns (returncode, output).
+
+    Raises FileNotFoundError if gh is not installed (callers handle this).
+    """
+    return _run_cmd(
+        ["gh"] + args, cwd=cwd, timeout=timeout, propagate_not_found=True,
+    )
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -83,6 +80,8 @@ def get_default_branch(cwd: str) -> str:
 
 def create_branch(project_id: str, cwd: str) -> dict:
     """Create or switch to qralph/<sanitized-project-id> branch."""
+    if not is_git_repo(cwd):
+        return {"success": False, "branch": "", "error": "Not a git repository"}
     sanitized = _sanitize_branch_name(project_id)
     branch = f"qralph/{sanitized}"
 
@@ -101,6 +100,8 @@ def create_branch(project_id: str, cwd: str) -> dict:
 
 def commit_changes(target_dir: str, message: str, cwd: str) -> dict:
     """Stage files in target_dir and commit if anything changed."""
+    if not is_git_repo(cwd):
+        return {"success": False, "committed": False, "error": "Not a git repository"}
     rc, out = _run_git(["add", target_dir], cwd=cwd)
     if rc != 0:
         return {"success": False, "committed": False, "error": out.strip()}

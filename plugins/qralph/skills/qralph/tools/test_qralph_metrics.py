@@ -352,3 +352,29 @@ class TestToDict:
         # Should not raise
         result = json.dumps(m.to_dict())
         assert isinstance(result, str)
+
+
+# --- Round-trip timing ---
+
+
+class TestRoundTrip:
+    """REQ-MET-020 — Metrics survive save/reload and timing still works."""
+
+    def test_round_trip_preserves_timing(self, tmp_path):
+        """REQ-MET-020: Metrics can be saved, reloaded, and phase_end still works."""
+        from datetime import datetime
+
+        m = ProjectMetrics("test")
+        m.phase_start("EXECUTE")
+        m.write(tmp_path)
+        # Reload
+        data = json.loads((tmp_path / "metrics.json").read_text())
+        m2 = ProjectMetrics("test")
+        m2._phases = data.get("phases", {})
+        # Reconstruct _start_ts
+        for name, phase in m2._phases.items():
+            if "start" in phase:
+                phase["_start_ts"] = datetime.fromisoformat(phase["start"]).timestamp()
+        # Now phase_end should work
+        m2.phase_end("EXECUTE")
+        assert m2._phases["EXECUTE"]["duration_s"] >= 0

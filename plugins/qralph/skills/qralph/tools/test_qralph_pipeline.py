@@ -8008,6 +8008,51 @@ class TestEarlyStartParallelGroups:
             # Should proceed to execute-collect/simplify, not spawn anything
             assert result["action"] != "error" or "Missing" not in result.get("message", "")
 
+    def test_depends_on_blocks_early_start(self):
+        """REQ-PAR-007: Task with unsatisfied depends_on is not eligible."""
+        groups = [["T-001", "T-002"], ["T-003", "T-004"]]
+        current_group_index = 0
+        completed_tasks = {"T-002"}
+        running_tasks = {"T-001"}
+        task_files = {
+            "T-001": {"auth.ts"},
+            "T-002": {"utils.ts"},
+            "T-003": {"api.ts"},       # no file overlap, but depends on T-001
+            "T-004": {"dashboard.ts"},  # no file overlap, no deps
+        }
+        task_depends = {
+            "T-003": {"T-001"},  # T-001 still running, not in completed_tasks
+            "T-004": set(),
+        }
+
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks,
+            task_files, task_depends,
+        )
+        # T-003 blocked by depends_on, T-004 eligible
+        assert result == ["T-004"]
+
+    def test_depends_on_satisfied_allows_early_start(self):
+        """REQ-PAR-007b: Task with all depends_on satisfied is eligible."""
+        groups = [["T-001", "T-002"], ["T-003"]]
+        current_group_index = 0
+        completed_tasks = {"T-002"}
+        running_tasks = {"T-001"}
+        task_files = {
+            "T-001": {"auth.ts"},
+            "T-002": {"utils.ts"},
+            "T-003": {"api.ts"},  # no file overlap, depends on T-002 (completed)
+        }
+        task_depends = {
+            "T-003": {"T-002"},
+        }
+
+        result = qralph_pipeline.find_early_start_tasks(
+            groups, current_group_index, completed_tasks, running_tasks,
+            task_files, task_depends,
+        )
+        assert result == ["T-003"]
+
     def test_multiple_groups_ahead(self):
         """REQ-PAR-006: Can early-start from group N+2 if N+1 is all blocked."""
         groups = [["T-001"], ["T-002"], ["T-003"]]

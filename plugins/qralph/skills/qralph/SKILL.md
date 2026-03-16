@@ -199,6 +199,7 @@ The pipeline enforces these invariants:
 5. **Deploys are explicit.** Unless the user requested deployment, the pipeline asks first.
 6. **Production is verified.** Smoke tests confirm the live site works after deployment.
 7. **Learning accumulates.** Each project captures lessons for future projects.
+8. **Automatic PRs.** When the target directory is a git repo, the pipeline creates a feature branch, commits after each agent, and opens a PR before the demo gate.
 
 ## Project Artifacts
 
@@ -219,6 +220,7 @@ project-NNN/
 ├── DEPLOY-REPORT.md         # Deploy output + live URL
 ├── smoke-tests/             # Per-category smoke test results
 ├── SMOKE-REPORT.md          # Aggregated smoke test verdict
+├── metrics.json               # Pipeline telemetry (timing, bottlenecks)
 ├── learning-summary.md      # What this project taught QRALPH
 └── SUMMARY.md               # Final summary with metrics
 ```

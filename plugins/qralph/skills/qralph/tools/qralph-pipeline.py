@@ -398,6 +398,27 @@ def _record_agent_start(agent_name: str, agent_timing: dict) -> None:
     agent_timing.setdefault("respawn_counts", {}).setdefault(agent_name, 0)
 
 
+def _register_spawned_agents(
+    agents: list[dict], pipeline: dict, state: dict, project_path: Path,
+) -> None:
+    """Record agent start times and spawned-agent configs, then persist state."""
+    agent_timing = pipeline.setdefault(
+        "agent_timing", {"agent_start_times": {}, "respawn_counts": {}},
+    )
+    spawned = pipeline.setdefault("_spawned_agents", {})
+    current_phase = state.get("phase", "")
+    for a in agents:
+        name = a.get("name", a.get("id", ""))
+        _record_agent_start(name, agent_timing)
+        spawned[name] = a
+        _metrics_agent_start(
+            project_path, state.get("project_id", ""),
+            name, model=a.get("model", ""), phase=current_phase,
+        )
+    pipeline["last_activity_at"] = datetime.now().isoformat()
+    _save_pipeline_state(state, pipeline, project_path)
+
+
 def _check_agent_timeout(
     agent_timing: dict, agent_name: str, model: str,
     output_dir: Path, project_path: Path,
@@ -1350,12 +1371,18 @@ def _build_task_file_map(tasks: list[dict]) -> dict[str, set[str]]:
     return {t["id"]: set(t.get("files", [])) for t in tasks}
 
 
+def _build_task_depends_map(tasks: list[dict]) -> dict[str, set[str]]:
+    """Build task_id -> set of depends_on task IDs from manifest tasks."""
+    return {t["id"]: set(t.get("depends_on", [])) for t in tasks}
+
+
 def find_early_start_tasks(
     groups: list[list[str]],
     current_group_index: int,
     completed_tasks: set[str],
     running_tasks: set[str],
     task_files: dict[str, set[str]],
+    task_depends: dict[str, set[str]] | None = None,
 ) -> list[str]:
     """Find tasks from later groups eligible for early start.
 
@@ -1363,12 +1390,16 @@ def find_early_start_tasks(
     1. It's in a group after current_group_index
     2. Its files have NO overlap with any still-running task's files
     3. It hasn't already been completed or started
+    4. All its depends_on tasks are in completed_tasks
 
     Returns empty list if current group is fully complete (no running tasks)
     since normal group advancement handles that case.
     """
     if not running_tasks:
         return []
+
+    if task_depends is None:
+        task_depends = {}
 
     # Collect all files touched by running tasks
     running_files: set[str] = set()
@@ -1381,8 +1412,13 @@ def find_early_start_tasks(
             if tid in completed_tasks or tid in running_tasks:
                 continue
             task_f = task_files.get(tid, set())
-            if not (task_f & running_files):
-                eligible.append(tid)
+            if task_f & running_files:
+                continue
+            # Check explicit depends_on
+            deps = task_depends.get(tid, set())
+            if deps and not deps.issubset(completed_tasks):
+                continue
+            eligible.append(tid)
 
     return eligible
 
@@ -1663,6 +1699,16 @@ def _load_metrics(project_path: Path, project_id: str):
                      if k not in ("project_id", "created_at", "completed_at", "summary",
                                   "phases", "agents", "execution_groups", "quality_loop")}
         m.created_at = data.get("created_at", m.created_at)
+        # Reconstruct _start_ts from ISO start field (stripped by to_dict)
+        for name, phase in m._phases.items():
+            if "start" in phase and "_start_ts" not in phase:
+                phase["_start_ts"] = datetime.fromisoformat(phase["start"]).timestamp()
+        for name, agent in m._agents.items():
+            if "start" in agent and "_start_ts" not in agent:
+                agent["_start_ts"] = datetime.fromisoformat(agent["start"]).timestamp()
+        for idx, group in m._groups.items():
+            if "start" in group and "_start_ts" not in group:
+                group["_start_ts"] = datetime.fromisoformat(group["start"]).timestamp()
         return m
     return ProjectMetrics(project_id)
 
@@ -1671,6 +1717,53 @@ def _save_metrics(metrics, project_path: Path):
     """Write metrics to disk."""
     if metrics:
         metrics.write(project_path)
+
+
+def _metrics_phase_start(project_path: Path, project_id: str, phase: str):
+    """Record phase start in metrics (no-op if metrics module missing)."""
+    if not ProjectMetrics:
+        return
+    metrics = _load_metrics(project_path, project_id)
+    if metrics:
+        metrics.phase_start(phase)
+        _save_metrics(metrics, project_path)
+
+
+def _metrics_phase_end(project_path: Path, project_id: str, phase: str):
+    """Record phase end in metrics (no-op if metrics module missing)."""
+    if not ProjectMetrics:
+        return
+    metrics = _load_metrics(project_path, project_id)
+    if metrics:
+        try:
+            metrics.phase_end(phase)
+        except KeyError:
+            pass  # Phase was never started (e.g. quick mode skip)
+        _save_metrics(metrics, project_path)
+
+
+def _metrics_agent_start(project_path: Path, project_id: str, agent_name: str,
+                          model: str = "", phase: str = ""):
+    """Record agent start in metrics (no-op if metrics module missing)."""
+    if not ProjectMetrics:
+        return
+    metrics = _load_metrics(project_path, project_id)
+    if metrics:
+        metrics.agent_start(agent_name, model=model, phase=phase)
+        _save_metrics(metrics, project_path)
+
+
+def _metrics_agent_end(project_path: Path, project_id: str, agent_name: str):
+    """Record agent end in metrics (no-op if metrics module missing)."""
+    if not ProjectMetrics:
+        return
+    metrics = _load_metrics(project_path, project_id)
+    if metrics:
+        try:
+            metrics.agent_end(agent_name)
+        except KeyError:
+            pass  # Agent was never started
+        _save_metrics(metrics, project_path)
 
 
 # ─── Story Point Estimation ──────────────────────────────────────────────────
@@ -2334,6 +2427,7 @@ def cmd_execute() -> dict:
         _save_pipeline_state(state, pipeline, project_path)
 
     _log_decision(project_path, f"EXECUTE: {len(execution_groups)} groups prepared")
+    _metrics_phase_start(project_path, state["project_id"], "EXECUTE")
 
     return {
         "status": "execute_ready",
@@ -2452,6 +2546,7 @@ def cmd_verify() -> dict:
         project_path = _safe_project_path(state)
     except ValueError as e:
         return {"error": str(e)}
+    _metrics_phase_start(project_path, state["project_id"], "VERIFY")
     manifest_path = project_path / "manifest.json"
     manifest = qralph_state.safe_read_json(manifest_path, {})
 
@@ -3715,12 +3810,12 @@ def _next_plan_review(state: dict, pipeline: dict, project_path: Path, confirm: 
     pipeline["current_group_index"] = 0
     pipeline["sub_phase"] = "EXEC_WAITING"
     first_group = groups[0]
-    agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
-    for a in first_group.get("agents", []):
-        _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
-        pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
-    pipeline["last_activity_at"] = datetime.now().isoformat()
-    _save_pipeline_state(state, pipeline, project_path)
+    _register_spawned_agents(first_group.get("agents", []), pipeline, state, project_path)
+    if ProjectMetrics:
+        metrics = _load_metrics(project_path, state["project_id"])
+        if metrics:
+            metrics.group_start(0, first_group.get("task_ids", []))
+            _save_metrics(metrics, project_path)
     _log_decision(project_path, f"NEXT: Plan finalized, {len(groups)} execution groups ready")
 
     return {
@@ -3777,12 +3872,14 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
 
         manifest_path = project_path / "manifest.json"
         manifest = qralph_state.safe_read_json(manifest_path, {}) if manifest_path.exists() else {}
-        task_files = _build_task_file_map(manifest.get("tasks", []))
+        manifest_tasks = manifest.get("tasks", [])
+        task_files = _build_task_file_map(manifest_tasks)
+        task_depends = _build_task_depends_map(manifest_tasks)
 
         group_id_lists = [g.get("task_ids", []) for g in groups]
         eligible = find_early_start_tasks(
             group_id_lists, idx, completed_in_group | early_started_set,
-            running_in_group, task_files,
+            running_in_group, task_files, task_depends,
         )
         # Filter out tasks already early-started
         new_eligible = [tid for tid in eligible if tid not in early_started_set]
@@ -3802,12 +3899,7 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             early_started_list.extend(new_eligible)
             pipeline["early_started"] = early_started_list
 
-            agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
-            for a in early_agents:
-                _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
-                pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
-            pipeline["last_activity_at"] = datetime.now().isoformat()
-            _save_pipeline_state(state, pipeline, project_path)
+            _register_spawned_agents(early_agents, pipeline, state, project_path)
 
             # Determine which future group the tasks come from
             early_group_indices = set()
@@ -3836,7 +3928,18 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             "expected": expected_ids,
         }
 
-    # Current group complete — commit per-task changes
+    # Current group complete — record metrics and commit per-task changes
+    if ProjectMetrics:
+        metrics = _load_metrics(project_path, state["project_id"])
+        if metrics:
+            try:
+                metrics.group_end(idx)
+            except KeyError:
+                pass  # Group was never started (e.g. resumed mid-group)
+            _save_metrics(metrics, project_path)
+    # Record agent completions for tasks in this group
+    for tid in expected_ids:
+        _metrics_agent_end(project_path, state["project_id"], tid)
     manifest_path = project_path / "manifest.json"
     manifest_data = qralph_state.safe_read_json(manifest_path, {}) if manifest_path.exists() else {}
     for tid in expected_ids:
@@ -3873,12 +3976,13 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
             if (a.get("task_id") or a.get("name")) not in early_started_set
         ]
 
-        agent_timing = pipeline.setdefault("agent_timing", {"agent_start_times": {}, "respawn_counts": {}})
-        for a in agents_to_spawn:
-            _record_agent_start(a.get("name", a.get("id", "")), agent_timing)
-            pipeline.setdefault("_spawned_agents", {})[a.get("name", a.get("id", ""))] = a
-        pipeline["last_activity_at"] = datetime.now().isoformat()
-        _save_pipeline_state(state, pipeline, project_path)
+        _register_spawned_agents(agents_to_spawn, pipeline, state, project_path)
+        if ProjectMetrics:
+            metrics = _load_metrics(project_path, state["project_id"])
+            if metrics:
+                spawn_ids = [a.get("task_id") or a.get("name") for a in agents_to_spawn]
+                metrics.group_start(next_idx, spawn_ids)
+                _save_metrics(metrics, project_path)
         _log_decision(project_path, f"NEXT: Group {idx + 1}/{len(groups)} complete, spawning group {next_idx + 1}")
 
         return {
@@ -3977,6 +4081,7 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
         pipeline["quality_gate_retries"] = 0
 
     # Transition to SIMPLIFY phase instead of directly to VERIFY
+    _metrics_phase_end(project_path, state["project_id"], "EXECUTE")
     state["phase"] = "SIMPLIFY"
     pipeline["sub_phase"] = "SIMPLIFY_RUN"
     _save_pipeline_state(state, pipeline, project_path)
@@ -3987,6 +4092,7 @@ def _next_exec_waiting(state: dict, pipeline: dict, project_path: Path) -> dict:
 
 def _next_simplify_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     """SIMPLIFY_RUN: Spawn a simplifier agent that runs /simplify on changed files."""
+    _metrics_phase_start(project_path, state["project_id"], "SIMPLIFY")
     manifest_path = project_path / "manifest.json"
     manifest = qralph_state.safe_read_json(manifest_path, {}) if manifest_path.exists() else {}
     tasks = manifest.get("tasks", [])
@@ -4057,6 +4163,7 @@ def _next_simplify_waiting(state: dict, pipeline: dict, project_path: Path) -> d
 
     if mode == "quick":
         # Quick mode: skip quality loop, go directly to VERIFY
+        _metrics_phase_end(project_path, state["project_id"], "SIMPLIFY")
         _log_decision(project_path, "SIMPLIFY: Quick mode — skipping quality loop, advancing to VERIFY")
 
         # Save to disk before cmd_verify() reloads state
@@ -4081,6 +4188,7 @@ def _next_simplify_waiting(state: dict, pipeline: dict, project_path: Path) -> d
         }
 
     # Thorough mode: advance to QUALITY_LOOP (QUALITY_DISCOVERY sub-phase)
+    _metrics_phase_end(project_path, state["project_id"], "SIMPLIFY")
     _log_decision(project_path, "SIMPLIFY: Thorough mode — advancing to QUALITY_DISCOVERY")
     state["phase"] = "QUALITY_LOOP"
     pipeline["sub_phase"] = "QUALITY_DISCOVERY"
@@ -4141,6 +4249,7 @@ If no issues found, state "No issues found." and explain why you are confident.
 
 def _next_quality_discovery(state: dict, pipeline: dict, project_path: Path) -> dict:
     """QUALITY_DISCOVERY: Initialize quality loop and spawn review agents."""
+    _metrics_phase_start(project_path, state["project_id"], "QUALITY_LOOP")
     ql = pipeline.get("quality_loop")
     estimated_sp = state.get("estimated_sp", 5.0)
     personas = pipeline.get("personas", [])
@@ -4516,6 +4625,7 @@ def _next_quality_dashboard(state: dict, pipeline: dict, project_path: Path) -> 
 
     if dashboard_action in ("converged", "early_terminate"):
         # Advance to POLISH (POLISH_RUN sub-phase)
+        _metrics_phase_end(project_path, state["project_id"], "QUALITY_LOOP")
         state["phase"] = "POLISH"
         pipeline["sub_phase"] = "POLISH_RUN"
         _save_pipeline_state(state, pipeline, project_path)
@@ -4626,6 +4736,7 @@ def _next_quality_dashboard(state: dict, pipeline: dict, project_path: Path) -> 
 
 def _next_polish_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     """POLISH_RUN: Spawn bug_fixer, wiring_agent, requirements_tracer agents."""
+    _metrics_phase_start(project_path, state["project_id"], "POLISH")
     manifest_path = project_path / "manifest.json"
     manifest = qralph_state.safe_read_json(manifest_path, {}) if manifest_path.exists() else {}
     tasks = manifest.get("tasks", [])
@@ -4787,6 +4898,7 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
         # Reset retry counter on clean pass so it doesn't bleed into next project
         pipeline["polish_retry_count"] = 0
         # Advance to VERIFY — save to disk before cmd_verify() reloads state
+        _metrics_phase_end(project_path, state["project_id"], "POLISH")
         state["phase"] = "VERIFY"
         _save_pipeline_state(state, pipeline, project_path)
 
@@ -5049,8 +5161,10 @@ def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
             _log_decision(project_path, f"GIT: {pr_result['message']}")
 
     # Advance to DEMO phase (v6.8.0: user-facing demo + feedback gate)
+    _metrics_phase_end(project_path, state["project_id"], "VERIFY")
     state["phase"] = "DEMO"
     pipeline["sub_phase"] = "DEMO_PRESENT"
+    _metrics_phase_start(project_path, state["project_id"], "DEMO")
     _save_pipeline_state(state, pipeline, project_path)
 
     # Auto-advance into DEMO_PRESENT immediately
@@ -5123,9 +5237,11 @@ def _next_demo_present(state: dict, pipeline: dict, project_path: Path, confirm:
                 "message": "Feedback received. Marshaling it back to the plan for revision."}
 
     # User approved — no feedback, advance to DEPLOY
+    _metrics_phase_end(project_path, state["project_id"], "DEMO")
     _log_decision(project_path, "DEMO: User approved demo — advancing to DEPLOY")
     state["phase"] = "DEPLOY"
     pipeline["sub_phase"] = "DEPLOY_PREFLIGHT"
+    _metrics_phase_start(project_path, state["project_id"], "DEPLOY")
     _save_pipeline_state(state, pipeline, project_path)
 
     return {"action": "advance", "phase": "DEPLOY", "sub_phase": "DEPLOY_PREFLIGHT"}
@@ -5166,9 +5282,11 @@ def _next_demo_marshal(state: dict, pipeline: dict, project_path: Path) -> dict:
 
     # Safety cap: after MAX_DEMO_CYCLES feedback cycles, force-advance to DEPLOY
     if demo_cycles >= MAX_DEMO_CYCLES:
+        _metrics_phase_end(project_path, state["project_id"], "DEMO")
         _log_decision(project_path, f"DEMO: Maximum feedback cycles reached ({MAX_DEMO_CYCLES} of {MAX_DEMO_CYCLES}) — advancing to DEPLOY")
         state["phase"] = "DEPLOY"
         pipeline["sub_phase"] = "DEPLOY_PREFLIGHT"
+        _metrics_phase_start(project_path, state["project_id"], "DEPLOY")
         _save_pipeline_state(state, pipeline, project_path)
         return {
             "action": "advance",
@@ -5431,8 +5549,13 @@ def _next_learn_complete(state: dict, pipeline: dict, project_path: Path) -> dic
 
 def _set_phase_learn(state: dict, pipeline: dict, project_path: Path) -> None:
     """Set pipeline state to LEARN_CAPTURE and save checkpoint."""
+    # End whichever phase we're leaving (SMOKE, DEPLOY, DEMO, or VERIFY)
+    prev_phase = state.get("phase", "")
+    if prev_phase and prev_phase != "LEARN":
+        _metrics_phase_end(project_path, state["project_id"], prev_phase)
     state["phase"] = "LEARN"
     pipeline["sub_phase"] = "LEARN_CAPTURE"
+    _metrics_phase_start(project_path, state["project_id"], "LEARN")
     _save_pipeline_state(state, pipeline, project_path)
 
 
@@ -5701,8 +5824,10 @@ def _next_deploy_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     _log_decision(project_path, f"DEPLOY: Deployment SUCCESS — live at {live_url or 'URL not detected'}")
 
     # Advance to SMOKE
+    _metrics_phase_end(project_path, state["project_id"], "DEPLOY")
     state["phase"] = "SMOKE"
     pipeline["sub_phase"] = "SMOKE_GENERATE"
+    _metrics_phase_start(project_path, state["project_id"], "SMOKE")
     _save_pipeline_state(state, pipeline, project_path)
 
     return _next_smoke_generate(state, pipeline, project_path)

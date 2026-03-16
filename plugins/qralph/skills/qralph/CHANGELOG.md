@@ -8,6 +8,7 @@
 - **PR before DEMO**: Branch is pushed and PR created before the demo gate, so the user reviews code changes alongside the demo
 - **Graceful fallback**: If target isn't a git repo or `gh` CLI is missing, pipeline continues normally — git is additive, never blocking
 - **Scoped staging**: Only files in the target directory are committed — prevents accidentally including `.qralph` state files
+- **Commit identity**: QRALPH commits use `QRALPH <qralph@pipeline>` as the author to distinguish pipeline commits from user commits
 
 ### Added — Structured Telemetry
 - **`metrics.json` per project**: Phase timing, agent durations, execution group timing, quality loop convergence rounds

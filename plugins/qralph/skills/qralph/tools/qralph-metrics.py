@@ -22,27 +22,30 @@ class ProjectMetrics:
         self._quality: list[dict] = []
         self._extras: dict[str, object] = {}
 
+    @staticmethod
+    def _timestamp_entry(**extras: object) -> dict:
+        """Create a dict with start timestamp and any extra fields."""
+        now = datetime.now()
+        return {"start": now.isoformat(), "_start_ts": now.timestamp(), **extras}
+
+    @staticmethod
+    def _close_entry(entry: dict, **extras: object) -> None:
+        """Set end timestamp, compute duration_s, and merge extras."""
+        now = datetime.now()
+        entry["end"] = now.isoformat()
+        entry["duration_s"] = now.timestamp() - entry["_start_ts"]
+        entry.update(extras)
+
     def phase_start(self, phase: str) -> None:
-        self._phases[phase] = {
-            "start": datetime.now().isoformat(),
-            "_start_ts": datetime.now().timestamp(),
-        }
+        self._phases[phase] = self._timestamp_entry()
 
     def phase_end(self, phase: str) -> None:
         if phase not in self._phases:
             raise KeyError(f"Phase '{phase}' was never started")
-        now = datetime.now()
-        entry = self._phases[phase]
-        entry["end"] = now.isoformat()
-        entry["duration_s"] = now.timestamp() - entry["_start_ts"]
+        self._close_entry(self._phases[phase])
 
     def agent_start(self, name: str, model: str = "", phase: str = "") -> None:
-        self._agents[name] = {
-            "model": model,
-            "phase": phase,
-            "start": datetime.now().isoformat(),
-            "_start_ts": datetime.now().timestamp(),
-        }
+        self._agents[name] = self._timestamp_entry(model=model, phase=phase)
 
     def agent_end(
         self,
@@ -52,29 +55,18 @@ class ProjectMetrics:
     ) -> None:
         if name not in self._agents:
             raise KeyError(f"Agent '{name}' was never started")
-        now = datetime.now()
         entry = self._agents[name]
-        entry["end"] = now.isoformat()
-        entry["committed"] = committed
+        self._close_entry(entry, committed=committed)
         if duration_override is not None:
             entry["duration_s"] = duration_override
-        else:
-            entry["duration_s"] = now.timestamp() - entry["_start_ts"]
 
     def group_start(self, index: int, task_ids: list[str]) -> None:
-        self._groups[index] = {
-            "task_ids": task_ids,
-            "start": datetime.now().isoformat(),
-            "_start_ts": datetime.now().timestamp(),
-        }
+        self._groups[index] = self._timestamp_entry(task_ids=task_ids)
 
     def group_end(self, index: int) -> None:
         if index not in self._groups:
             raise KeyError(f"Group {index} was never started")
-        now = datetime.now()
-        entry = self._groups[index]
-        entry["end"] = now.isoformat()
-        entry["duration_s"] = now.timestamp() - entry["_start_ts"]
+        self._close_entry(self._groups[index])
 
     def quality_round(
         self, round_num: int, p0: int, p1: int, p2: int, converged: bool
@@ -121,24 +113,18 @@ class ProjectMetrics:
                     )
         return bottlenecks
 
+    @staticmethod
+    def _strip_internal(data: dict) -> dict:
+        """Return a copy of data without keys starting with underscore."""
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+
     def to_dict(self) -> dict:
-        # Clean phases: strip internal _start_ts
-        phases = {}
-        for name, data in self._phases.items():
-            phases[name] = {k: v for k, v in data.items() if not k.startswith("_")}
-
-        # Clean agents
-        agents = {}
-        for name, data in self._agents.items():
-            agents[name] = {k: v for k, v in data.items() if not k.startswith("_")}
-
-        # Clean groups, convert to list sorted by index
-        groups = []
-        for idx in sorted(self._groups.keys()):
-            entry = {
-                k: v for k, v in self._groups[idx].items() if not k.startswith("_")
-            }
-            groups.append(entry)
+        phases = {name: self._strip_internal(d) for name, d in self._phases.items()}
+        agents = {name: self._strip_internal(d) for name, d in self._agents.items()}
+        groups = [
+            self._strip_internal(self._groups[idx])
+            for idx in sorted(self._groups.keys())
+        ]
 
         total_phase_duration = sum(
             p.get("duration_s", 0) for p in phases.values()
