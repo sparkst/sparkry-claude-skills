@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.12.0 Pipeline — deterministic multi-agent orchestration, idea to production.
+QRALPH v6.12.1 Pipeline — deterministic multi-agent orchestration, idea to production.
 
 Full pipeline: IDEATE → PERSONA → CONCEPT → PLAN → EXECUTE → SIMPLIFY →
                QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → COMPLETE
@@ -171,7 +171,7 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.12.0"
+__version__ = "6.12.1"
 
 QUALITY_STANDARD = """
 ## Quality Standard

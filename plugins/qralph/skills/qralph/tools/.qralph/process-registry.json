@@ -1,0 +1,13 @@
+{
+  "session_id": "2026-03-16T18:04:25.722247+00:00",
+  "project_id": null,
+  "parent_pid": 13405,
+  "spawned_processes": [],
+  "grace_periods": {
+    "node": 1800,
+    "vitest": 1800,
+    "claude": 3600,
+    "team-agent": 1800,
+    "default": 900
+  }
+}

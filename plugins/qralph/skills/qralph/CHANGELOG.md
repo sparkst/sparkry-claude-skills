@@ -1,5 +1,15 @@
 # QRALPH Changelog
 
+## v6.12.1 (2026-03-16)
+
+### Fixed — Review Fixes
+- **Metrics round-trip**: `_start_ts` reconstructed from ISO timestamp on reload so `phase_end`/`agent_end` work after deserialization
+- **Phase/agent/group timing wired**: All major phase transitions (EXECUTE through LEARN) now call `phase_start`/`phase_end`, agent spawns call `agent_start`/`agent_end`, execution groups call `group_start`/`group_end` — metrics.json is now fully populated
+- **`is_git_repo` guard**: `create_branch` and `commit_changes` check for git repo before attempting operations
+- **`depends_on` check in early-start**: `find_early_start_tasks` now verifies explicit task dependencies are satisfied before spawning
+- **Metrics double-call bug**: `datetime.now()` called once per timing event (was called twice creating tiny race)
+- **Code consolidation**: `_run_git`/`_run_gh` → shared `_run_cmd`; extracted `_timestamp_entry`, `_close_entry`, `_register_spawned_agents`
+
 ## v6.12.0 (2026-03-16)
 
 ### Added — Silent Git Automation
