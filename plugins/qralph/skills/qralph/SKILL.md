@@ -3,43 +3,65 @@ name: qralph
 description: Deterministic multi-agent pipeline that takes ideas from concept to deployed production code. Handles the full lifecycle — ideation, persona generation, concept review, planning, parallel execution, quality loops, verification, demo, deployment, and smoke testing. Use this whenever the user says /qralph, QRALPH, asks to "run the pipeline", or wants end-to-end multi-agent project execution. Also use when the user references pipeline phases, project orchestration, or wants to build something from scratch with automated quality gates.
 ---
 
-# QRALPH v6.10.1 — Deterministic Multi-Agent Pipeline
+# QRALPH v6.11.0 — Deterministic Multi-Agent Pipeline
 
 ## How This Works (read this first)
 
-QRALPH is a **state machine**. The pipeline script (`qralph-pipeline.py`) has already encoded all the decision-making — which agents to spawn, in what order, with what prompts, and what quality gates to enforce. Your job is to be the **faithful executor**: call `next`, do exactly what the pipeline tells you, relay results to the user, repeat.
+QRALPH is a **state machine**. The pipeline script (`qralph-pipeline.py`) encodes all decision-making — which agents to spawn, in what order, with what prompts, and what quality gates to enforce. The executor operates in a tight loop:
 
-This matters because QRALPH spawns many agents in parallel. If you improvise — reordering steps, skipping a gate, adding your own analysis, or invoking external skills — the downstream agents receive stale or incorrect context. We've seen this waste thousands of tokens: 5 agents complete work based on assumptions that were invalid because the executor deviated from the pipeline's instructions. The pipeline prevents this by managing state transitions, so trust it.
+**Call the pipeline → do what it returns → show gates to the user → repeat.**
 
-**Your role in one sentence:** Call the pipeline, do what it says, show results to the user at gates, and never freelance.
+The pipeline manages state transitions, agent ordering, error recovery, and backtracking. The executor relays faithfully between the pipeline and the user. This division is what makes the system reliable across dozens of parallel agents.
 
-## Why Determinism Matters
+> In a past project, the executor read implementation files and told the verifier "the auth module looks correct." The verifier trusted this and rubber-stamped. The auth module had a bug. Three agents' work was wasted on retry. The fix: the executor passes pipeline outputs verbatim and lets the verifier form its own judgment from source.
 
-The pipeline's phases build on each other. Each phase produces artifacts that downstream phases consume. When the executor skips ahead, adds its own interpretation, or calls external skills:
+## What the Pipeline Already Handles
 
-- Agents spawn with prompts built from the wrong state
-- Parallel agent groups do work that has to be thrown away
-- Quality gates can't validate work that didn't follow the expected path
-- The user pays for wasted tokens and gets a worse result
+The pipeline already manages complexity that the executor can stay out of:
 
-The pipeline already handles complexity, error recovery, and backtracking internally. It will escalate to the user when it genuinely needs human judgment. Your restraint is what makes the system reliable.
+- Phase ordering and state transitions
+- Agent selection, scaling by complexity, and model assignment
+- Critical agents (sde-iii, architecture-advisor) included regardless of template
+- Quality gates (tests/lint/typecheck) run automatically after execution
+- Verification verdict enforcement — ambiguous or FAIL blocks finalization
+- Gate two-call protocol enforcement
+- Deploy intent detection and command auto-detection
+- Smoke test parallelization and verdict aggregation
+- Confidence-based consensus for early discovery termination
+- State checkpointing at every transition for crash recovery
+- Error recovery and backtracking when phases fail
 
 ## Session Ownership
 
-When QRALPH is active, it orchestrates everything — brainstorming, frontend design, code review, deployment — through its own pipeline phases and spawned agents. Those agents can use whatever tools and skills they need. But the executor (you) stays in the `plan` → `next` loop.
+When QRALPH is active, all work flows through the pipeline. The pipeline's agents handle every domain — design, code review, security, deployment. The executor stays in the `plan` → `next` loop and routes all user requests through it rather than invoking external skills, which would create parallel conflicting work streams.
 
-If another skill's trigger seems to match the user's request (e.g., "build a landing page" triggering frontend-design), the pipeline already handles that domain through its own agents. Invoking external skills would create parallel, conflicting work streams. Skip pre-work like EnterPlanMode or brainstorming skills — go straight to `plan`.
+## Executor Operating Contract
 
-## Executor Guidelines
+**Spawn every agent the pipeline returns.** Downstream phases need all inputs to work correctly. The pipeline has already decided which agents are needed based on project complexity.
 
-1. **Spawn every agent the pipeline returns.** The pipeline has already decided which agents are needed based on project complexity. Skipping one means downstream phases get incomplete inputs.
-2. **Use the exact model from each agent config.** Model selection is intentional — haiku for fast checks, opus for deep analysis. Substituting changes cost and quality characteristics the pipeline planned around.
-3. **Write each agent's complete return text to disk verbatim.** Later phases read these files. Summarizing or paraphrasing loses the detail that verification and quality loops depend on.
-4. **Two-call gate protocol:** At confirm gates, the pipeline returns the gate action on the first call. Show the output to the user via AskUserQuestion and stop. Only after the user responds in a separate turn do you call `next --confirm`. The pipeline enforces this — it rejects `--confirm` if the gate wasn't returned in a prior call. This prevents accidentally auto-confirming past the user.
-5. **Only use `next` to advance.** The pipeline manages phase transitions internally. Calling other pipeline commands directly can corrupt state or skip gates.
-6. **If blocked or confused, ask the user.** Guessing at the right action risks sending agents down the wrong path, which compounds into wasted work.
-7. **For `--thorough` mode users:** Use plain language only. These are non-technical users — never show error traces, type errors, or jargon.
-8. **Spawn smoke test agents in parallel** for maximum speed (they're independent and use haiku).
+**Use the exact model from each agent config.** Model selection is intentional — haiku for fast checks, opus for deep analysis. The pipeline's cost and quality planning depends on these choices.
+
+**Write each agent's complete return text to disk verbatim** at the paths the pipeline specifies. Later phases read these files. Summarizing or paraphrasing loses the detail that verification and quality loops depend on.
+
+**Follow the two-call gate protocol.** At confirm gates, the pipeline returns the gate action on the first call. Show the output to the user via AskUserQuestion and stop. Only after the user responds in a separate turn, call `next --confirm`. The pipeline enforces this — it rejects `--confirm` if the gate wasn't returned in a prior call.
+
+**Advance only with `next`.** The pipeline manages phase transitions internally. Calling other pipeline commands directly can corrupt state or skip gates.
+
+**When blocked or confused, ask the user.** A question costs one turn. A wrong guess can send agents down a path that compounds into wasted work across phases.
+
+**In `--thorough` mode, use plain language only.** These are non-technical users — show results and options, not error traces or jargon.
+
+**Spawn smoke test agents in parallel** for maximum speed (they're independent and use haiku).
+
+## What Goes Wrong Without Discipline
+
+These are real failure patterns from past projects:
+
+1. **Executor pre-judges, verifier rubber-stamps.** The executor read implementation files and summarized them as "looks good" in the handoff. The verifier, receiving a positive assessment instead of raw source, confirmed without independent review. A bug shipped. Root cause: the executor's summary replaced the evidence the verifier needed.
+
+2. **Executor invokes an external skill.** A user request like "build a landing page" matched a frontend-design skill trigger. The executor ran that skill alongside the pipeline. Two work streams produced conflicting outputs — different file structures, different component names. The pipeline's agents couldn't reconcile the external skill's work, and the entire execution phase had to restart.
+
+3. **Executor skips a gate.** The executor auto-confirmed a plan gate to save time. The plan had an issue the user would have caught. Agents spawned with incorrect task definitions. The quality loop flagged the problems, the pipeline backtracked to PLAN, and all execution work was discarded.
 
 ## Trigger
 
@@ -150,7 +172,7 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm] --project <project_id>
 | `smoke_failure` | Show failed smoke tests to user. Let user decide: (a) fix issues and redeploy, (b) accept current state. Pass choice via `next`. |
 | `quality_dashboard` | Show `quality-reports/round-N.md` to user. If P0 count is dropping, note quality is improving and call `next`. If stuck at round 3, explain in plain language and call `next` (pipeline handles backtrack). |
 | `respawn_agent` | An agent timed out. Re-spawn the agent named in `agent_name` with its original prompt and model. Write output to `output_file`. If `heal_suggestion` is present, mention auto-recovery is being attempted. Call `next`. |
-| `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose. If `heal_suggestion` is present, show it as a recommendation. Pass choice via `next --confirm`. Use exactly what the pipeline provides — don't add technical detail. |
+| `escalate_to_user` | Show the plain-language explanation and options from the pipeline response. Let user choose. If `heal_suggestion` is present, show it as a recommendation. Pass choice via `next --confirm`. Use exactly what the pipeline provides, in the same plain language. |
 | `backtrack_replan` | Tell user the current approach isn't working and the pipeline is revising the plan with lessons learned. Call `next`. |
 | `learn_complete` | Show `learning-summary.md` to user. Summarize what the project taught QRALPH. Call `next`. |
 | `error` | Read the error `message` carefully. For verification errors: delete `verification/result.md` and call `next` so the pipeline regenerates the verifier. For implementation bugs: fix the code, then call `next`. If unclear: show the error to the user and ask. See `references/phase-troubleshooting.md` for detailed guidance. |
@@ -160,35 +182,23 @@ python3 .qralph/tools/qralph-pipeline.py next [--confirm] --project <project_id>
 
 The pipeline is intelligent about when to ask:
 
-- **"deploy to Cloudflare Workers"** → Explicit intent. Auto-deploys, skips `confirm_deploy`. Smoke tests run against live URL.
-- **"build me a landing page"** → No deploy language. Skips DEPLOY and SMOKE entirely, goes to LEARN.
-- **"build and maybe deploy later"** → Implicit intent. Shows `confirm_deploy` gate with checklist.
+- **"deploy to Cloudflare Workers"** — Explicit intent. Auto-deploys, skips `confirm_deploy`. Smoke tests run against live URL.
+- **"build me a landing page"** — No deploy language. Skips DEPLOY and SMOKE entirely, goes to LEARN.
+- **"build and maybe deploy later"** — Implicit intent. Shows `confirm_deploy` gate with checklist.
 
 Deploy command auto-detection: `wrangler.toml` → wrangler, `vercel.json` → vercel, `package.json` deploy script → npm.
 
 ## Safety Guarantees (--thorough mode)
 
-These invariants are enforced by the pipeline:
+The pipeline enforces these invariants:
 
-1. **Pipeline never exits with failing tests.** It fixes or escalates.
+1. **Tests pass before exit.** The pipeline fixes test failures or escalates to the user.
 2. **Every requirement has a test.** The requirements tracer enforces this in POLISH.
 3. **Plain-language escalation.** When auto-fix fails, the user gets simple options, not technical error messages.
-4. **No broken builds.** VERIFY is a hard gate — all checks pass before proceeding.
-5. **No silent deploys.** Unless the user explicitly requested deployment, the pipeline asks first.
+4. **Builds stay green.** VERIFY is a hard gate — all checks pass before proceeding.
+5. **Deploys are explicit.** Unless the user requested deployment, the pipeline asks first.
 6. **Production is verified.** Smoke tests confirm the live site works after deployment.
 7. **Learning accumulates.** Each project captures lessons for future projects.
-
-## What the Pipeline Handles (so you don't need to)
-
-- Critical agents (sde-iii, architecture-advisor) are included regardless of template
-- Quality gate (tests/lint/typecheck) runs automatically after execution
-- Verification verdict must be explicit PASS — ambiguous or FAIL blocks finalization
-- Gate two-call protocol enforcement
-- Deploy intent detection and command auto-detection
-- Smoke test parallelization and verdict aggregation
-- Agent scaling by complexity
-- Confidence-based consensus for early discovery termination
-- State checkpointing at every transition for crash recovery
 
 ## Project Artifacts
 

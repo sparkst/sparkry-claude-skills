@@ -57,7 +57,7 @@ QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → C
 QRALPH "Add user authentication with OAuth2 and session management"
 ```
 
-### What's New in v6.10.1
+### What's New in v6.11.0
 
 - **`qralph` CLI**: Python-driven pipeline orchestration replacing the LLM-as-executor. Three-tier escalation: deterministic → decision agent (`claude -p` with step-specific rules) → human. Session reuse via `--resume`. Run from any directory: `qralph run "your request"`.
 - **57 new tests** for the CLI prototype (604 total).
@@ -95,7 +95,7 @@ QRALPH "Add notification system"
 
 | Plugin | Install | Description |
 |--------|---------|-------------|
-| **qralph** | `/plugin install qralph@sparkry-claude-skills` | Deterministic 14-phase multi-agent pipeline with CLI orchestrator (v6.10.1) |
+| **qralph** | `/plugin install qralph@sparkry-claude-skills` | Deterministic 14-phase multi-agent pipeline with CLI orchestrator (v6.11.0) |
 | **dev-workflow** | `/plugin install dev-workflow@sparkry-claude-skills` | TDD workflow with PE reviewer, test writer, planner agents |
 | **research-workflow** | `/plugin install research-workflow@sparkry-claude-skills` | Fact-checking, source evaluation, synthesis agents |
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, quality scoring |

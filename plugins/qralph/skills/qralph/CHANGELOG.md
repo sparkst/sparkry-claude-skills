@@ -1,5 +1,20 @@
 # QRALPH Changelog
 
+## v6.11.0 (2026-03-16)
+
+### Added — Output Extractor (decouple LLM format from pipeline parsing)
+- **`output-extractor.py`**: New module with 6 deterministic extractor functions that accept messy natural-language LLM output and produce the structured data the pipeline expects. Agents write naturally; scripts extract structure.
+  - `extract_verdict`: 4-tier fallback (JSON block → raw JSON → regex → natural language phrases)
+  - `extract_criteria_results`: JSON + markdown table + section headers + numbered lists
+  - `extract_request_satisfaction`: JSON + prose search per fragment ID
+  - `extract_reverify_verdicts`: Explicit RESOLVED/UNRESOLVED + natural language with evidence safety rail
+  - `extract_smoke_results`: Bold markers → plain markers → checkboxes → summary line
+  - `extract_polish_issues`: Structured P0/P1 extraction via `parse_findings` + anchored gap patterns (no more bare keyword scan)
+- **48 new tests** in `test_output_extractor.py` covering all extractors with REQ-IDs
+- **Pipeline wired**: `_parse_verdict`, `_parse_criteria_results`, `_next_quality_reverify_waiting`, `_next_smoke_verdict`, and polish detection all delegate to new extractors
+- **Concept synthesis simplified**: `synthesize_concept_reviews` now uses `parse_findings` directly; deleted duplicate `_SEVERITY_PATTERNS` and `_extract_severity`
+- **Deleted `_extract_polish_gaps`**: Subsumed by `extract_polish_issues` which uses finding severity instead of bare keyword scan (fixes false positive where "I reviewed the P0 requirements" triggered NEEDS_ATTENTION)
+
 ## v6.10.1 (2026-03-15)
 
 ### Fixed — Empty plan_agents in thorough mode

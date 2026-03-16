@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Travis Sparks
 """
-QRALPH v6.8.0 Pipeline — deterministic multi-agent orchestration, idea to production.
+QRALPH v6.11.0 Pipeline — deterministic multi-agent orchestration, idea to production.
 
 Full pipeline: IDEATE → PERSONA → CONCEPT → PLAN → EXECUTE → SIMPLIFY →
                QUALITY_LOOP → POLISH → VERIFY → DEMO → DEPLOY → SMOKE → LEARN → COMPLETE
@@ -92,6 +92,23 @@ should_agent_continue = _qd_mod.should_agent_continue
 generate_dashboard = _qd_mod.generate_dashboard
 deduplicate_findings = _qd_mod.deduplicate_findings
 
+# Import output extractor (required — parsing is useless without it)
+_oe_path = Path(__file__).parent / "output-extractor.py"
+if not _oe_path.exists():
+    raise FileNotFoundError(
+        f"output-extractor.py not found at {_oe_path}. "
+        "LLM output parsing cannot run without it — update your QRALPH plugin."
+    )
+_oe_spec = importlib.util.spec_from_file_location("output_extractor", _oe_path)
+_oe_mod = importlib.util.module_from_spec(_oe_spec)
+_oe_spec.loader.exec_module(_oe_mod)
+extract_verdict = _oe_mod.extract_verdict
+extract_criteria_results = _oe_mod.extract_criteria_results
+extract_request_satisfaction = _oe_mod.extract_request_satisfaction
+extract_reverify_verdicts = _oe_mod.extract_reverify_verdicts
+extract_smoke_results = _oe_mod.extract_smoke_results
+extract_polish_issues = _oe_mod.extract_polish_issues
+
 # Import confidence scorer (optional — may not exist yet)
 try:
     _cs_path = Path(__file__).parent / "confidence-scorer.py"
@@ -130,25 +147,19 @@ except (ImportError, FileNotFoundError, AttributeError, OSError):
     is_heal_on_cooldown_fn = None
     learn_heal_counters = None
 
-__version__ = "6.10.1"
+__version__ = "6.11.0"
 
 QUALITY_STANDARD = """
 ## Quality Standard
 
-You are expected to deliver production-quality work. The following rules are non-negotiable:
+**Production-quality** means every piece of code is complete, correct, and handles all failure paths with real behavior.
 
-- No stubs, placeholders, TODOs, or "for now" implementations. Every piece of code must be complete and correct.
-- No descoping of requirements without explicit escalation to the user. If something is hard, solve it — do not quietly drop it.
-- No hardcoded workarounds. Implement real solutions only.
-- Complete error handling. Every failure path must be handled with real behavior, not mocks or silent failures.
-- Anti-shortcut patterns:
-  - Never assume the user wants speed over quality.
-  - Never silently drop requirements.
-  - Never accept a partial implementation as done.
-  - Never leave a known bug because it "doesn't matter right now."
-- If you find yourself writing a workaround or deferring something, stop and solve it properly.
+- All code is fully implemented — stubs, placeholders, TODOs, and "for now" shortcuts are replaced with real solutions.
+- Every requirement is addressed. When something is difficult, escalate to the user rather than quietly descoping.
+- Error handling covers every failure path with meaningful behavior (real recovery, clear messages, graceful degradation).
+- Workarounds are replaced with proper implementations. If you spot one, fix it.
 
-Good-enough is not good enough. Would a senior engineer at Amazon stake their name on this?
+Would a senior engineer at Amazon stake their name on this?
 """.strip()
 
 
@@ -633,59 +644,17 @@ def _sanitize_request(request: str) -> str:
 
 def _parse_verdict(content: str) -> Optional[str]:
     """Extract verdict from verification output. Returns 'PASS', 'FAIL', or None."""
-    # Try 1: Extract ```json ... ``` code block and parse
-    block_match = re.search(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
-    if block_match:
-        try:
-            data = json.loads(block_match.group(1))
-            verdict = data.get("verdict", "").upper()
-            if verdict in ("PASS", "FAIL"):
-                return verdict
-        except (json.JSONDecodeError, AttributeError):
-            pass
-
-    # Try 2: Parse entire content as JSON
-    try:
-        data = json.loads(content)
-        verdict = data.get("verdict", "").upper()
-        if verdict in ("PASS", "FAIL"):
-            return verdict
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    # Try 3: Regex fallback (last resort)
-    match = re.search(r'"verdict"\s*:\s*"(PASS|FAIL)"', content, re.IGNORECASE)
-    if match:
-        return match.group(1).upper()
-
-    return None
+    return extract_verdict(content)["verdict"]
 
 
 def _parse_criteria_results(content: str) -> Optional[list]:
-    """Extract criteria_results array from verification JSON output.
+    """Extract criteria_results array from verification output.
 
-    Returns the list if found, or None when the key is absent.
-    Tries the ```json block first, then raw JSON, matching _parse_verdict strategy.
+    Returns the list if found, or None when no criteria content exists.
+    Delegates to extract_criteria_results which handles JSON, tables, sections, and lists.
     """
-    def _extract(text: str) -> Optional[list]:
-        try:
-            data = json.loads(text)
-            if "criteria_results" in data:
-                val = data["criteria_results"]
-                return val if isinstance(val, list) else None
-        except (json.JSONDecodeError, AttributeError):
-            pass
-        return None
-
-    # Try 1: JSON code block
-    block_match = re.search(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
-    if block_match:
-        result = _extract(block_match.group(1))
-        if result is not None:
-            return result
-
-    # Try 2: raw JSON (entire content)
-    return _extract(content)
+    results = extract_criteria_results(content)
+    return results if results else None
 
 
 _EVIDENCE_FILE_LINE_RE = re.compile(r'\w+\.\w+:\d+')
@@ -798,31 +767,21 @@ def _validate_criteria_results(
     return is_valid, missing, failed, block_reasons
 
 
-def _parse_request_satisfaction(content: str) -> Optional[list]:
-    """Extract request_satisfaction array from verification JSON output.
+def _parse_request_satisfaction(content: str, fragment_ids: list[str] | None = None) -> Optional[list]:
+    """Extract request_satisfaction from verification output.
 
-    Returns the list if found, or None when the key is absent.
-    Mirrors the _parse_criteria_results strategy (json block, then raw JSON).
+    Returns the list if found, or None when no satisfaction data exists.
+    Delegates to output-extractor for multi-format parsing when fragment_ids provided.
+    Falls back to JSON-only extraction for backward compatibility.
     """
-    def _extract(text: str) -> Optional[list]:
-        try:
-            data = json.loads(text)
-            if "request_satisfaction" in data:
-                val = data["request_satisfaction"]
-                return val if isinstance(val, list) else None
-        except (json.JSONDecodeError, AttributeError):
-            pass
-        return None
+    # When fragment_ids are known, use the full extractor (JSON + NL)
+    if fragment_ids:
+        results = extract_request_satisfaction(content, fragment_ids)
+        if results:
+            return results
 
-    # Try 1: JSON code block
-    block_match = re.search(r'```json\s*\n(.*?)\n\s*```', content, re.DOTALL)
-    if block_match:
-        result = _extract(block_match.group(1))
-        if result is not None:
-            return result
-
-    # Try 2: raw JSON (entire content)
-    return _extract(content)
+    # Fallback: JSON-only (backward compat for callers without fragment_ids)
+    return _oe_mod._extract_json_key(content, "request_satisfaction")
 
 
 def _validate_request_satisfaction(
@@ -983,13 +942,12 @@ def generate_plan_agent_prompt(
     research_instructions = _build_research_instructions(config)
 
     base_context = (
-        f"You are analyzing a codebase to help plan work on this request:\n\n"
+        f"Analyze this codebase for the following request. Be specific about file paths, "
+        f"line numbers, and concrete findings.\n\n"
         f"REQUEST: {request}\n\n"
         f"PROJECT PATH: {project_path}\n\n"
-        f"Write your analysis as markdown. Be specific about file paths, line numbers, "
-        f"and concrete findings. Keep your response under 3000 words.\n\n"
-        f"IMPORTANT: Do NOT write any files to disk. Return your entire analysis as your "
-        f"response text. The orchestrator will save your output."
+        f"Write your analysis as markdown. Keep your response under 3000 words. "
+        f"Return your entire analysis as your response. The orchestrator saves outputs."
     )
 
     # In thorough mode, append ideation and concept synthesis as additional context
@@ -1014,7 +972,7 @@ def generate_plan_agent_prompt(
         base_context += (
             f"\n\n## DEMO Feedback (Revision Cycle)\n"
             f"The user reviewed a demo of the previous implementation and provided "
-            f"the following feedback. Your plan MUST address these concerns:\n\n"
+            f"the following feedback. Address these concerns in the new plan:\n\n"
             f"{feedback_context}"
         )
 
@@ -1023,8 +981,7 @@ def generate_plan_agent_prompt(
             "name": "researcher",
             "model": "opus",
             "prompt": (
-                f"You are a technical researcher. Your job is to gather facts about the codebase "
-                f"and external documentation relevant to the request.\n\n"
+                f"Gather facts about the codebase and external documentation relevant to this request.\n\n"
                 f"{base_context}\n\n"
                 f"## Research Tools\n{research_instructions}\n\n"
                 f"## Your Deliverable\n"
@@ -1038,8 +995,8 @@ def generate_plan_agent_prompt(
             "name": "sde-iii",
             "model": "opus",
             "prompt": (
-                f"You are a senior software engineer (SDE-III). Your job is to analyze the codebase "
-                f"and create a concrete implementation plan.\n\n"
+                f"Create a concrete implementation plan covering: files to change, implementation "
+                f"steps, testing strategy, risk assessment, and acceptance criteria.\n\n"
                 f"{base_context}\n\n"
                 f"## Your Deliverable\n"
                 f"1. **Files to Change**: List every file that needs modification with specific changes\n"
@@ -1053,8 +1010,7 @@ def generate_plan_agent_prompt(
             "name": "security-reviewer",
             "model": "opus",
             "prompt": (
-                f"You are a security reviewer. Your job is to identify security concerns "
-                f"in the current code and in the proposed changes.\n\n"
+                f"Identify security concerns in the current code and in the proposed changes.\n\n"
                 f"{base_context}\n\n"
                 f"## Your Deliverable\n"
                 f"1. **Current Vulnerabilities**: Security issues in existing code (with file:line)\n"
@@ -1067,8 +1023,7 @@ def generate_plan_agent_prompt(
             "name": "ux-designer",
             "model": "opus",
             "prompt": (
-                f"You are a UX designer. Your job is to evaluate the user experience "
-                f"implications of the proposed changes.\n\n"
+                f"Evaluate the user experience implications of the proposed changes.\n\n"
                 f"{base_context}\n\n"
                 f"## Your Deliverable\n"
                 f"1. **Current UX Assessment**: How the current UI/UX works\n"
@@ -1081,8 +1036,7 @@ def generate_plan_agent_prompt(
             "name": "architecture-advisor",
             "model": "opus",
             "prompt": (
-                f"You are a system architect. Your job is to evaluate the architectural "
-                f"implications of the proposed changes.\n\n"
+                f"Evaluate the architectural implications of the proposed changes.\n\n"
                 f"{base_context}\n\n"
                 f"## Your Deliverable\n"
                 f"1. **Current Architecture**: How the system is structured\n"
@@ -1097,7 +1051,7 @@ def generate_plan_agent_prompt(
         "name": agent_type,
         "model": "opus",
         "prompt": (
-            f"You are a {agent_type}. Analyze the codebase for this request.\n\n"
+            f"Analyze the codebase for this request, focusing on {agent_type} concerns.\n\n"
             f"{base_context}"
         ),
     })
@@ -1108,8 +1062,8 @@ def generate_plan_agent_prompt(
 def generate_ideate_prompt(request: str, detected_plugins: list[str]) -> str:
     """Generate the brainstorming agent prompt for the IDEATE phase."""
     lines = [
-        "You are a product strategist and ideation agent. Your job is to brainstorm",
-        "and validate a product concept before any code is written.",
+        "Brainstorm and validate a product concept before any code is written.",
+        "Research the market, identify competitors, and produce actionable recommendations.",
         "",
         f"## User Request",
         f"{request}",
@@ -1166,8 +1120,7 @@ def generate_ideate_prompt(request: str, detected_plugins: list[str]) -> str:
 def _generate_business_advisor_prompt(request: str, ideation_md: str) -> str:
     """Generate a prompt for the business advisor agent used in concept review."""
     return "\n".join([
-        "You are a business advisor reviewing a product concept for viability,",
-        "monetization potential, and competitive positioning.",
+        "Review this product concept for viability, monetization potential, and competitive positioning.",
         "",
         f"## Original Request",
         f"{request}",
@@ -1175,7 +1128,7 @@ def _generate_business_advisor_prompt(request: str, ideation_md: str) -> str:
         f"## IDEATION Document",
         f"{ideation_md}",
         "",
-        "## Your Review Focus",
+        "## Review Focus",
         "1. **Viability Assessment**: Is this concept technically and commercially viable?",
         "   What are the biggest risks?",
         "2. **Monetization Strategy**: Evaluate the proposed business model. Suggest",
@@ -1185,10 +1138,10 @@ def _generate_business_advisor_prompt(request: str, ideation_md: str) -> str:
         "4. **Go-to-Market**: What is the simplest path to first paying customers?",
         "",
         "## Output Format",
-        "Prioritize your feedback using:",
-        "- **P0** (Critical): Must address before building anything",
-        "- **P1** (Important): Should address in v1",
-        "- **P2** (Nice-to-have): Can defer to v2+",
+        "Rate findings by impact:",
+        "- **P0** (Critical): Blocks building anything",
+        "- **P1** (Important): Address in v1",
+        "- **P2** (Nice-to-have): Defer to v2+",
         "",
         "Be direct. If the idea has fatal flaws, say so clearly.",
     ])
@@ -1197,8 +1150,8 @@ def _generate_business_advisor_prompt(request: str, ideation_md: str) -> str:
 def _generate_ui_concept_prompt(request: str, ideation_md: str) -> str:
     """Generate a prompt for UI concept generation when frontend-design is detected."""
     return "\n".join([
-        "You are a UI/UX design consultant generating interface concepts",
-        "for a new product.",
+        "Generate interface concepts for this new product. Focus on clarity",
+        "and usability over visual flourish.",
         "",
         f"## Original Request",
         f"{request}",
@@ -1276,52 +1229,12 @@ def generate_concept_review_agents(
     return agents
 
 
-_GHOST_SEP_RE = re.compile(r'^-{2,}\s*$')
-
-# Severity extraction patterns tried in priority order.
-# Each pattern must capture two groups: (severity_digit, finding_text).
-_SEVERITY_PATTERNS: list[re.Pattern] = [
-    # [P0] Title  (bracket format)
-    re.compile(r'\[P([012])\]\s+(.+)'),
-    # **P0** — Title  or  **P0**: Title  (bold format)
-    re.compile(r'\*\*P([012])\*\*\s*[—:\-]\s*(.+)'),
-    # ### P0-1: Title  or  ## P0: Title  (heading format)
-    re.compile(r'^#+\s+P([012])[\s\-:]+(.+)'),
-    # P0: Title  or  P0 - Title  or  P0 — Title  (plain format)
-    re.compile(r'(?<!\[)P([012])\s*[:\-—]\s*(.+)'),
-]
-
-
-def _extract_severity(line: str) -> tuple[int, str] | None:
-    """Return (severity_level, finding_text) for a line containing a severity marker.
-
-    Tries all recognised severity formats in priority order. Returns None if
-    the line contains no recognisable finding.
-    """
-    stripped = line.strip()
-    if not stripped or _GHOST_SEP_RE.match(stripped):
-        return None
-    for pat in _SEVERITY_PATTERNS:
-        m = pat.search(stripped)
-        if m:
-            level = int(m.group(1))
-            text = m.group(2).strip()
-            if text and not _GHOST_SEP_RE.match(text):
-                return (level, text)
-    return None
-
-
 def synthesize_concept_reviews(reviews: dict[str, str]) -> str:
     """Consolidate concept review outputs into CONCEPT-SYNTHESIS.md content."""
     raw_findings: list[dict] = []
 
     for agent_name, content in reviews.items():
-        for line in content.splitlines():
-            result = _extract_severity(line)
-            if result is not None:
-                level_int, detail = result
-                level = f"P{level_int}"
-                raw_findings.append({"severity": level, "title": detail, "agent": agent_name})
+        raw_findings.extend(parse_findings(content, agent_name))
 
     # Deduplicate: collapse identical findings reported by multiple agents
     if deduplicate_findings:
@@ -1351,7 +1264,9 @@ def synthesize_concept_reviews(reviews: dict[str, str]) -> str:
             for f in items:
                 confirmed = f.get("confirmed_by", [f.get("agent", "")])
                 agent_label = ", ".join(confirmed) if confirmed else f.get("agent", "")
-                lines.append(f"- **[{agent_label}]** {f['title']}")
+                fid = f.get("id", "")
+                prefix = f"{fid}: " if fid else ""
+                lines.append(f"- **[{agent_label}]** {prefix}{f['title']}")
         else:
             lines.append("No findings.")
         lines.append("")
@@ -2306,10 +2221,8 @@ def _generate_execute_agent_prompt(task: dict, manifest: dict) -> str:
     working_dir = manifest.get("target_directory", str(PROJECT_ROOT))
 
     prompt = (
-        f"You are implementing a specific task for this project.\n\n"
         f"## Working Directory\n"
-        f"IMPORTANT: All files MUST be created/modified in: {working_dir}\n"
-        f"Do NOT write files anywhere else. Use absolute paths based on this directory.\n\n"
+        f"All files go in: {working_dir}\n\n"
         f"## Original Request\n{manifest.get('request', '')}\n\n"
         f"## Your Task: {task.get('summary', 'Untitled')}\n\n"
         f"{task.get('description', '')}\n\n"
@@ -2320,10 +2233,9 @@ def _generate_execute_agent_prompt(task: dict, manifest: dict) -> str:
     if task.get("tests_needed", True):
         prompt += (
             "## Testing\n"
-            "Write tests BEFORE implementation (TDD). Tests must:\n"
-            "- Cover each acceptance criterion\n"
-            "- Be co-located with the code (*.spec.ts or *.test.ts)\n"
-            "- Pass after implementation\n\n"
+            "Tests are co-located with the code (*.spec.ts or *.test.ts), "
+            "cover each acceptance criterion, and pass when the implementation is complete. "
+            "Write them in TDD order — tests first.\n\n"
         )
 
     if quality_gate:
@@ -2334,12 +2246,7 @@ def _generate_execute_agent_prompt(task: dict, manifest: dict) -> str:
         )
 
     prompt += (
-        "## Output Format\n"
-        "When done, report:\n"
-        "1. Files changed (with brief description of each change)\n"
-        "2. Tests written (file paths)\n"
-        "3. Quality gate results (pass/fail with output)\n"
-        "4. Any issues or concerns\n"
+        "Report what you built and any concerns.\n"
     )
 
     return _inject_quality_standard(prompt)
@@ -2447,163 +2354,131 @@ def cmd_verify() -> dict:
     stored_fragments: list[dict] = state.get("request_fragments", [])
 
     working_dir = manifest.get("target_directory", state.get("target_directory", str(PROJECT_ROOT)))
-    prompt = (
-        f"You are a fresh-context verification agent. You have NO knowledge of how "
-        f"the implementation was done. Your job is to independently verify the work.\n\n"
+    original_request = manifest.get('request', state.get('request', ''))
+
+    # Base context shared by all three verification agents (no execution results —
+    # intent-auditor and pe-reviewer should form independent judgments from source)
+    shared_context = (
         f"## Working Directory\n"
         f"The project codebase is at: {working_dir}\n"
         f"Read files from this directory to verify the implementation.\n\n"
-        f"## Original Request\n{manifest.get('request', state.get('request', ''))}\n\n"
-        f"## Acceptance Criteria (verify each independently)\n{criteria_text}\n\n"
-        f"## What Was Reported Done\n{execution_results}\n\n"
+        f"## Original Request\n{original_request}\n\n"
+        f"## Acceptance Criteria\n{criteria_text}\n\n"
     )
 
+    # Execution results only provided to the AC verifier (it needs to know what was claimed)
+    ac_execution_context = f"## What Was Reported Done\n{execution_results}\n\n"
+
     if quality_gate:
-        prompt += f"## Quality Gate\nRun: `{quality_gate}`\n\n"
+        shared_context += f"## Quality Gate\nRun: `{quality_gate}`\n\n"
 
     # Requirements Coverage: list every REQ-F-N fragment the verifier must account for.
-    # Fragments were extracted deterministically at plan time so nothing can be silently dropped.
+    frag_text = ""
     if stored_fragments:
         frag_lines = [
             f"- **{frag['id']}**: {frag['text']}"
             for frag in stored_fragments
         ]
         frag_text = "\n".join(frag_lines)
-        prompt += (
+        shared_context += (
             "## Requirements Coverage\n"
-            "The user's request was decomposed into the following atomic requirement fragments "
-            "at plan time. You MUST account for every fragment — a PASS verdict requires that "
-            "each fragment is satisfied or explicitly documented as out-of-scope with justification.\n\n"
+            "The user's request was decomposed into these atomic requirement fragments "
+            "at plan time. A PASS verdict requires each fragment to be satisfied or "
+            "explicitly documented as out-of-scope with justification.\n\n"
             f"{frag_text}\n\n"
         )
 
-    # Build the criteria_results schema example from actual AC indices
-    if indexed_criteria:
-        example_entries = ", ".join(
-            f'{{"criterion_index": "{idx}", "criterion": "{text[:40]}...", "status": "pass", "intent_match": true, "ship_ready": true, "evidence": "file.ts:42 — <quote>"}}'
-            for idx, _, text in indexed_criteria[:2]
-        )
-        criteria_schema = f"[{example_entries}]"
-    else:
-        criteria_schema = "[]"
-
-    # Build the request_satisfaction schema example from actual fragments
-    if stored_fragments:
-        sat_examples = stored_fragments[:2]
-        sat_entries = ", ".join(
-            f'{{"fragment_id": "{f["id"]}", "fragment_text": "{f["text"][:50]}...", "status": "satisfied", "evidence": "implemented in <file>"}}'
-            for f in sat_examples
-        )
-        satisfaction_schema = f"[{sat_entries}]"
-    else:
-        satisfaction_schema = "[]"
-
-    prompt += (
-        "## MANDATORY PROCEDURE — You MUST follow these steps IN ORDER\n\n"
-        "This is not optional. You cannot summarize, batch, or shortcut this procedure.\n"
-        "The pipeline validates your output and will REJECT results that skip steps.\n\n"
-        "### Step 1: Run the quality gate (if provided)\n"
-        "Execute the quality gate command. Record the exit code and output.\n"
-        "If it fails, set `quality_gate` to `\"fail\"` in your output.\n\n"
-        "### Step 2: Verify EACH acceptance criterion ONE AT A TIME\n\n"
-        "For EACH criterion (AC-1, AC-2, AC-3, … in order):\n\n"
-        "  a) **Read the criterion text** — understand exactly what it requires.\n"
-        "  b) **Open the relevant source file(s)** using the Read tool. Do NOT rely on\n"
-        "     execution reports or summaries. You MUST read the actual file.\n"
-        "  c) **Find the specific line(s)** that satisfy (or fail to satisfy) the criterion.\n"
-        "  d) **Quote the evidence** — copy the actual code/text from the file.\n"
-        "  e) **Decide: pass or fail.** A pass requires concrete file:line evidence.\n"
-        "     'Verified in execution outputs' is NOT evidence. You must cite a real file\n"
-        "     and a real line number with a real quoted snippet from that file.\n"
-        "  f) **Check intent_match** — does this implementation do what the user MEANT,\n"
-        "     not just what the AC literally says? If you're unsure, re-read the Original\n"
-        "     Request above.\n"
-        "  g) **Check ship_ready** — would a senior Amazon/Apple engineer stake their name\n"
-        "     on this specific criterion's implementation? Any stub, TODO, placeholder,\n"
-        "     partial implementation, or hardcoded workaround → ship_ready: false.\n"
-        "  h) **Record the result** before moving to the next criterion.\n\n"
-        "DO NOT batch criteria together. DO NOT write 'all pass' for a group.\n"
-        "Each AC gets its own read-verify-record cycle.\n\n"
-        "### Step 3: Verify EACH requirement fragment\n"
-        "For each REQ-F-N fragment, confirm the implementation satisfies it.\n"
-        "Status must be 'satisfied', 'partial', or 'missing'.\n\n"
-        "### Step 4: Intent check\n"
-        "Re-read the Original Request. Ask yourself:\n"
-        "'Did we deliver what this person wanted, or what was convenient to build?'\n"
-        "If any AC passed the letter but missed the spirit, set intent_match to false.\n\n"
-        "### Step 5: Write verification/result.md\n"
-        "Write your findings using the EXACT JSON schema below.\n\n"
-        "## Quality Bar (Non-Negotiable)\n"
-        "A stub, placeholder, no-op, TODO, partial implementation, or hardcoded workaround is a FAIL. "
-        "Good-enough is not good enough.\n\n"
-        "## Verdict Rules\n"
-        "- `verdict` is `\"PASS\"` ONLY when ALL of these are true:\n"
-        "  - EVERY criterion has status `\"pass\"`\n"
-        "  - EVERY criterion has `intent_match: true`\n"
-        "  - EVERY criterion has `ship_ready: true`\n"
-        "  - EVERY requirement fragment has status `\"satisfied\"`\n"
-        "  - Quality gate passed (if present)\n"
-        "- If ANY criterion fails ANY of those checks → verdict is `\"FAIL\"`\n"
-        "- A single `\"missing\"` or `\"partial\"` fragment without explicit out-of-scope "
-        "justification → verdict is `\"FAIL\"`\n\n"
-        "## Evidence Format (CRITICAL — the pipeline validates this)\n\n"
-        "**GOOD evidence** (pipeline accepts):\n"
+    # Evidence examples — good/bad patterns (shared across agents that need evidence)
+    evidence_examples = (
+        "## Evidence Quality\n\n"
+        "**Good evidence** (pipeline accepts):\n"
         '- `"src/routes/index.ts:42 — export const GET = async () => { ... }"`\n'
         '- `"lib/config.py:18 — ALLOWED_ORIGINS = [\'https://example.com\']"`\n\n'
-        "**BAD evidence** (pipeline REJECTS — verification will fail validation):\n"
-        '- `"Verified in execution outputs"` ← NOT evidence, will be rejected\n'
-        '- `"Verified in execution outputs and quality gate"` ← NOT evidence\n'
-        '- `"Implementation confirmed"` ← NOT evidence\n'
-        '- `"See task output"` ← NOT evidence\n\n'
-        "The pipeline requires ≥80% of your evidence entries to contain a `filename:LINE` "
-        "pattern. Results without file:line evidence will be rejected and you will have to "
-        "redo the entire verification.\n\n"
-        "## Output Schema\n\n"
-        "```json\n"
-        "{\n"
-        '  "verdict": "PASS or FAIL",\n'
-        f'  "criteria_results": {criteria_schema},\n'
-        f'  "request_satisfaction": {satisfaction_schema},\n'
-        '  "quality_gate": "pass or fail or skipped",\n'
-        '  "issues": ["list of any issues found"]\n'
-        "}\n"
-        "```\n"
-        "\n"
-        "### criteria_results entry fields (ALL required):\n"
-        '- `"criterion_index"`: the AC-N label (e.g. "AC-1")\n'
-        '- `"criterion"`: the FULL criterion text (not just "AC-1" — copy the actual requirement)\n'
-        '- `"status"`: exactly "pass" or "fail"\n'
-        '- `"intent_match"`: true/false — does this match what the user actually meant?\n'
-        '- `"ship_ready"`: true/false — production-quality with no stubs/TODOs/workarounds?\n'
-        '- `"evidence"`: "file/path.ext:LINE — <quoted snippet from that line>" (MANDATORY for pass)\n'
-        "\n"
-        "### request_satisfaction entry fields (ALL required):\n"
-        '- `"fragment_id"`: the REQ-F-N label\n'
-        '- `"fragment_text"`: the original requirement fragment text\n'
-        '- `"status"`: exactly "satisfied", "partial", or "missing"\n'
-        '- `"evidence"`: specific file/path where this is fulfilled, or reason for partial/missing\n'
-        "\n"
-        "## User Journey Checks\n"
-        "For any task involving a user-facing flow (forms, buttons, checkout, downloads):\n"
-        "- Confirm the UI element exists in the rendered page (href, form action, button onclick)\n"
-        "- Confirm the action target points to a valid, implemented route\n"
-        "- Confirm any referenced assets (PDFs, images, downloads) exist at their expected paths\n"
-        "- Flag any flow where the user would hit a 404, broken link, or missing file\n"
-        "- If a checkout/payment flow exists, verify the complete path: button → payment → delivery\n"
+        "**Bad evidence** (pipeline rejects):\n"
+        '- `"Verified in execution outputs"` — not evidence\n'
+        '- `"Implementation confirmed"` — not evidence\n'
+        '- `"See task output"` — not evidence\n\n'
+        "The pipeline requires 80% or more of evidence entries to contain a `filename:LINE` "
+        "pattern. A criterion without a file:line code quote is unverified.\n\n"
     )
 
-    prompt = _inject_quality_standard(prompt)
+    # --- Agent 1: AC Verifier ---
+    ac_verifier_prompt = (
+        "Verify each acceptance criterion independently by reading the actual source files.\n\n"
+        "For each criterion: open the relevant source files, find the specific lines that "
+        "satisfy (or fail to satisfy) it, and quote the code. Report pass/fail per criterion "
+        "with file:line evidence.\n\n"
+        "For each criterion also assess:\n"
+        "- **intent_match**: Does this implementation match what the user actually wanted, "
+        "or just what the AC literally says?\n"
+        "- **ship_ready**: Would a senior engineer at Amazon stake their name on this? "
+        "A stub, placeholder, TODO, or hardcoded workaround means ship_ready is false.\n\n"
+        + shared_context
+        + ac_execution_context
+        + evidence_examples
+        + "## Verdict Rules\n"
+        "Verdict is PASS only when every criterion has status pass, intent_match true, "
+        "ship_ready true, every requirement fragment is satisfied, and the quality gate "
+        "passed (if present). Any failure on any dimension means verdict is FAIL.\n\n"
+        "Include verdict, criteria_results (with criterion_index, criterion, status, "
+        "intent_match, ship_ready, evidence for each), request_satisfaction (with "
+        "fragment_id, fragment_text, status, evidence for each), quality_gate status, "
+        "and a list of issues found.\n\n"
+        "## User Journey Checks\n"
+        "For any task involving a user-facing flow (forms, buttons, checkout, downloads):\n"
+        "- Confirm UI elements exist in the rendered page\n"
+        "- Confirm action targets point to valid, implemented routes\n"
+        "- Confirm referenced assets exist at their expected paths\n"
+        "- Flag any flow where the user would hit a 404, broken link, or missing file\n"
+    )
 
-    _log_decision(project_path, "VERIFY: Verification agent prepared")
+    # --- Agent 2: Intent Auditor ---
+    intent_auditor_prompt = (
+        "Re-read the original request and ignore the acceptance criteria entirely. "
+        "Ask: did we build what the user actually wanted, or what was convenient to build?\n\n"
+        "Check for letter-vs-spirit gaps. Also evaluate ship-readiness across the whole "
+        "project: stubs, TODOs, placeholders, hardcoded workarounds all fail.\n\n"
+        "A good intent audit catches things like:\n"
+        "- Requirements that were technically satisfied but miss the user's real goal\n"
+        "- Features that were quietly descoped or simplified beyond usefulness\n"
+        "- Workflows that are technically complete but confusing or broken in practice\n\n"
+        + shared_context
+        + "Report your verdict (PASS/FAIL), specific intent gaps found, and "
+        "ship-readiness concerns with file:line evidence for each issue.\n"
+    )
+
+    # --- Agent 3: PE Reviewer ---
+    pe_reviewer_prompt = (
+        "Senior principal engineer review. Evaluate the implementation for architecture "
+        "quality, reliability, fault tolerance, security, error handling, and UX quality.\n\n"
+        "This is the \"would you mass-produce this for paying customers tomorrow?\" review. "
+        "Focus on engineering excellence, not acceptance criteria (the AC verifier handles those).\n\n"
+        "Look for:\n"
+        "- Architecture issues: tight coupling, missing abstractions, scalability concerns\n"
+        "- Reliability gaps: unhandled errors, race conditions, missing retries\n"
+        "- Security: injection risks, auth gaps, secrets exposure, input validation\n"
+        "- UX quality: error messages, loading states, accessibility, mobile responsiveness\n\n"
+        + shared_context
+        + "Report your verdict (PASS/FAIL) with specific findings. Each finding needs "
+        "file:line evidence and a severity (P0 blocks ship, P1 should fix, P2 nice to have).\n"
+    )
+
+    ac_verifier_prompt = _inject_quality_standard(ac_verifier_prompt)
+    intent_auditor_prompt = _inject_quality_standard(intent_auditor_prompt)
+    pe_reviewer_prompt = _inject_quality_standard(pe_reviewer_prompt)
+
+    _log_decision(project_path, "VERIFY: 3 parallel verification agents prepared (ac-verifier, intent-auditor, pe-reviewer)")
+
+    agents = [
+        {"name": "ac-verifier", "model": "opus", "prompt": ac_verifier_prompt},
+        {"name": "intent-auditor", "model": "opus", "prompt": intent_auditor_prompt},
+        {"name": "pe-reviewer", "model": "opus", "prompt": pe_reviewer_prompt},
+    ]
 
     return {
         "status": "verify_ready",
         "project_id": state["project_id"],
-        "agent": {
-            "name": "result",
-            "model": "sonnet",
-            "prompt": prompt,
-        },
+        "agents": agents,
     }
 
 
@@ -3872,18 +3747,11 @@ def _next_simplify_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     files_list = "\n".join(f"- {f}" for f in changed_files) if changed_files else "- (no files listed in manifest)"
 
     prompt = (
-        "You are a code simplifier. Your job is to review recently changed files "
-        "and apply the /simplify pattern: reduce complexity, remove dead code, "
-        "improve naming, and ensure readability.\n\n"
+        "Review these recently changed files and simplify: reduce complexity, remove dead code, "
+        "improve naming. Preserve all behavior.\n\n"
         "## Files Changed During Execution\n"
         f"{files_list}\n\n"
-        "## Instructions\n"
-        "1. Read each file listed above\n"
-        "2. Apply /simplify: remove unnecessary complexity, dead code, redundant comments\n"
-        "3. Improve variable/function naming where unclear\n"
-        "4. Ensure consistent formatting and style\n"
-        "5. Do NOT change behavior — only simplify structure and readability\n"
-        "6. Report what you changed in your output\n\n"
+        "Report what you changed in your output.\n\n"
         f"Working Directory: {str(PROJECT_ROOT)}\n"
     )
 
@@ -3949,10 +3817,10 @@ def _next_simplify_waiting(state: dict, pipeline: dict, project_path: Path) -> d
         pipeline["sub_phase"] = "VERIFY_WAIT"
         _save_pipeline_state(state, pipeline, project_path)
 
-        verifier = verify_result.get("agent", {})
+        verifiers = verify_result.get("agents", [verify_result.get("agent", {})])
         return {
             "action": "spawn_agents",
-            "agents": [verifier],
+            "agents": verifiers,
             "output_dir": str(project_path / "verification"),
         }
 
@@ -3986,9 +3854,9 @@ def _generate_quality_review_prompt(agent_name: str, agent_role: str, request: s
         "usability-reviewer": "Focus on user experience, accessibility, error messages, and workflow clarity.",
         "business-advisor": "Focus on requirements alignment, business logic correctness, and feature completeness.",
     }
-    specific = role_instructions.get(agent_name, f"Review from the perspective of a {agent_role}.")
+    specific = role_instructions.get(agent_name, f"Review for issues relevant to a {agent_role}.")
 
-    prompt = f"""You are a {agent_role} reviewing a completed implementation.
+    prompt = f"""Review this completed implementation. {specific}
 
 ## Original Request
 {request}
@@ -4000,22 +3868,15 @@ The following tasks were implemented:
 ### Files Modified
 {files_md}
 
-Review the files listed above and check for issues from your perspective.
+Read the files listed above and check for issues.
 
-## Your Role: {agent_role}
+## Focus Area
 {specific}
 
-## Output Format
-For each finding, report:
-[P0/P1/P2] {agent_name.upper()}-NNN: <title>
-<description>
-**Suggested fix:** <concrete suggestion>
-**Confidence:** high/medium/low
+## Findings Format
+Rate findings by impact: **P0** (blocks ship — security holes, data loss, crashes), **P1** (should fix before ship — bugs, missing validation, poor error handling), **P2** (nice to have — style, naming, minor refactors).
 
-Severity guide:
-- P0: Critical — blocks ship (security holes, data loss, crashes)
-- P1: Important — should fix before ship (bugs, missing validation, poor error handling)
-- P2: Suggestion — nice to have (style, naming, minor refactors)
+For each finding, include a suggested fix and your confidence level (high/medium/low).
 
 If no issues found, state "No issues found." and explain why you are confident.
 """
@@ -4246,26 +4107,19 @@ def _next_quality_reverify(state: dict, pipeline: dict, project_path: Path) -> d
         if file_list:
             project_files_hint = "\n## Project Files to Check\n" + "\n".join(f"- {p}" for p in file_list) + "\n"
     verifier_prompt = (
-        "You are a verification agent. Your ONLY job is to check whether specific findings "
-        "from a previous quality review have been fixed in the code.\n\n"
+        "Check whether these findings have been fixed. For each finding, open the "
+        "relevant files and look for the fix. State which are fixed and which remain, "
+        "with file:line evidence for fixes. Findings without evidence are treated as unfixed.\n\n"
         "## Findings to Verify\n"
         f"{findings_block}\n"
         f"{project_files_hint}\n"
-        "## Instructions\n"
-        "For EACH finding listed above:\n"
-        "1. Read the referenced files in the codebase.\n"
-        "2. Look for concrete evidence that the fix was applied "
-        "(changed code, added checks, removed problematic patterns).\n"
-        "3. Report one of exactly two verdicts per finding:\n"
-        "   - `RESOLVED: <finding-id>` — the fix is present in the code\n"
-        "   - `UNRESOLVED: <finding-id>` — no fix evidence found\n\n"
         "## Output Format\n"
-        "List one verdict per line in the form:\n"
+        "One verdict per line:\n"
         "```\n"
         "RESOLVED: <finding-id>\n"
         "UNRESOLVED: <finding-id>\n"
         "```\n"
-        "Do NOT skip any finding. Every finding must have a verdict.\n"
+        "Every finding listed above gets a verdict.\n"
     )
 
     output_file = f"quality-reverify-round-{round_num}.md"
@@ -4330,36 +4184,18 @@ def _next_quality_reverify_waiting(state: dict, pipeline: dict, project_path: Pa
     p0_p1_findings = [f for f in prev_findings if f.get("severity") in ("P0", "P1")]
 
     # Parse RESOLVED / UNRESOLVED verdicts from verifier output.
-    # RESOLVED verdicts must include at least one file:line evidence reference
-    # (e.g. src/api/auth.ts:42).  Bare RESOLVED lines without proof are
-    # downgraded to unresolved so agents cannot bulk-mark findings as fixed
-    # without demonstrating where the fix lives.
-    resolved_ids: set[str] = set()
-    unresolved_ids: set[str] = set()
-    if content:
-        lines = content.splitlines()
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            if stripped.upper().startswith("RESOLVED:"):
-                fid = stripped.split(":", 1)[1].strip()
-                # Gather context: the verdict line itself plus the next two lines
-                context_block = "\n".join(lines[i : i + 3])
-                evidence_ok, _ = _validate_remediation_evidence(context_block)
-                if evidence_ok:
-                    resolved_ids.add(fid)
-                else:
-                    # Downgrade: no file:line proof supplied
-                    unresolved_ids.add(fid)
-            elif stripped.upper().startswith("UNRESOLVED:"):
-                fid = stripped.split(":", 1)[1].strip()
-                unresolved_ids.add(fid)
+    # Delegates to extract_reverify_verdicts which handles both explicit
+    # RESOLVED:/UNRESOLVED: lines and natural language with evidence safety rail.
+    expected_ids = [f.get("id", "") for f in p0_p1_findings if f.get("id")]
+    reverify_map = extract_reverify_verdicts(content or "", expected_ids)
+    resolved_ids = {fid for fid, status in reverify_map.items() if status == "resolved"}
 
     # Mark findings with their verification status
     for f in prev_findings:
         fid = f.get("id", "")
         if fid in resolved_ids:
             f["reverify_status"] = "resolved"
-        elif fid in unresolved_ids:
+        elif fid in reverify_map:
             f["reverify_status"] = "unresolved"
 
     # Collect unresolved P0/P1 findings
@@ -4540,43 +4376,26 @@ def _next_polish_run(state: dict, pipeline: dict, project_path: Path) -> dict:
     request = state.get("request", "")
 
     bug_fixer_prompt = _inject_quality_standard(
-        "You are a bug fixer. Review the implementation for bugs, edge cases, "
-        "and correctness issues.\n\n"
+        "Review these files for bugs, edge cases, and correctness. "
+        "Fix any critical or high-severity issues directly.\n\n"
         f"## Original Request\n{request}\n\n"
         f"## Files Changed\n{files_list}\n\n"
-        "## Instructions\n"
-        "1. Read each file and look for bugs, off-by-one errors, null checks, edge cases\n"
-        "2. Check error handling completeness\n"
-        "3. Verify logic correctness against the original request\n"
-        "4. Report findings with severity (P0=critical, P1=high, P2=medium)\n"
-        "5. Fix any P0/P1 issues directly\n"
         f"Working Directory: {str(PROJECT_ROOT)}\n"
     )
 
     wiring_prompt = _inject_quality_standard(
-        "You are a wiring agent. Verify that all components are properly connected "
-        "and integrated.\n\n"
+        "Verify all components connect correctly — imports, exports, API contracts, "
+        "config paths. Flag any disconnected or unreachable code.\n\n"
         f"## Original Request\n{request}\n\n"
         f"## Files Changed\n{files_list}\n\n"
-        "## Instructions\n"
-        "1. Check imports and exports are correct\n"
-        "2. Verify API contracts between modules\n"
-        "3. Ensure configuration files reference the right paths\n"
-        "4. Check that new code is reachable from entry points\n"
-        "5. Report any disconnected or dead code\n"
         f"Working Directory: {str(PROJECT_ROOT)}\n"
     )
 
     tracer_prompt = _inject_quality_standard(
-        "You are a requirements tracer. Verify test coverage for all requirements.\n\n"
+        "Verify every requirement has test coverage. Generate a coverage summary showing "
+        "which requirements are tested and which are gaps.\n\n"
         f"## Original Request\n{request}\n\n"
         f"## Files Changed\n{files_list}\n\n"
-        "## Instructions\n"
-        "1. Find all REQ-IDs in requirements files\n"
-        "2. Scan test files for REQ-ID references\n"
-        "3. Report which requirements have test coverage\n"
-        "4. Flag any requirements missing test coverage\n"
-        "5. Generate a coverage summary\n"
         f"Working Directory: {str(PROJECT_ROOT)}\n"
     )
 
@@ -4649,9 +4468,9 @@ def _next_polish_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
         report_lines.append(content)
         report_lines.append("")
 
-        # Detect issues (P0/P1 findings or missing coverage)
-        content_lower = content.lower()
-        if any(marker in content_lower for marker in ["p0", "p1", "critical", "missing coverage", "not covered"]):
+        # Detect issues via structured extraction (not bare keyword scan)
+        polish_result = extract_polish_issues(content)
+        if polish_result["has_issues"]:
             has_issues = True
 
     verdict = "NEEDS_ATTENTION" if has_issues else "CLEAN"
@@ -4675,31 +4494,6 @@ def _next_polish_waiting(state: dict, pipeline: dict, project_path: Path) -> dic
 
 _POLISH_RETRY_CAP = 2
 
-
-def _extract_polish_gaps(report_content: str) -> list[str]:
-    """Extract specific gap descriptions from a POLISH-REPORT.md.
-
-    Scans for known gap markers (missing tests, missing coverage, wiring issues,
-    critical/P0/P1 findings) and returns a deduplicated list of plain-language
-    descriptions suitable for decisions.log and user escalation messages.
-    """
-    gaps: list[str] = []
-    content_lower = report_content.lower()
-
-    if "missing coverage" in content_lower or "not covered" in content_lower:
-        gaps.append("missing test coverage for one or more requirements")
-    if "missing test" in content_lower or "no test" in content_lower:
-        gaps.append("missing tests")
-    if "p0" in content_lower or "critical" in content_lower:
-        gaps.append("critical (P0) bugs or correctness issues")
-    if "p1" in content_lower:
-        gaps.append("high-severity (P1) findings")
-    if "disconnected" in content_lower or "dead code" in content_lower or "not reachable" in content_lower:
-        gaps.append("wiring issues (disconnected or unreachable code)")
-    if "import" in content_lower and ("error" in content_lower or "missing" in content_lower):
-        gaps.append("import or export wiring problems")
-
-    return gaps if gaps else ["unspecified quality issues (see POLISH-REPORT.md)"]
 
 
 def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict:
@@ -4741,17 +4535,18 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
         _save_pipeline_state(state, pipeline, project_path)
         _log_decision(project_path, "POLISH: Clean verdict — advancing to VERIFY")
 
-        verifier = verify_result.get("agent", {})
+        verifiers = verify_result.get("agents", [verify_result.get("agent", {})])
         return {
             "action": "spawn_agents",
-            "agents": [verifier],
+            "agents": verifiers,
             "output_dir": str(project_path / "verification"),
             "phase": "VERIFY",
         }
 
     # NEEDS_ATTENTION — enforce completeness with retry-then-escalate logic
     retry_count = pipeline.get("polish_retry_count", 0)
-    gaps = _extract_polish_gaps(report_content)
+    polish_result = extract_polish_issues(report_content)
+    gaps = polish_result["gaps"] if polish_result["gaps"] else ["unspecified quality issues (see POLISH-REPORT.md)"]
     gaps_text = "; ".join(gaps)
 
     if retry_count < _POLISH_RETRY_CAP:
@@ -4793,10 +4588,101 @@ def _next_polish_review(state: dict, pipeline: dict, project_path: Path) -> dict
     }
 
 
+def _merge_split_verification(project_path: Path) -> bool:
+    """Merge 3 split verification agent outputs into verification/result.md.
+
+    Reads ac-verifier.md, intent-auditor.md, pe-reviewer.md from verification/
+    and combines them into result.md. The ac-verifier output is used as the base
+    (it contains the structured JSON data that extractors need). Intent-auditor
+    and pe-reviewer findings are appended as additional sections.
+
+    If result.md already exists (old single-agent path), does nothing.
+    Returns True if merge was performed.
+    """
+    verify_dir = project_path / "verification"
+    result_file = verify_dir / "result.md"
+
+    split_files = ["ac-verifier.md", "intent-auditor.md", "pe-reviewer.md"]
+
+    # If split files exist and are newer than result.md, the merge needs to re-run
+    # (handles verification retry where agents write fresh outputs but stale result.md remains)
+    if result_file.exists() and result_file.read_text().strip():
+        split_paths = [verify_dir / f for f in split_files if (verify_dir / f).exists()]
+        if split_paths and any(sp.stat().st_mtime > result_file.stat().st_mtime for sp in split_paths):
+            result_file.unlink()
+        else:
+            return False
+    contents = {}
+    for fname in split_files:
+        fpath = verify_dir / fname
+        if fpath.exists() and fpath.read_text().strip():
+            contents[fname] = fpath.read_text().strip()
+
+    if not contents:
+        return False
+
+    # The ac-verifier output is the primary source of structured data.
+    # Use it as the base content so extractors can parse the JSON directly.
+    ac_content = contents.get("ac-verifier.md", "")
+
+    # Check if any non-AC agent reported FAIL
+    other_fail = any(
+        extract_verdict(contents[fname])["verdict"] == "FAIL"
+        for fname in ["intent-auditor.md", "pe-reviewer.md"]
+        if fname in contents
+    )
+
+    # If a sub-agent failed, override the ac-verifier verdict to FAIL
+    if other_fail and ac_content:
+        ac_verdict = extract_verdict(ac_content)["verdict"]
+        if ac_verdict == "PASS":
+            # Replace PASS with FAIL in the JSON
+            ac_content = ac_content.replace('"PASS"', '"FAIL"', 1)
+
+    # Start with ac-verifier content. If the content is raw JSON (no code fence),
+    # wrap it in a ```json block so the output extractor can parse it reliably
+    # even when other agent outputs are appended below.
+    stripped_ac = ac_content.strip()
+    if stripped_ac.startswith("{") and "```json" not in stripped_ac:
+        merged = f"```json\n{stripped_ac}\n```"
+    else:
+        merged = ac_content
+
+    # Append other agent outputs as supplementary sections
+    for fname in ["intent-auditor.md", "pe-reviewer.md"]:
+        if fname in contents:
+            label = fname.replace(".md", "").replace("-", " ").title()
+            merged += f"\n\n---\n\n## {label}\n\n{contents[fname]}"
+
+    result_file.write_text(merged)
+    return True
+
+
 def _next_verify_wait(state: dict, pipeline: dict, project_path: Path) -> dict:
-    """VERIFY_WAIT: Validate verification output exists and passes. Auto-finalize."""
+    """VERIFY_WAIT: Validate verification output exists and passes. Auto-finalize.
+
+    Supports both the legacy single-agent path (result.md) and the 3-agent split
+    (ac-verifier.md, intent-auditor.md, pe-reviewer.md). If split files exist but
+    result.md does not, they are merged into result.md before processing.
+    """
+    # Try merging split verification outputs into result.md
+    _merge_split_verification(project_path)
+
     verify_file = project_path / "verification" / "result.md"
     if not verify_file.exists() or not verify_file.read_text().strip():
+        # Check if any split files are present but incomplete
+        verify_dir = project_path / "verification"
+        split_files = ["ac-verifier.md", "intent-auditor.md", "pe-reviewer.md"]
+        present = [f for f in split_files if (verify_dir / f).exists() and (verify_dir / f).read_text().strip()]
+        missing_split = [f for f in split_files if f not in [p for p in present]]
+
+        if present:
+            return {
+                "action": "error",
+                "message": f"Incomplete verification: {len(present)}/3 agents complete. Missing: {', '.join(missing_split)}",
+                "output_dir": str(verify_dir),
+                "expected": missing_split,
+            }
         return {
             "action": "error",
             "message": "Missing output: verification/result.md",
@@ -5151,8 +5037,8 @@ def prepare_backtrack(original_request: str, failure_context: dict) -> str:
 
     parts.append(
         "\n### Instructions\n"
-        "Create a NEW plan that avoids the failures above. "
-        "Consider alternative approaches to resolve persistent findings.\n"
+        "Create a plan that addresses the persistent findings above using a different approach. "
+        "Consider alternative strategies to resolve them.\n"
     )
 
     return "".join(parts)
@@ -5580,23 +5466,17 @@ def _generate_smoke_agents(manifest: dict, live_url: str, state: dict) -> list[d
             "name": f"smoke-{cat}",
             "model": "haiku",
             "prompt": (
-                f"You are a production smoke test agent. Your job is to verify the LIVE deployment works.\n\n"
+                f"Verify the live deployment at {live_url} works. For each criterion, make an HTTP "
+                f"request and report whether it passes or fails with evidence (HTTP status, response snippet). "
+                f"Mark as SKIP anything requiring browser JavaScript.\n\n"
                 f"## Live URL\n{live_url}\n\n"
                 f"## Original Request\n{request}\n\n"
                 f"## Criteria to Verify\n{criteria_text}\n\n"
-                f"## Rules\n"
+                f"## Tools\n"
                 f"- Use WebFetch for GET requests to verify page content and headers.\n"
                 f"- Use Bash with curl for POST requests, HEAD requests, or when you need specific headers.\n"
-                f"- For each criterion, report PASS or FAIL with evidence (HTTP status, response snippet).\n"
-                f"- Do NOT read source code. You are testing the LIVE deployed site.\n"
-                f"- Be fast — check what's checkable via HTTP. Skip criteria that require browser JS execution.\n"
-                f"- For criteria that need JavaScript (form submission, loading states), mark as SKIP with reason.\n\n"
-                f"## Output Format\n"
-                f"Report each criterion as:\n"
-                f"- **PASS** [T-NNN] criterion text — evidence\n"
-                f"- **FAIL** [T-NNN] criterion text — what went wrong\n"
-                f"- **SKIP** [T-NNN] criterion text — why (e.g., requires browser JS)\n\n"
-                f"End with a summary line: `SMOKE VERDICT: X passed, Y failed, Z skipped`\n"
+                f"- Test the live deployed site, not source code.\n\n"
+                f"Summarize results at the end.\n"
             ),
         })
 
@@ -5677,18 +5557,13 @@ def _next_smoke_verdict(state: dict, pipeline: dict, project_path: Path) -> dict
         content = output_file.read_text().strip()
         all_results.append(f"## {name}\n\n{content}\n")
 
-        passes = len(re.findall(r'\*\*PASS\*\*', content))
-        fails = len(re.findall(r'\*\*FAIL\*\*', content))
-        skips = len(re.findall(r'\*\*SKIP\*\*', content))
-        total_pass += passes
-        total_fail += fails
-        total_skip += skips
+        smoke = extract_smoke_results(content)
+        total_pass += smoke["passed"]
+        total_fail += smoke["failed"]
+        total_skip += smoke["skipped"]
 
-        if fails > 0:
-            # Extract failure lines
-            for line in content.split("\n"):
-                if "**FAIL**" in line:
-                    failures.append(f"[{name}] {line.strip()}")
+        for fail_line in smoke["failures"]:
+            failures.append(f"[{name}] {fail_line}")
 
     # Write smoke report
     report = (

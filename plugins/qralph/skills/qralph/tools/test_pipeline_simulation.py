@@ -51,11 +51,11 @@ MOCK_QUALITY_CLEAN = f"# Quality Review\n\n{_AGENT_FILLER}\n\nNo issues found. C
 
 MOCK_QUALITY_P0 = f"# Quality Review\n\n{_AGENT_FILLER}\n\n[P0] CR-001: Missing input validation\nUser input not sanitized.\n**Suggested fix:** Add validation layer.\n**Confidence:** high"
 
-MOCK_QUALITY_RESOLVED = f"# Reverification\n\n{_AGENT_FILLER}\n\nRESOLVED: CR-001 — Input validation added."
+MOCK_QUALITY_RESOLVED = f"# Reverification\n\n{_AGENT_FILLER}\n\nRESOLVED: CR-001\n  Evidence: src/api/auth.ts:42 — Input validation added."
 
 MOCK_POLISH_CLEAN = f"# Polish Report\n\n{_AGENT_FILLER}\n\nNo issues found. All requirements covered. All code is reachable."
 
-MOCK_POLISH_NEEDS_ATTENTION = f"# Polish Report\n\n{_AGENT_FILLER}\n\nP1 issue detected: missing error handler in API route."
+MOCK_POLISH_NEEDS_ATTENTION = f"# Polish Report\n\n{_AGENT_FILLER}\n\n[P1] ERR-001: Missing error handler in API route."
 
 
 def _make_verify_json(verdict="PASS", fragments=None):
@@ -239,6 +239,8 @@ def _drive_pipeline(qp, qs, tmp_path, mode, fixtures, stop_condition=None):
             verify_json = _make_verify_json("PASS", request_fragments)
             fixtures[("VERIFY_WAIT", "result")] = verify_json
             fixtures[("*", "result")] = verify_json
+            fixtures[("VERIFY_WAIT", "ac-verifier")] = verify_json
+            fixtures[("*", "ac-verifier")] = verify_json
         history = []
         max_iterations = 80
         iteration = 0
@@ -398,6 +400,10 @@ def _drive_pipeline(qp, qs, tmp_path, mode, fixtures, stop_condition=None):
 
 # ─── Quick Mode Fixtures ─────────────────────────────────────────────────────
 
+MOCK_INTENT_AUDITOR_PASS = f"# Intent Audit\n\n{_AGENT_FILLER}\n\n\"verdict\": \"PASS\"\n\nThe implementation matches the user's intent. No letter-vs-spirit gaps found."
+MOCK_PE_REVIEWER_PASS = f"# PE Review\n\n{_AGENT_FILLER}\n\n\"verdict\": \"PASS\"\n\nArchitecture is sound. Error handling is complete. No security concerns."
+
+
 def _quick_fixtures(request_fragments=None):
     """Fixture responses for quick mode pipeline."""
     verify_json = _make_verify_json("PASS", request_fragments)
@@ -420,9 +426,15 @@ def _quick_fixtures(request_fragments=None):
         ("SIMPLIFY_RUN", "simplifier"): MOCK_SIMPLIFIER,
         ("SIMPLIFY_WAITING", "simplifier"): MOCK_SIMPLIFIER,
         ("*", "simplifier"): MOCK_SIMPLIFIER,
-        # VERIFY phase
+        # VERIFY phase — 3-agent split: ac-verifier gets structured data, others get pass verdicts
         ("VERIFY_WAIT", "result"): verify_json,
         ("*", "result"): verify_json,
+        ("VERIFY_WAIT", "ac-verifier"): verify_json,
+        ("*", "ac-verifier"): verify_json,
+        ("VERIFY_WAIT", "intent-auditor"): MOCK_INTENT_AUDITOR_PASS,
+        ("*", "intent-auditor"): MOCK_INTENT_AUDITOR_PASS,
+        ("VERIFY_WAIT", "pe-reviewer"): MOCK_PE_REVIEWER_PASS,
+        ("*", "pe-reviewer"): MOCK_PE_REVIEWER_PASS,
         # Manifest
         "manifest": MOCK_MANIFEST,
     }
@@ -596,7 +608,9 @@ class TestSimulationQualityLoopConvergence:
 MOCK_QUALITY_REVERIFY_RESOLVED = (
     f"# Reverification Results\n\n{_AGENT_FILLER}\n\n"
     "RESOLVED: CR-001\n"
+    "  Evidence: src/api/auth.ts:42 — added validation\n"
     "RESOLVED: SR-001\n"
+    "  Evidence: src/lib/security.ts:15 — fixed injection\n"
 )
 
 
@@ -691,6 +705,8 @@ class TestSimulationDeploySmokePath:
                 verify_json = _make_verify_json("PASS", request_fragments)
                 fixtures[("VERIFY_WAIT", "result")] = verify_json
                 fixtures[("*", "result")] = verify_json
+                fixtures[("VERIFY_WAIT", "ac-verifier")] = verify_json
+                fixtures[("*", "ac-verifier")] = verify_json
 
             max_iterations = 60
             for _ in range(max_iterations):
