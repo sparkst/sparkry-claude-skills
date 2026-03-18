@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .qralph/tools/hook-validate-agent.py"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/hook-validate-agent.py\""
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .qralph/tools/hook-validate-stop.py"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/hook-validate-stop.py\""
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .qralph/tools/hook-validate-write.py"
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/qralph/tools/hook-validate-write.py\""
           }
         ]
       }
