@@ -1,0 +1,11 @@
+{
+  "name": "pr-review-toolkit",
+  "version": "1.0.0",
+  "description": "Comprehensive PR review agents: code quality, error handling, test coverage, type design, comment accuracy, and code simplification",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["pr-review", "code-review", "testing", "error-handling", "type-design", "simplification"]
+}

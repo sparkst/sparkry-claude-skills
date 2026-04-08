@@ -79,7 +79,7 @@ QRALPH "Add notification system"
 
 ---
 
-## All Plugins (12)
+## All Plugins (13)
 
 ### QShortcuts — Development Workflow
 
@@ -101,6 +101,7 @@ QRALPH "Add notification system"
 | **writing-workflow** | `/plugin install writing-workflow@sparkry-claude-skills` | Multi-platform content, infographics, quality scoring |
 | **strategy-workflow** | `/plugin install strategy-workflow@sparkry-claude-skills` | COS, PR-FAQ, buy-vs-build, PMF validation |
 | **starter-pack** | `/plugin install starter-pack@sparkry-claude-skills` | Essential agents: planner, sde-iii, pe-reviewer |
+| **pr-review-toolkit** | `/plugin install pr-review-toolkit@sparkry-claude-skills` | 6 specialized PR review agents: code, errors, tests, types, comments, simplification |
 | **integrations-trello** | `/plugin install integrations-trello@sparkry-claude-skills` | Trello card management with QRALPH project sync |
 
 ---
@@ -108,7 +109,7 @@ QRALPH "Add notification system"
 ## Install All Plugins
 
 ```bash
-/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills qralph@sparkry-claude-skills starter-pack@sparkry-claude-skills integrations-trello@sparkry-claude-skills
+/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills qralph@sparkry-claude-skills starter-pack@sparkry-claude-skills integrations-trello@sparkry-claude-skills pr-review-toolkit@sparkry-claude-skills
 ```
 
 ---
@@ -129,6 +130,7 @@ QRALPH "Add notification system"
 | strategy-workflow | [STRATEGY-WORKFLOW-GUIDE.md](./docs/STRATEGY-WORKFLOW-GUIDE.md) |
 | starter-pack | [STARTER-PACK-GUIDE.md](./docs/STARTER-PACK-GUIDE.md) |
 | integrations-trello | [INTEGRATIONS-TRELLO-GUIDE.md](./docs/INTEGRATIONS-TRELLO-GUIDE.md) |
+| pr-review-toolkit | [PR-REVIEW-TOOLKIT-GUIDE.md](./docs/PR-REVIEW-TOOLKIT-GUIDE.md) |
 
 ---
 

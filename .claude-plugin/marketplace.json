@@ -130,6 +130,16 @@
       "keywords": ["trello", "integration", "project-management", "qralph", "cards", "automation"],
       "category": "integrations",
       "tags": ["trello", "cards", "boards", "qralph", "project-tracking"]
+    },
+    {
+      "name": "pr-review-toolkit",
+      "source": "./plugins/pr-review-toolkit",
+      "description": "Comprehensive PR review agents: code quality, error handling, test coverage, type design, comment accuracy, and code simplification",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["pr-review", "code-review", "testing", "error-handling", "type-design", "simplification"],
+      "category": "development",
+      "tags": ["review-pr", "code-reviewer", "silent-failure-hunter", "test-analyzer", "type-design", "code-simplifier"]
     }
   ]
 }
