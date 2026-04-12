@@ -27,6 +27,7 @@ Each plugin maps from an exec-team source directory to a marketplace plugin dire
 | **qshortcuts-learning** | `.claude/plugins/qshortcuts-learning/` | `plugins/qshortcuts-learning/` |
 | **integrations-trello** | `.claude/plugins/integrations-trello/` | `plugins/integrations-trello/` |
 | **pr-review-toolkit** | (Anthropic official source, adapted) | `plugins/pr-review-toolkit/` |
+| **coe-workflow** | `.claude/plugins/coe-workflow/` | `plugins/coe-workflow/` |
 
 ### 2. QRALPH — Special mapping
 

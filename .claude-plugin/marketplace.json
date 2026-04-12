@@ -140,6 +140,16 @@
       "keywords": ["pr-review", "code-review", "testing", "error-handling", "type-design", "simplification"],
       "category": "development",
       "tags": ["review-pr", "code-reviewer", "silent-failure-hunter", "test-analyzer", "type-design", "code-simplifier"]
+    },
+    {
+      "name": "coe-workflow",
+      "source": "./plugins/coe-workflow",
+      "description": "Structured COE (Correction of Errors) workflow with 5-Whys root cause analysis",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["coe", "root-cause", "5-whys", "post-mortem", "incident-review"],
+      "category": "workflow",
+      "tags": ["coe", "qcoe", "incident-review"]
     }
   ]
 }

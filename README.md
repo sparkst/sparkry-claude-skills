@@ -79,7 +79,7 @@ QRALPH "Add notification system"
 
 ---
 
-## All Plugins (13)
+## All Plugins (14)
 
 ### QShortcuts — Development Workflow
 
@@ -103,13 +103,14 @@ QRALPH "Add notification system"
 | **starter-pack** | `/plugin install starter-pack@sparkry-claude-skills` | Essential agents: planner, sde-iii, pe-reviewer |
 | **pr-review-toolkit** | `/plugin install pr-review-toolkit@sparkry-claude-skills` | 6 specialized PR review agents: code, errors, tests, types, comments, simplification |
 | **integrations-trello** | `/plugin install integrations-trello@sparkry-claude-skills` | Trello card management with QRALPH project sync |
+| **coe-workflow** | `/plugin install coe-workflow@sparkry-claude-skills` | Structured COE workflow with 5-Whys root cause analysis |
 
 ---
 
 ## Install All Plugins
 
 ```bash
-/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills qralph@sparkry-claude-skills starter-pack@sparkry-claude-skills integrations-trello@sparkry-claude-skills pr-review-toolkit@sparkry-claude-skills
+/plugin install qshortcuts-core@sparkry-claude-skills qshortcuts-support@sparkry-claude-skills qshortcuts-ai@sparkry-claude-skills qshortcuts-content@sparkry-claude-skills qshortcuts-learning@sparkry-claude-skills dev-workflow@sparkry-claude-skills research-workflow@sparkry-claude-skills writing-workflow@sparkry-claude-skills strategy-workflow@sparkry-claude-skills qralph@sparkry-claude-skills starter-pack@sparkry-claude-skills integrations-trello@sparkry-claude-skills pr-review-toolkit@sparkry-claude-skills coe-workflow@sparkry-claude-skills
 ```
 
 ---
@@ -131,6 +132,7 @@ QRALPH "Add notification system"
 | starter-pack | [STARTER-PACK-GUIDE.md](./docs/STARTER-PACK-GUIDE.md) |
 | integrations-trello | [INTEGRATIONS-TRELLO-GUIDE.md](./docs/INTEGRATIONS-TRELLO-GUIDE.md) |
 | pr-review-toolkit | [PR-REVIEW-TOOLKIT-GUIDE.md](./docs/PR-REVIEW-TOOLKIT-GUIDE.md) |
+| coe-workflow | [COE-WORKFLOW-GUIDE.md](./docs/COE-WORKFLOW-GUIDE.md) |
 
 ---
 

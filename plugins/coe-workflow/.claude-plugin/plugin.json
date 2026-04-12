@@ -1,0 +1,8 @@
+{
+  "name": "coe-workflow",
+  "version": "1.0.0",
+  "description": "Structured COE (Correction of Errors) workflow with 5-Whys root cause analysis",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["coe", "root-cause", "5-whys", "post-mortem", "incident-review"]
+}
