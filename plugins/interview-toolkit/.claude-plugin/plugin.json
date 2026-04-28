@@ -1,0 +1,11 @@
+{
+  "name": "interview-toolkit",
+  "version": "1.0.0",
+  "description": "Structured discovery call support and post-interview synthesis — real-time note-taking, pain point extraction, time management, and deliverable generation",
+  "author": {
+    "name": "Sparkry.ai",
+    "email": "skills@sparkry.ai"
+  },
+  "license": "MIT",
+  "keywords": ["interview", "discovery-call", "synthesis", "consulting", "note-taking", "pain-points"]
+}

@@ -14,12 +14,12 @@
     {
       "name": "dev-workflow",
       "source": "./plugins/dev-workflow",
-      "description": "TDD-first development workflow with PE reviewer, test writer, planner, and release manager",
-      "version": "1.0.0",
+      "description": "TDD-first development workflow with PE reviewer, test writer, planner, release manager, and story point estimator",
+      "version": "1.1.0",
       "license": "MIT",
-      "keywords": ["tdd", "testing", "code-review", "planning", "development"],
+      "keywords": ["tdd", "testing", "code-review", "planning", "story-points", "development"],
       "category": "development",
-      "tags": ["tdd", "testing", "code-quality", "planning-poker"]
+      "tags": ["tdd", "testing", "code-quality", "planning-poker", "story-points"]
     },
     {
       "name": "research-workflow",
@@ -150,6 +150,76 @@
       "keywords": ["coe", "root-cause", "5-whys", "post-mortem", "incident-review"],
       "category": "workflow",
       "tags": ["coe", "qcoe", "incident-review"]
+    },
+    {
+      "name": "content-pipeline",
+      "source": "./plugins/content-pipeline",
+      "description": "Content production pipeline — doc stitching, hero image generation, and AI image creation with style guides",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["content", "doc-stitcher", "image-generation", "hero-image", "pipeline"],
+      "category": "content",
+      "tags": ["doc-stitcher", "image-generation", "hero-image", "content-pipeline"]
+    },
+    {
+      "name": "engagement",
+      "source": "./plugins/engagement",
+      "description": "Social engagement tools — comment generation with draft review for authentic interactions",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["engagement", "comments", "social", "drafting"],
+      "category": "content",
+      "tags": ["comment-generator", "social-engagement", "draft-review"]
+    },
+    {
+      "name": "media-pipeline",
+      "source": "./plugins/media-pipeline",
+      "description": "Media processing pipeline — video transcription with WhisperX, audio extraction, and dependency management",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["media", "video", "transcription", "whisperx", "audio"],
+      "category": "media",
+      "tags": ["video-transcript", "whisperx", "audio-extraction"]
+    },
+    {
+      "name": "qdesign",
+      "source": "./plugins/qdesign",
+      "description": "UX design pipeline for prototyping user interfaces and interaction flows",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["ux", "design", "ui", "prototyping", "interaction"],
+      "category": "design",
+      "tags": ["qdesign", "ux-design", "ui-prototyping"]
+    },
+    {
+      "name": "quality-extras",
+      "source": "./plugins/quality-extras",
+      "description": "Extended quality review tools — deep code review with architecture and security analysis",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["quality", "review", "architecture", "security", "code-quality"],
+      "category": "development",
+      "tags": ["qreview", "code-review", "architecture-review"]
+    },
+    {
+      "name": "writing-swarms",
+      "source": "./plugins/writing-swarms",
+      "description": "Multi-agent creative writing swarms — headline generation and soundbite crafting with scoring rubrics",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["writing", "headlines", "soundbites", "swarm", "creative"],
+      "category": "content",
+      "tags": ["headline-swarm", "soundbite-swarm", "creative-writing"]
+    },
+    {
+      "name": "interview-toolkit",
+      "source": "./plugins/interview-toolkit",
+      "description": "Discovery call support and post-interview synthesis — structured note-taking, pain point extraction, and deliverable generation for consultants",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["interview", "discovery-call", "synthesis", "consulting", "pain-points"],
+      "category": "consulting",
+      "tags": ["discovery-call", "interview-synthesis", "note-taking", "consulting"]
     }
   ]
 }
