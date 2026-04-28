@@ -1,0 +1,167 @@
+{
+  "version": "1.0.0",
+  "description": "Reference soundbites for calibration. These represent the gold standard we're aiming for.",
+  "last_updated": "2026-01-08",
+  "gold_standards": [
+    {
+      "soundbite": "Just Do It",
+      "brand": "Nike",
+      "year": 1988,
+      "scores": {
+        "memorability": 98,
+        "emotional_resonance": 92,
+        "brevity": 100,
+        "rhythm": 98,
+        "universality": 98,
+        "action_potential": 100,
+        "authenticity": 95,
+        "overall": 97
+      },
+      "analysis": {
+        "why_works": "Action-oriented, removes hesitation, universal application",
+        "rhythm_pattern": "Three beats, staccato",
+        "word_count": 3,
+        "primary_angle": "action"
+      }
+    },
+    {
+      "soundbite": "Think Different",
+      "brand": "Apple",
+      "year": 1997,
+      "scores": {
+        "memorability": 95,
+        "emotional_resonance": 90,
+        "brevity": 95,
+        "rhythm": 92,
+        "universality": 92,
+        "action_potential": 85,
+        "authenticity": 95,
+        "overall": 92
+      },
+      "analysis": {
+        "why_works": "Identity statement, rebellion, aspiration, grammatical disruption",
+        "rhythm_pattern": "Two beats, iambic",
+        "word_count": 2,
+        "primary_angle": "identity"
+      }
+    },
+    {
+      "soundbite": "Yes We Can",
+      "brand": "Obama 2008",
+      "year": 2008,
+      "scores": {
+        "memorability": 95,
+        "emotional_resonance": 98,
+        "brevity": 100,
+        "rhythm": 95,
+        "universality": 90,
+        "action_potential": 92,
+        "authenticity": 90,
+        "overall": 94
+      },
+      "analysis": {
+        "why_works": "Collective possibility, optimism, agency, inclusive 'we'",
+        "rhythm_pattern": "Three beats, trochaic",
+        "word_count": 3,
+        "primary_angle": "emotional"
+      }
+    },
+    {
+      "soundbite": "Because You're Worth It",
+      "brand": "L'Oreal",
+      "year": 1973,
+      "scores": {
+        "memorability": 90,
+        "emotional_resonance": 95,
+        "brevity": 90,
+        "rhythm": 85,
+        "universality": 85,
+        "action_potential": 75,
+        "authenticity": 88,
+        "overall": 88
+      },
+      "analysis": {
+        "why_works": "Self-worth affirmation, permission granting, personal validation",
+        "rhythm_pattern": "Four beats, conversational",
+        "word_count": 4,
+        "primary_angle": "emotional"
+      }
+    },
+    {
+      "soundbite": "A Diamond Is Forever",
+      "brand": "De Beers",
+      "year": 1947,
+      "scores": {
+        "memorability": 92,
+        "emotional_resonance": 88,
+        "brevity": 90,
+        "rhythm": 90,
+        "universality": 75,
+        "action_potential": 70,
+        "authenticity": 85,
+        "overall": 85
+      },
+      "analysis": {
+        "why_works": "Permanence, emotional anchoring, concrete imagery",
+        "rhythm_pattern": "Four beats, declarative",
+        "word_count": 4,
+        "primary_angle": "simplifier"
+      }
+    },
+    {
+      "soundbite": "Priceless",
+      "brand": "Mastercard",
+      "year": 1997,
+      "scores": {
+        "memorability": 95,
+        "emotional_resonance": 85,
+        "brevity": 95,
+        "rhythm": 88,
+        "universality": 90,
+        "action_potential": 70,
+        "authenticity": 82,
+        "overall": 87
+      },
+      "analysis": {
+        "why_works": "Values hierarchy, emotional over material, single word impact",
+        "rhythm_pattern": "Single word, three syllables",
+        "word_count": 1,
+        "primary_angle": "simplifier"
+      }
+    }
+  ],
+  "calibration_notes": {
+    "threshold": "Top-tier soundbites score 85+ overall",
+    "target": "Generated soundbites should aim for 80+ to be competitive",
+    "key_patterns": [
+      "2-4 words optimal",
+      "Strong rhythm/cadence",
+      "Emotional trigger present",
+      "No corporate buzzwords",
+      "Action-oriented or identity-affirming"
+    ]
+  },
+  "angle_benchmarks": {
+    "emotional": {
+      "reference": "Yes We Can",
+      "target_score": 90
+    },
+    "identity": {
+      "reference": "Think Different",
+      "target_score": 90
+    },
+    "action": {
+      "reference": "Just Do It",
+      "target_score": 95
+    },
+    "contrarian": {
+      "reference": null,
+      "target_score": 85,
+      "note": "Less common in classic slogans; look for 'challenge' soundbites"
+    },
+    "simplifier": {
+      "reference": "Priceless",
+      "target_score": 85
+    }
+  }
+}

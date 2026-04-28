@@ -1,0 +1,8 @@
+{
+  "name": "productivity-tools",
+  "version": "1.0.0",
+  "description": "Excel file generation with conditional formatting, freeze panes, filters, and data validation",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["tools", "excel", "spreadsheet", "qexcel"]
+}

@@ -1,0 +1,23 @@
+{
+  "skill_name": "hero-image-pipeline",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "QHERO for the article at content/articles/building-a-design-team-inside-claude-code.md with orange text 'Claude Code Can't Design.' and white text 'Eight MCP Tools Fixed That.' using split_panel style",
+      "expected_output": "A 1200x630 PNG hero image with Oswald font headline over an AI-generated split-panel illustration. Orange text larger than white text, dark gradient overlay, all contrast checks passing.",
+      "files": ["content/articles/building-a-design-team-inside-claude-code.md"]
+    },
+    {
+      "id": 2,
+      "prompt": "QHERO content/articles/ai-basics-06-dump-the-chaos.md --orange 'Your AI Has Amnesia.' --white 'Here's the Fix.' --style comic_strip",
+      "expected_output": "A 1200x630 PNG hero image with a comic strip style illustration and bold Oswald headline overlay. Three panels showing a narrative, warm earth tones.",
+      "files": ["content/articles/ai-basics-06-dump-the-chaos.md"]
+    },
+    {
+      "id": 3,
+      "prompt": "Generate a hero image for my article about competitive research with AI. The headline should be 'Stop Googling Your Competitors.' in orange and 'AI Does It in 30 Minutes.' in white. Make it photorealistic composite style, someone relaxing while AI does research.",
+      "expected_output": "A 1200x630 PNG hero image with photorealistic composite illustration (person relaxing + AI doing research) and Oswald headline overlay.",
+      "files": []
+    }
+  ]
+}

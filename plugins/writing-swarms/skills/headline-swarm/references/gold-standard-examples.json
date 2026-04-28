@@ -1,0 +1,209 @@
+{
+  "version": "1.0.0",
+  "description": "Reference headlines for calibration. These represent the gold standard we're aiming for.",
+  "last_updated": "2026-01-08",
+  "gold_standards": [
+    {
+      "headline": "The Quiet Desperation of the American Worker",
+      "source": "The Atlantic",
+      "type": "essay",
+      "scores": {
+        "curiosity": 95,
+        "clarity": 92,
+        "promise": 85,
+        "brevity": 90,
+        "authenticity": 98,
+        "seo_potential": 75,
+        "overall": 91
+      },
+      "analysis": {
+        "why_works": "Literary reference (Thoreau), emotional weight, universal topic",
+        "word_count": 7,
+        "primary_angle": "emotional"
+      }
+    },
+    {
+      "headline": "You Are Not Late",
+      "source": "Kevin Kelly",
+      "type": "blog post",
+      "scores": {
+        "curiosity": 88,
+        "clarity": 95,
+        "promise": 95,
+        "brevity": 90,
+        "authenticity": 98,
+        "seo_potential": 60,
+        "overall": 90
+      },
+      "analysis": {
+        "why_works": "Direct permission-giving, contrarian, deeply reassuring",
+        "word_count": 4,
+        "primary_angle": "contrarian"
+      }
+    },
+    {
+      "headline": "How to Think About AI Without Losing Your Mind",
+      "source": "N+1",
+      "type": "essay",
+      "scores": {
+        "curiosity": 90,
+        "clarity": 95,
+        "promise": 92,
+        "brevity": 85,
+        "authenticity": 92,
+        "seo_potential": 85,
+        "overall": 91
+      },
+      "analysis": {
+        "why_works": "How-to promise, relatable struggle, specific topic",
+        "word_count": 9,
+        "primary_angle": "action"
+      }
+    },
+    {
+      "headline": "What You Will Wish You'd Known",
+      "source": "Paul Graham",
+      "type": "essay",
+      "scores": {
+        "curiosity": 92,
+        "clarity": 88,
+        "promise": 95,
+        "brevity": 95,
+        "authenticity": 95,
+        "seo_potential": 55,
+        "overall": 89
+      },
+      "analysis": {
+        "why_works": "Future regret framing, wisdom promise, universal application",
+        "word_count": 6,
+        "primary_angle": "simplifier"
+      }
+    },
+    {
+      "headline": "Why Your Team Needs to Start Using AI Now",
+      "source": "HBR-style",
+      "type": "business article",
+      "scores": {
+        "curiosity": 75,
+        "clarity": 95,
+        "promise": 85,
+        "brevity": 85,
+        "authenticity": 82,
+        "seo_potential": 95,
+        "overall": 85
+      },
+      "analysis": {
+        "why_works": "Clear urgency, direct address, action-oriented",
+        "word_count": 9,
+        "primary_angle": "action"
+      }
+    },
+    {
+      "headline": "The Honest AI Conversation Your Engineers Are Waiting For",
+      "source": "Travis Hubbard / Everyday AI",
+      "type": "newsletter article",
+      "scores": {
+        "curiosity": 88,
+        "clarity": 92,
+        "promise": 90,
+        "brevity": 95,
+        "authenticity": 95,
+        "seo_potential": 80,
+        "overall": 90
+      },
+      "analysis": {
+        "why_works": "Direct address, emotional stakes, promise of authenticity",
+        "word_count": 9,
+        "primary_angle": "emotional"
+      }
+    },
+    {
+      "headline": "The Most Powerful Leadership Skill Nobody Teaches",
+      "source": "Generic leadership",
+      "type": "article",
+      "scores": {
+        "curiosity": 85,
+        "clarity": 90,
+        "promise": 85,
+        "brevity": 90,
+        "authenticity": 75,
+        "seo_potential": 85,
+        "overall": 85
+      },
+      "analysis": {
+        "why_works": "Gap creation, superlative with specificity, clear promise",
+        "word_count": 7,
+        "primary_angle": "identity"
+      }
+    },
+    {
+      "headline": "Stop Telling Your Team AI Won't Take Their Jobs",
+      "source": "Hypothetical contrarian",
+      "type": "thought leadership",
+      "scores": {
+        "curiosity": 92,
+        "clarity": 95,
+        "promise": 80,
+        "brevity": 85,
+        "authenticity": 92,
+        "seo_potential": 80,
+        "overall": 88
+      },
+      "analysis": {
+        "why_works": "Contrarian, confrontational, challenges common response",
+        "word_count": 9,
+        "primary_angle": "contrarian"
+      }
+    }
+  ],
+  "calibration_notes": {
+    "threshold": "Top-tier headlines score 85+ overall",
+    "target": "Generated headlines should aim for 80+ to be competitive",
+    "key_patterns": [
+      "6-10 words optimal for most platforms",
+      "Direct address ('your', 'you') increases engagement",
+      "Specificity beats generality",
+      "Emotional stakes increase curiosity",
+      "Authenticity > clickbait for quality audiences"
+    ]
+  },
+  "angle_benchmarks": {
+    "emotional": {
+      "reference": "The Honest AI Conversation Your Engineers Are Waiting For",
+      "target_score": 88
+    },
+    "identity": {
+      "reference": "What Real Leaders Say About AI",
+      "target_score": 85
+    },
+    "action": {
+      "reference": "How to Think About AI Without Losing Your Mind",
+      "target_score": 88
+    },
+    "contrarian": {
+      "reference": "Stop Telling Your Team AI Won't Take Their Jobs",
+      "target_score": 88
+    },
+    "simplifier": {
+      "reference": "What You Will Wish You'd Known",
+      "target_score": 88
+    }
+  },
+  "platform_adjustments": {
+    "newsletter_subject": {
+      "ideal_length": "6-9 words",
+      "priority": ["curiosity", "brevity"],
+      "note": "Subject lines need to work in preview"
+    },
+    "linkedin": {
+      "ideal_length": "8-12 words",
+      "priority": ["identity", "promise"],
+      "note": "Professional audience responds to growth/leadership frames"
+    },
+    "blog_seo": {
+      "ideal_length": "8-12 words",
+      "priority": ["seo_potential", "clarity"],
+      "note": "Front-load primary keyword"
+    }
+  }
+}

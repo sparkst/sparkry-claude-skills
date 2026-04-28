@@ -1,0 +1,8 @@
+{
+  "name": "engagement",
+  "version": "1.0.0",
+  "description": "Social media engagement tools — comment generation and draft review",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["engagement", "comments", "social-media"]
+}

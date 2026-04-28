@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1200, height=630">
+<style>
+  @font-face {
+    font-family: 'Oswald';
+    src: url('Oswald-VariableFont_wght.ttf') format('truetype');
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1200px;
+    height: 630px;
+    overflow: hidden;
+    position: relative;
+    font-family: 'Oswald', sans-serif;
+    background: #000;
+  }
+  .bg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 1200px;
+    height: 630px;
+  }
+  /* P0: Cover the center seam between panels */
+  .seam-cover {
+    position: absolute;
+    top: 150px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 6px;
+    height: 500px;
+    background: linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.4) 10%, rgba(0,0,0,0.5) 50%, rgba(0,0,0,0.4) 90%, transparent 100%);
+    z-index: 1;
+  }
+  .overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 155px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.9) 65%, rgba(0,0,0,0.0) 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px 40px 30px;
+    z-index: 2;
+  }
+  .headline {
+    font-family: 'Oswald', Impact, sans-serif;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    text-align: center;
+    line-height: 1.1;
+    text-shadow: 2px 2px 8px rgba(0,0,0,0.9), 0 0 20px rgba(0,0,0,0.5);
+  }
+  /* P1: 1.67x ratio (60/36) for clear hierarchy */
+  .orange { color: #FF6B00; font-size: 60px; }
+  .white { color: #FFFFFF; font-size: 36px; }
+</style>
+</head>
+<body>
+  <img class="bg" src="design-team-hero2-scene-cropped.png" alt="">
+  <!-- P1: Subtle warm tint on left panel so grayscale reads as intentional at thumbnail -->
+  <div style="position:absolute; top:0; left:0; width:50%; height:100%; background:rgba(139,90,43,0.06); z-index:0;"></div>
+  <div class="seam-cover"></div>
+  <div class="overlay">
+    <div class="headline">
+      <span class="orange">Claude Code Can't Design.</span><br>
+      <span class="white">Eight MCP Tools Fixed That.</span>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "name": "content-pipeline",
+  "version": "1.0.0",
+  "description": "Content creation pipeline — doc stitching, hero image generation, and AI image generation via Gemini",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["content", "doc-stitcher", "hero-image", "image-generation", "qimage", "gemini"]
+}

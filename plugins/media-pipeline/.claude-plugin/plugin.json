@@ -1,0 +1,8 @@
+{
+  "name": "media-pipeline",
+  "version": "1.0.0",
+  "description": "Video-to-transcript pipeline with audio extraction and WhisperX transcription",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["media", "video", "transcript", "whisperx", "qtranscript"]
+}

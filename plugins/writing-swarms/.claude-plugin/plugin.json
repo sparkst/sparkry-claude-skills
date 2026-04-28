@@ -1,0 +1,8 @@
+{
+  "name": "writing-swarms",
+  "version": "1.0.0",
+  "description": "Multi-angle swarm generation for headlines and soundbites with cross-ranking",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["writing", "headlines", "soundbites", "swarm", "qheadline", "qsoundbite"]
+}

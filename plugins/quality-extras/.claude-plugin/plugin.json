@@ -1,0 +1,8 @@
+{
+  "name": "quality-extras",
+  "version": "1.0.0",
+  "description": "Multi-lens content review with persona-based analysis and fact validation",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["quality", "review", "content-review", "qreview"]
+}

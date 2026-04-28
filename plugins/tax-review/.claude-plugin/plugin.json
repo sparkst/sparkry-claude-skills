@@ -1,0 +1,8 @@
+{
+  "name": "tax-review",
+  "version": "1.0.0",
+  "description": "Tax return review and validation — W-2, 1099, charitable deductions, ESPP",
+  "author": { "name": "Sparkry.ai", "email": "skills@sparkry.ai" },
+  "license": "MIT",
+  "keywords": ["tax", "irs", "w2", "1099", "tax-review"]
+}
