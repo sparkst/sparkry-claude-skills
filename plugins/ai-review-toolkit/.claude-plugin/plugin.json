@@ -1,0 +1,50 @@
+{
+  "name": "ai-review-toolkit",
+  "version": "1.0.0",
+  "description": "Type-agnostic multi-agent review toolkit. Spawn N clean-context reviewers to evaluate any artifact against requirements. Iterative review-fix cycles with deterministic convergence.",
+  "author": {"name": "Sparkry.ai", "email": "skills@sparkry.ai"},
+  "license": "MIT",
+  "keywords": ["review", "multi-agent", "quality", "pipeline", "type-agnostic"],
+  "skills": [
+    {
+      "name": "qreview",
+      "path": "skills/qreview"
+    },
+    {
+      "name": "qloop",
+      "path": "skills/qloop"
+    },
+    {
+      "name": "qpipeline",
+      "path": "skills/qpipeline"
+    }
+  ],
+  "agents": [
+    {
+      "name": "reviewer",
+      "path": "agents/reviewer.md"
+    },
+    {
+      "name": "verifier",
+      "path": "agents/verifier.md"
+    },
+    {
+      "name": "fixer",
+      "path": "agents/fixer.md"
+    }
+  ],
+  "commands": [
+    {
+      "name": "qreview",
+      "path": "commands/qreview.md"
+    },
+    {
+      "name": "qloop",
+      "path": "commands/qloop.md"
+    },
+    {
+      "name": "qpipeline",
+      "path": "commands/qpipeline.md"
+    }
+  ]
+}
