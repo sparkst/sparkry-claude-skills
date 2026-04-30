@@ -120,7 +120,7 @@ class TestInit:
         state = _init(tmp_path, artifact_file, requirements_file)
         assert "artifact_path" in state
         assert "requirements_path" in state
-        assert "reviewer_count" in state
+        assert len(state.get("team", [])) >= 2
         assert "threshold" in state
         assert "max_rounds" in state
         assert "min_rounds" in state
@@ -188,7 +188,7 @@ class TestNextAction:
         action = _next(state, tmp_path)
         assert action["action"] == "spawn_reviewers"
         assert "prompts" in action
-        assert len(action["prompts"]) == state["reviewer_count"]
+        assert len(action["prompts"]) == len(state["team"])
 
     def test_returns_spawn_fixer_after_review_synthesis(
         self, tmp_path: Path, artifact_file: Path, requirements_file: Path
@@ -709,7 +709,7 @@ class TestRecordReviewValidation:
         state["rounds"][0]["phase"] = "tests_done"
         findings = _make_findings(["P1"])
         # reviewer_count is >= 2 from team selection; use an index beyond that
-        bad_index = state["reviewer_count"] + 5
+        bad_index = len(state["team"]) + 5
         with pytest.raises(ValueError, match="out of bounds"):
             record_review(state, 1, bad_index, findings)
 
@@ -1014,7 +1014,7 @@ class TestPhaseGuards:
         self, tmp_path: Path, artifact_file: Path, requirements_file: Path
     ) -> None:
         state = _init(tmp_path, artifact_file, requirements_file, reviewer_count=1)
-        assert state["reviewer_count"] >= 2
+        assert len(state["team"]) >= 2
 
     def test_record_review_rejects_initialized_phase(
         self, tmp_path: Path, artifact_file: Path, requirements_file: Path

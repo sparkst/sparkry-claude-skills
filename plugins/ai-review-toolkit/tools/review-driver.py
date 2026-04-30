@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sys
-import tempfile
+
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,19 +27,38 @@ from typing import Any
 # Resolve sibling tool imports
 # ---------------------------------------------------------------------------
 
-from tools._loader import load_sibling as _load_sibling
+try:
+    from tools._loader import load_sibling as _load_sibling
+    from tools._state_io import load_json_state, write_state_atomic
+except ImportError:
+    from _loader import load_sibling as _load_sibling
+    from _state_io import load_json_state, write_state_atomic
+
+
+_finding_parser_mod: Any = None
+_test_runner_mod: Any = None
+_team_selector_mod: Any = None
 
 
 def _get_finding_parser() -> Any:
-    return _load_sibling("finding-parser.py")
+    global _finding_parser_mod
+    if _finding_parser_mod is None:
+        _finding_parser_mod = _load_sibling("finding-parser.py")
+    return _finding_parser_mod
 
 
 def _get_test_runner() -> Any:
-    return _load_sibling("test-runner.py")
+    global _test_runner_mod
+    if _test_runner_mod is None:
+        _test_runner_mod = _load_sibling("test-runner.py")
+    return _test_runner_mod
 
 
 def _get_team_selector() -> Any:
-    return _load_sibling("team-selector.py")
+    global _team_selector_mod
+    if _team_selector_mod is None:
+        _team_selector_mod = _load_sibling("team-selector.py")
+    return _team_selector_mod
 
 
 # ---------------------------------------------------------------------------
@@ -72,23 +90,7 @@ Your review lens: {review_lens}
 Review the artifact against the requirements through your lens of {review_lens}.
 Read only files relevant to your review domain. Use Grep to find relevant sections rather than reading entire files.
 
-Output your findings as a JSON array. Each finding must have these fields:
-- id: string matching pattern P[0-3]-NNN (e.g., P0-001, P1-002)
-- severity: one of P0, P1, P2, P3
-- title: concise description of the issue
-- requirement: which requirement this relates to
-- finding: detailed description of the problem
-- recommendation: how to fix it
-- source: "{reviewer_name}"
-- evidence: file path and line number if applicable
-
-Severity guide:
-- P0: Blocks shipping (correctness, security, data loss, requirement violation)
-- P1: Must fix before v1 (quality, error handling, incomplete coverage)
-- P2: Should fix (code smell, suboptimal pattern, minor UX, doc gap)
-- P3: Nice to have (style, optional optimization, cosmetic)
-
-Output ONLY the JSON array. No other text.\
+{output_instructions}\
 """
 
 
@@ -109,17 +111,7 @@ def _state_path(base: str | None = None) -> Path:
 def _read_state(base: str | None = None) -> dict[str, Any]:
     """Read state from disk. Raises FileNotFoundError if missing."""
     path = _state_path(base)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"No review state found at {path}. Run 'init' first."
-        )
-    with open(path, "r", encoding="utf-8") as fh:
-        try:
-            return json.load(fh)  # type: ignore[no-any-return]
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"State file corrupt at {path}. Run 'reset' to clear."
-            ) from exc
+    return load_json_state(path, "Run 'init' first.")
 
 
 def _write_state(state: dict[str, Any], base: str | None = None) -> None:
@@ -127,18 +119,7 @@ def _write_state(state: dict[str, Any], base: str | None = None) -> None:
     d = _state_dir(base)
     d.mkdir(parents=True, exist_ok=True)
     target = _state_path(base)
-    state["updated_at"] = datetime.now(timezone.utc).isoformat()
-    fd, tmp = tempfile.mkstemp(dir=str(d), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2, default=str)
-        os.replace(tmp, str(target))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    write_state_atomic(target, state)
 
 
 MAX_FILE_SIZE = 512 * 1024  # 512 KB
@@ -147,9 +128,10 @@ MAX_FILE_SIZE = 512 * 1024  # 512 KB
 def _read_file_safe(path: str) -> str:
     """Read a file, raising if it does not exist or exceeds size limit."""
     p = Path(path)
-    if not p.exists():
+    try:
+        size = p.stat().st_size
+    except FileNotFoundError:
         raise FileNotFoundError(f"File not found: {path}")
-    size = p.stat().st_size
     if size > MAX_FILE_SIZE:
         raise ValueError(
             f"File too large ({size} bytes, limit {MAX_FILE_SIZE}): {path}"
@@ -172,7 +154,6 @@ def init_review(
 
     Returns the full state dict with team composition and test results.
     """
-    # Validate inputs
     artifact_abs = str(Path(artifact_path).resolve())
     requirements_abs = str(Path(requirements_path).resolve())
 
@@ -181,11 +162,9 @@ def init_review(
     if not Path(requirements_abs).exists():
         raise FileNotFoundError(f"Requirements not found: {requirements_path}")
 
-    # Read files for description-based domain classification
     artifact_content = _read_file_safe(artifact_abs)
     requirements_content = _read_file_safe(requirements_abs)
 
-    # Discover and run tests
     test_runner = _get_test_runner()
     specs = test_runner.discover_tests(artifact_abs)
     if specs:
@@ -202,7 +181,6 @@ def init_review(
             "failures_as_findings": [],
         }
 
-    # Select team
     team_selector = _get_team_selector()
     description = f"{requirements_content[:500]}\n{artifact_content[:500]}"
     min_rev = max(reviewer_count or 2, 2)
@@ -270,6 +248,7 @@ def get_reviewer_prompt(state: dict[str, Any], reviewer_index: int) -> str:
         artifact_content=artifact_content,
         requirements_content=requirements_content,
         test_results_summary=test_results_summary,
+        output_instructions=_get_finding_parser().REVIEWER_OUTPUT_INSTRUCTIONS.format(reviewer_name=reviewer["name"]),
     )
 
 
@@ -339,7 +318,6 @@ def record_findings(
         else:
             dropped_count += 1
 
-    # Record in state
     state["reviewer_outputs"][str(reviewer_index)] = valid_findings
     if dropped_count > 0:
         state.setdefault("validation_dropped", {})[str(reviewer_index)] = dropped_count
@@ -382,24 +360,19 @@ def synthesize_round(
             f"Missing: {missing}. All reviewers must report before synthesis."
         )
 
-    # Collect all reviewer findings
     reviewer_results: list[list[dict[str, Any]]] = list(
         state.get("reviewer_outputs", {}).values()
     )
 
-    # Include test failure findings
     test_failures = state.get("test_results", {}).get("failures_as_findings", [])
     if test_failures:
         reviewer_results.append(test_failures)
 
-    # Synthesize: validate, deduplicate (max-severity), sort
     warnings: list[dict[str, object]] = []
     synthesized = finding_parser.synthesize_findings(reviewer_results, warnings=warnings)
 
-    # Count by severity
     counts = finding_parser.count_by_severity(synthesized)
 
-    # Check convergence
     converged, convergence_message = finding_parser.check_convergence(
         synthesized, threshold=threshold
     )

@@ -436,7 +436,7 @@ class TestErrorHandling:
             )
 
     def test_status_without_init(self, tmp_path: Path) -> None:
-        with pytest.raises(FileNotFoundError, match="No review state found"):
+        with pytest.raises(FileNotFoundError, match="No state found"):
             rd.get_status(str(tmp_path))
 
     def test_record_findings_with_garbage_input(

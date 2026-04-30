@@ -22,6 +22,15 @@ from pathlib import Path
 from typing import Any
 
 
+MAX_OUTPUT_SIZE = 64 * 1024  # 64 KB
+
+
+def _cap_output(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_SIZE:
+        return text
+    return text[:MAX_OUTPUT_SIZE] + f"\n... [truncated at {MAX_OUTPUT_SIZE} bytes]"
+
+
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
@@ -116,7 +125,6 @@ def discover_tests(artifact_path: str, test_cmd: str | None = None) -> list[RunS
     if tests_subdir.is_dir():
         search_dirs.append(tests_subdir)
 
-    # 1. Python tests -----------------------------------------------------
     for d in search_dirs:
         for p in sorted(d.iterdir()):
             if not p.is_file():
@@ -129,14 +137,7 @@ def discover_tests(artifact_path: str, test_cmd: str | None = None) -> list[RunS
                     command=f"{shlex.quote(sys.executable)} -m pytest {shlex.quote(str(p))} -v",
                     description=f"pytest: {p.name}",
                 ))
-
-    # 2. TypeScript/JS tests -----------------------------------------------
-    for d in search_dirs:
-        for p in sorted(d.iterdir()):
-            if not p.is_file():
-                continue
-            name = p.name
-            if name.endswith(".spec.ts") or name.endswith(".test.ts"):
+            elif name.endswith(".spec.ts") or name.endswith(".test.ts"):
                 specs.append(RunSpec(
                     path=str(p),
                     type="vitest",
@@ -256,8 +257,8 @@ def run_tests(specs: list[RunSpec], timeout: int = 120, round_num: int = 1) -> R
                 spec=spec,
                 passed=proc.returncode == 0,
                 exit_code=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
+                stdout=_cap_output(proc.stdout),
+                stderr=_cap_output(proc.stderr),
                 duration_seconds=elapsed,
             ))
         except subprocess.TimeoutExpired:
@@ -266,8 +267,8 @@ def run_tests(specs: list[RunSpec], timeout: int = 120, round_num: int = 1) -> R
                 spec=spec,
                 passed=False,
                 exit_code=-1,
-                stdout="",
-                stderr=f"Test timed out after {timeout}s",
+                stdout=_cap_output(""),
+                stderr=_cap_output(f"Test timed out after {timeout}s"),
                 duration_seconds=elapsed,
             ))
         except (OSError, ValueError) as exc:
@@ -276,8 +277,8 @@ def run_tests(specs: list[RunSpec], timeout: int = 120, round_num: int = 1) -> R
                 spec=spec,
                 passed=False,
                 exit_code=-2,
-                stdout="",
-                stderr=f"Failed to start: {exc}",
+                stdout=_cap_output(""),
+                stderr=_cap_output(f"Failed to start: {exc}"),
                 duration_seconds=elapsed,
             ))
 

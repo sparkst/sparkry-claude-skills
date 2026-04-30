@@ -17,12 +17,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sys
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,17 +27,30 @@ from typing import Any
 # Resolve sibling tools for imports (hyphenated filenames)
 # ---------------------------------------------------------------------------
 
-from tools._loader import load_sibling as _load_sibling
+try:
+    from tools._loader import load_sibling as _load_sibling
+    from tools._state_io import load_json_state, now_iso, write_state_atomic
+except ImportError:
+    from _loader import load_sibling as _load_sibling
+    from _state_io import load_json_state, now_iso, write_state_atomic
+
+
+_team_selector_mod: Any = None
+_finding_parser_mod: Any = None
 
 
 def _get_team_selector() -> Any:
-    """Lazy-load team-selector module."""
-    return _load_sibling("team-selector.py")
+    global _team_selector_mod
+    if _team_selector_mod is None:
+        _team_selector_mod = _load_sibling("team-selector.py")
+    return _team_selector_mod
 
 
 def _get_finding_parser() -> Any:
-    """Lazy-load finding-parser module."""
-    return _load_sibling("finding-parser.py")
+    global _finding_parser_mod
+    if _finding_parser_mod is None:
+        _finding_parser_mod = _load_sibling("finding-parser.py")
+    return _finding_parser_mod
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -64,41 +74,19 @@ def _state_path(base: str = ".") -> Path:
 
 
 def _read_state(base: str = ".") -> dict[str, Any]:
-    """Read state from disk. Raises FileNotFoundError if missing."""
     path = _state_path(base)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"No loop state found at {path}. Run 'init' first."
-        )
-    with open(path, "r", encoding="utf-8") as fh:
-        return json.load(fh)  # type: ignore[no-any-return]
+    return load_json_state(path, "Run 'init' first.")
 
 
 def _write_state(state: dict[str, Any], base: str = ".") -> None:
-    d = _state_dir(base)
-    d.mkdir(parents=True, exist_ok=True)
-    path = _state_path(base)
-    state["updated_at"] = _now_iso()
-    fd, tmp = tempfile.mkstemp(dir=str(d), suffix='.tmp')
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=2, default=str)
-        os.replace(tmp, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    target = _state_path(base)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_state_atomic(target, state)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 
 def _get_round(state: dict[str, Any], num: int) -> dict[str, Any] | None:
     """Return the round dict for the given round number, or None."""
@@ -122,7 +110,7 @@ def _new_round(round_num: int) -> dict[str, Any]:
         "test_results": {},
         "fix_resolutions": [],
         "synthesis": {},
-        "timestamp": _now_iso(),
+        "timestamp": now_iso(),
     }
 
 
@@ -192,7 +180,6 @@ def init_loop(
     state: dict[str, Any] = {
         "artifact_path": artifact_abs,
         "requirements_path": requirements_abs,
-        "reviewer_count": len(team),
         "threshold": threshold,
         "max_rounds": max(max_rounds, MIN_ROUNDS_HARD),
         "min_rounds": MIN_ROUNDS_HARD,
@@ -200,7 +187,7 @@ def init_loop(
         "team": team,
         "rounds": [_new_round(1)],
         "status": "initialized",
-        "created_at": _now_iso(),
+        "created_at": now_iso(),
     }
 
     _write_state(state, base)
@@ -243,9 +230,13 @@ def next_action(state: dict[str, Any], base_dir: str = ".", confirm: bool = Fals
 
     if status == "escalation_pending":
         if confirm:
-            state["status"] = "reviewing"
             current_round["phase"] = "resolved"
+            next_round_num = current_round_num + 1
+            state["current_round"] = next_round_num
+            state["rounds"].append(_new_round(next_round_num))
+            state["status"] = "initialized"
             _write_state(state, base_dir)
+            return {"action": "run_tests", "round": next_round_num}
         else:
             escalated = [
                 r for r in current_round.get("fix_resolutions", [])
@@ -275,7 +266,7 @@ def next_action(state: dict[str, Any], base_dir: str = ".", confirm: bool = Fals
     if phase == "reviewing":
         # Check if all reviewers have reported
         reviewer_findings = current_round.get("reviewer_findings", [])
-        expected = state.get("reviewer_count", 0)
+        expected = len(state.get("team", []))
         reported = len(reviewer_findings)
         if reported < expected:
             return {
@@ -477,7 +468,7 @@ def record_review(
             f"Round {round_num} is not the current round ({current})."
         )
 
-    reviewer_count = state.get("reviewer_count", 0)
+    reviewer_count = len(state.get("team", []))
     if reviewer_count < 2:
         raise ValueError(
             f"reviewer_count must be at least 2; got {reviewer_count}."
@@ -512,14 +503,14 @@ def record_review(
     reviewer_findings.append({
         "reviewer_index": reviewer_index,
         "findings": findings,
-        "timestamp": _now_iso(),
+        "timestamp": now_iso(),
     })
     rnd["reviewer_findings"] = reviewer_findings
     rnd["phase"] = "reviewing"
     state["status"] = "reviewing"
 
     # Check if all reviewers reported -> auto-synthesize
-    expected = state.get("reviewer_count", 0)
+    expected = len(state.get("team", []))
     if len(reviewer_findings) >= expected:
         # Synthesize — pass test findings as separate reviewer list
         fp = _get_finding_parser()
@@ -535,7 +526,7 @@ def record_review(
             "counts": fp.count_by_severity(synthesized),
             "finding_count": len(synthesized),
             "dropped_count": len(warnings),
-            "timestamp": _now_iso(),
+            "timestamp": now_iso(),
         }
         if warnings:
             rnd["synthesis"]["dropped_findings"] = warnings
@@ -687,29 +678,15 @@ def get_reviewer_prompt(
                 "introduced by the fixes — regressions, broken logic, incomplete changes.",
             ])
 
+    fp = _get_finding_parser()
+    output_instructions = fp.REVIEWER_OUTPUT_INSTRUCTIONS.format(reviewer_name=reviewer_name)
     prompt_parts.extend([
         "",
         "## Instructions",
         "",
         f"Review the artifact against the requirements through your lens of {review_lens}.",
         "",
-        "Output your findings as a JSON array. Each finding must have these fields:",
-        "- id: string matching pattern P[0-3]-NNN (e.g., P0-001, P1-002)",
-        "- severity: one of P0, P1, P2, P3",
-        "- title: concise description of the issue",
-        "- requirement: which requirement this relates to",
-        "- finding: detailed description of the problem",
-        "- recommendation: how to fix it",
-        f'- source: "{reviewer_name}"',
-        "- evidence: file path and line number if applicable",
-        "",
-        "Severity guide:",
-        "- P0: Blocks shipping (correctness, security, data loss, requirement violation)",
-        "- P1: Must fix before v1 (quality, error handling, incomplete coverage)",
-        "- P2: Should fix (code smell, suboptimal pattern, minor UX, doc gap)",
-        "- P3: Nice to have (style, optional optimization, cosmetic)",
-        "",
-        "Output ONLY the JSON array. No other text.",
+        output_instructions,
     ])
 
     return "\n".join(prompt_parts)
@@ -840,7 +817,7 @@ def get_status(base: str = ".") -> dict[str, Any]:
         "min_rounds": state.get("min_rounds", 0),
         "threshold": state.get("threshold", 0),
         "phase": phase,
-        "reviewer_count": state.get("reviewer_count", 0),
+        "reviewer_count": len(state.get("team", [])),
         "findings_count": findings_count,
         "severity_counts": synthesis.get("counts", {}),
         "team": [t.get("name", "") for t in state.get("team", [])],

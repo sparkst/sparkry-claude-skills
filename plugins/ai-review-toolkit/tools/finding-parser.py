@@ -26,6 +26,26 @@ OPTIONAL_FIELDS: list[str] = [
     "evidence",
 ]
 
+REVIEWER_OUTPUT_INSTRUCTIONS: str = """\
+Output your findings as a JSON array. Each finding must have these fields:
+- id: string matching pattern P[0-3]-NNN (e.g., P0-001, P1-002)
+- severity: one of P0, P1, P2, P3
+- title: concise description of the issue
+- requirement: which requirement this relates to
+- finding: detailed description of the problem
+- recommendation: how to fix it
+- source: "{reviewer_name}"
+- evidence: file path and line number if applicable
+
+Severity guide:
+- P0: Blocks shipping (correctness, security, data loss, requirement violation)
+- P1: Must fix before v1 (quality, error handling, incomplete coverage)
+- P2: Should fix (code smell, suboptimal pattern, minor UX, doc gap)
+- P3: Nice to have (style, optional optimization, cosmetic)
+
+Output ONLY the JSON array. No other text.\
+"""
+
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -100,6 +120,7 @@ def deduplicate_findings(findings: list[dict[str, object]]) -> list[dict[str, ob
     """
     buckets: dict[str, dict[str, object]] = {}
     order: list[str] = []
+    key_index: dict[str, int] = {}
 
     for f in findings:
         title_raw: str = str(f.get("title", ""))
@@ -114,7 +135,9 @@ def deduplicate_findings(findings: list[dict[str, object]]) -> list[dict[str, ob
             evidence_items = [str(raw_evidence)]
 
         if key not in buckets:
+            idx = len(order)
             order.append(key)
+            key_index[key] = idx
             merged: dict[str, object] = {
                 "id": f["id"],
                 "severity": f["severity"],
@@ -139,8 +162,7 @@ def deduplicate_findings(findings: list[dict[str, object]]) -> list[dict[str, ob
                 if re.match(r"^P[0-3]-[a-zA-Z0-9]{3,}$", candidate_id):
                     existing["id"] = candidate_id
                 else:
-                    idx = order.index(key)
-                    existing["id"] = f"{new_sev}-dedup-{idx:03d}"
+                    existing["id"] = f"{new_sev}-dedup-{key_index[key]:03d}"
             sources_list: list[str] = existing["sources"]  # type: ignore[assignment]
             if source and source not in sources_list:
                 sources_list.append(source)

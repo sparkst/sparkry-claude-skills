@@ -16,14 +16,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    from tools._state_io import load_json_state, write_state_atomic
+except ImportError:
+    from _state_io import load_json_state, write_state_atomic
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +35,7 @@ from typing import Any
 
 STATE_ROOT = ".qpipeline"
 PROJECTS_DIR = "projects"
+ACTIVE_PROJECT_FILE = "active_project"
 
 PRESETS: dict[str, list[str]] = {
     "review": ["test-gate", "review-loop", "verify"],
@@ -122,6 +126,22 @@ def _state_path(project_id: str, base: str | None = None) -> Path:
 
 def _find_active_project(base: str | None = None) -> str | None:
     """Find the most recently updated non-terminal project."""
+    root = Path(base) if base else Path.cwd()
+    pointer = root / STATE_ROOT / ACTIVE_PROJECT_FILE
+    if pointer.exists():
+        project_id = pointer.read_text(encoding="utf-8").strip()
+        if project_id:
+            state_file = _state_path(project_id, base)
+            if state_file.exists():
+                try:
+                    with open(state_file, "r", encoding="utf-8") as fh:
+                        state = json.load(fh)
+                except (json.JSONDecodeError, OSError):
+                    pass
+                else:
+                    if state.get("status") not in {"converged", "failed", "escalated"}:
+                        return project_id
+
     pdir = _projects_dir(base)
     if not pdir.exists():
         return None
@@ -152,37 +172,15 @@ def _find_active_project(base: str | None = None) -> str | None:
 
 def _read_state(project_id: str, base: str | None = None) -> dict[str, Any]:
     path = _state_path(project_id, base)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"No pipeline state for project '{project_id}' at {path}."
-        )
-    with open(path, "r", encoding="utf-8") as fh:
-        try:
-            return json.load(fh)  # type: ignore[no-any-return]
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Corrupt state file for project '{project_id}' at {path}: {exc}. "
-                f"Delete the file or run reset to recover."
-            ) from exc
+    return load_json_state(path, f"Project '{project_id}' not found.")
 
 
 def _write_state(state: dict[str, Any], base: str | None = None) -> None:
     project_id = state["project_id"]
     d = _project_dir(project_id, base)
     d.mkdir(parents=True, exist_ok=True)
-    state["updated_at"] = datetime.now(timezone.utc).isoformat()
     target = _state_path(project_id, base)
-    fd, tmp_path = tempfile.mkstemp(dir=str(d), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=2, default=str)
-        os.replace(tmp_path, str(target))
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    write_state_atomic(target, state)
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +365,9 @@ def init_pipeline(
         state["max_rounds"] = max_rounds
 
     _write_state(state, base_dir)
+    pointer = (Path(base_dir) if base_dir else Path.cwd()) / STATE_ROOT / ACTIVE_PROJECT_FILE
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(project_id, encoding="utf-8")
     return state
 
 
@@ -588,12 +589,17 @@ def reset(
     base_dir: str | None = None,
 ) -> None:
     """Clear pipeline state for a project, or all projects."""
+    root = Path(base_dir) if base_dir else Path.cwd()
+    pointer = root / STATE_ROOT / ACTIVE_PROJECT_FILE
     if project_id:
         d = _project_dir(project_id, base_dir)
         if d.exists():
             shutil.rmtree(d)
+        if pointer.exists():
+            current = pointer.read_text(encoding="utf-8").strip()
+            if current == project_id:
+                pointer.unlink()
     else:
-        root = Path(base_dir) if base_dir else Path.cwd()
         d = root / STATE_ROOT
         if d.exists():
             shutil.rmtree(d)

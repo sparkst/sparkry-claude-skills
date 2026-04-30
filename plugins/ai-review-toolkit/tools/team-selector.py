@@ -335,25 +335,14 @@ def _score_agent(agent: AgentDef, domain_scores: list[DomainScore]) -> float:
     return sum(domain_map.get(d, 0.0) for d in agent.domains)
 
 
-def select_team(
+def select_team_with_scores(
     description: str,
     artifact_path: str | None = None,
     min_reviewers: int = 2,
     max_reviewers: int = 5,
     catalog_path: str | None = None,
-) -> list[AgentDef]:
-    """Select the optimal review team for the given artifact.
-
-    R3 enforcement: min_reviewers is clamped to >= 2 at tool level.
-
-    Algorithm:
-    1. Classify domains from description + artifact path.
-    2. Score each agent by summing its covered domain scores.
-    3. Always include ``requirements-reviewer`` (universal).
-    4. Sort remaining agents by score descending.
-    5. Pick top N where N = max(min_reviewers, min(max_reviewers,
-       count of agents scoring > 0.3)).
-    """
+) -> tuple[list[AgentDef], list[DomainScore]]:
+    """Select team and return (team, domain_scores) to avoid re-classification."""
     if min_reviewers < 2:
         min_reviewers = 2
     if max_reviewers < min_reviewers:
@@ -362,7 +351,6 @@ def select_team(
     catalog = load_catalog(catalog_path)
     domain_scores = classify_domains(description, artifact_path)
 
-    # Identify requirements-reviewer (always included).
     req_reviewer: AgentDef | None = None
     others: list[tuple[float, AgentDef]] = []
 
@@ -373,30 +361,21 @@ def select_team(
         else:
             others.append((score, agent))
 
-    # Sort others descending by score, stable by catalog order for ties.
     others.sort(key=lambda pair: pair[0], reverse=True)
-
-    # Count how many agents score above threshold.
     above_threshold = sum(1 for score, _ in others if score > 0.3)
-
-    # Desired team size (excluding the mandatory requirements-reviewer).
     desired = max(min_reviewers, min(max_reviewers, above_threshold))
 
-    # The requirements-reviewer counts toward the total.
-    # We want the final list length to satisfy [min_reviewers, max_reviewers].
     team: list[AgentDef] = []
     if req_reviewer is not None:
         team.append(req_reviewer)
 
     slots_remaining = max(desired - len(team), 0)
-    # Also ensure we hit min_reviewers even if requirements-reviewer wasn't found.
     if len(team) < min_reviewers:
         slots_remaining = max(slots_remaining, min_reviewers - len(team))
 
     for _score, agent in others[:slots_remaining]:
         team.append(agent)
 
-    # Final cap.
     team = team[:max_reviewers]
 
     if len(team) < min_reviewers:
@@ -405,6 +384,27 @@ def select_team(
             f"only {len(team)} available"
         )
 
+    return team, domain_scores
+
+
+def select_team(
+    description: str,
+    artifact_path: str | None = None,
+    min_reviewers: int = 2,
+    max_reviewers: int = 5,
+    catalog_path: str | None = None,
+) -> list[AgentDef]:
+    """Select the optimal review team for the given artifact.
+
+    R3 enforcement: min_reviewers is clamped to >= 2 at tool level.
+    """
+    team, _ = select_team_with_scores(
+        description=description,
+        artifact_path=artifact_path,
+        min_reviewers=min_reviewers,
+        max_reviewers=max_reviewers,
+        catalog_path=catalog_path,
+    )
     return team
 
 
@@ -460,8 +460,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        domain_scores = classify_domains(args.description, args.artifact)
-        team = select_team(
+        team, domain_scores = select_team_with_scores(
             args.description,
             artifact_path=args.artifact,
             min_reviewers=args.min_reviewers,
