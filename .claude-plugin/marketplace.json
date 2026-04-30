@@ -220,6 +220,16 @@
       "keywords": ["interview", "discovery-call", "synthesis", "consulting", "pain-points"],
       "category": "consulting",
       "tags": ["discovery-call", "interview-synthesis", "note-taking", "consulting"]
+    },
+    {
+      "name": "ai-review-toolkit",
+      "source": "./plugins/ai-review-toolkit",
+      "description": "Type-agnostic multi-agent review toolkit. Spawn N clean-context reviewers to evaluate any artifact against requirements. Iterative review-fix cycles with deterministic convergence.",
+      "version": "1.0.0",
+      "license": "MIT",
+      "keywords": ["review", "multi-agent", "quality", "pipeline", "type-agnostic"],
+      "category": "development",
+      "tags": ["qreview", "qloop", "qpipeline", "multi-agent-review", "convergence"]
     }
   ]
 }
