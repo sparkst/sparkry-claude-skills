@@ -192,16 +192,6 @@
       "tags": ["qdesign", "ux-design", "ui-prototyping"]
     },
     {
-      "name": "quality-extras",
-      "source": "./plugins/quality-extras",
-      "description": "Extended quality review tools — deep code review with architecture and security analysis",
-      "version": "1.0.0",
-      "license": "MIT",
-      "keywords": ["quality", "review", "architecture", "security", "code-quality"],
-      "category": "development",
-      "tags": ["qreview", "code-review", "architecture-review"]
-    },
-    {
       "name": "writing-swarms",
       "source": "./plugins/writing-swarms",
       "description": "Multi-agent creative writing swarms — headline generation and soundbite crafting with scoring rubrics",
