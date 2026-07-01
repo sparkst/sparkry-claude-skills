@@ -17,6 +17,7 @@ normalize_model = scorecard.normalize_model
 load_pricing = scorecard.load_pricing
 token_cost = scorecard.token_cost
 aggregate_transcript = scorecard.aggregate_transcript
+aggregate_workflow = scorecard.aggregate_workflow
 build_scorecard = scorecard.build_scorecard
 render_markdown = scorecard.render_markdown
 main = scorecard.main
@@ -129,6 +130,104 @@ class TestAggregateTranscript:
 
 
 # ---------------------------------------------------------------------------
+# Workflow aggregation (ultracode Workflow runs) — per-agent wall-clock deltas
+# rolled per model + tokens from agent-*.jsonl; wall-clock total from wf json.
+# ---------------------------------------------------------------------------
+
+def _agent_line(model, ts, inp=0, out=0, cr=0, cc=0):
+    # Mirrors an agent-*.jsonl usage line: NO durationMs field (per real runs).
+    return {
+        "timestamp": ts,
+        "message": {
+            "model": model,
+            "usage": {
+                "input_tokens": inp,
+                "output_tokens": out,
+                "cache_read_input_tokens": cr,
+                "cache_creation_input_tokens": cc,
+            },
+        },
+    }
+
+
+class TestAggregateWorkflow:
+    def test_tokens_summed_per_model_across_agents(self):
+        agents = {
+            "a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=100, out=20)],
+            "a2": [_agent_line("claude-sonnet-5", "2026-07-01T01:00:00Z", inp=200, out=30)],
+        }
+        agg = aggregate_workflow(agents)
+        assert agg["by_model"]["opus"]["input"] == 100
+        assert agg["by_model"]["sonnet"]["input"] == 200
+        assert agg["by_model"]["opus"]["requests"] == 1
+
+    def test_per_agent_duration_is_last_minus_first_timestamp(self):
+        agents = {
+            # spans 3s (first->last line), even though lines carry no durationMs
+            "a1": [
+                _agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=10),
+                {"timestamp": "2026-07-01T01:00:03Z", "message": {"content": "tool"}},
+                _agent_line("claude-opus-4-8", "2026-07-01T01:00:03Z", out=5),
+            ],
+        }
+        agg = aggregate_workflow(agents)
+        assert agg["by_model"]["opus"]["duration_ms"] == 3000
+        assert agg["by_model"]["opus"]["agents"] == 1
+        assert agg["total"]["duration_ms"] == 3000
+        assert agg["total"]["agents"] == 1
+
+    def test_two_agents_same_model_sum_durations_and_agent_count(self):
+        agents = {
+            "a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1),
+                   _agent_line("claude-opus-4-8", "2026-07-01T01:00:02Z", out=1)],
+            "a2": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1),
+                   _agent_line("claude-opus-4-8", "2026-07-01T01:00:05Z", out=1)],
+        }
+        agg = aggregate_workflow(agents)
+        assert agg["by_model"]["opus"]["duration_ms"] == 7000
+        assert agg["by_model"]["opus"]["agents"] == 2
+
+    def test_workflow_meta_supplies_wall_clock_total(self):
+        agents = {"a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1)]}
+        meta = {"runId": "wf_x", "durationMs": 221855, "agentCount": 5,
+                "status": "completed", "totalTokens": 310307,
+                "workflowProgress": [
+                    {"type": "workflow_phase", "index": 1, "title": "Profile",
+                     "startedAt": 1782869054158, "durationMs": 178000},
+                    {"type": "workflow_phase", "index": 2, "title": "Synthesize"},
+                ]}
+        agg = aggregate_workflow(agents, meta)
+        assert agg["workflow"]["wall_clock_ms"] == 221855
+        assert agg["workflow"]["agent_count"] == 5
+        assert agg["workflow"]["status"] == "completed"
+        # only phases with a durationMs are surfaced
+        assert agg["workflow"]["phases"] == [{"title": "Profile", "duration_ms": 178000}]
+
+
+class TestBuildScorecardWorkflow:
+    def test_time_section_carries_workflow_wall_clock_and_agent_counts(self):
+        agents = {
+            "a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1000, out=1),
+                   _agent_line("claude-opus-4-8", "2026-07-01T01:00:04Z", out=1)],
+        }
+        meta = {"runId": "wf_x", "durationMs": 5000, "agentCount": 1, "status": "completed"}
+        agg = aggregate_workflow(agents, meta)
+        report = build_scorecard({}, agg, load_pricing())
+        assert report["time"]["workflow_wall_clock_ms"] == 5000
+        assert report["time"]["by_model_agents"]["opus"] == 1
+        assert report["time"]["by_model_ms"]["opus"] == 4000
+
+    def test_render_shows_workflow_wall_clock_line(self):
+        agents = {"a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1),
+                         _agent_line("claude-opus-4-8", "2026-07-01T01:00:04Z", out=1)]}
+        meta = {"runId": "wf_x", "durationMs": 5000, "agentCount": 1, "status": "completed"}
+        report = build_scorecard({}, aggregate_workflow(agents, meta), load_pricing())
+        md = render_markdown(report)
+        assert "workflow total (wall-clock)" in md.lower()
+        assert "opus" in md
+
+
+# ---------------------------------------------------------------------------
 # Scorecard assembly
 # ---------------------------------------------------------------------------
 
@@ -230,3 +329,50 @@ class TestCLI:
         assert rc == 0
         out = capsys.readouterr().out
         assert "unavailable" in out.lower()
+
+
+class TestCLIWorkflow:
+    def _write_workflow_run(self, tmp_path):
+        """Lay out a realistic <session>/workflows + subagents/workflows tree."""
+        run_id = "wf_test123"
+        session = tmp_path / "session"
+        wf_dir = session / "workflows"
+        agents_dir = session / "subagents" / "workflows" / run_id
+        wf_dir.mkdir(parents=True)
+        agents_dir.mkdir(parents=True)
+
+        wf_json = wf_dir / f"{run_id}.json"
+        wf_json.write_text(json.dumps({
+            "runId": run_id, "durationMs": 6000, "agentCount": 2,
+            "status": "completed", "totalTokens": 9999,
+            "workflowProgress": [
+                {"type": "workflow_phase", "index": 1, "title": "Profile",
+                 "startedAt": 1, "durationMs": 4000},
+            ],
+        }))
+        (agents_dir / "agent-aaa.jsonl").write_text("\n".join(json.dumps(l) for l in [
+            _agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1000, out=100),
+            _agent_line("claude-opus-4-8", "2026-07-01T01:00:03Z", out=50),
+        ]))
+        (agents_dir / "agent-bbb.jsonl").write_text("\n".join(json.dumps(l) for l in [
+            _agent_line("claude-sonnet-5", "2026-07-01T01:00:00Z", inp=2000, out=200),
+        ]))
+        return wf_json
+
+    def test_cli_workflow_json_output(self, tmp_path, capsys):
+        wf_json = self._write_workflow_run(tmp_path)
+        rc = main(["--workflow", str(wf_json), "--json"])
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["tokens"]["by_model"]["opus"]["input"] == 1000
+        assert payload["tokens"]["by_model"]["sonnet"]["input"] == 2000
+        assert payload["time"]["workflow_wall_clock_ms"] == 6000
+        assert payload["time"]["by_model_ms"]["opus"] == 3000
+
+    def test_cli_workflow_markdown_default(self, tmp_path, capsys):
+        wf_json = self._write_workflow_run(tmp_path)
+        rc = main(["--workflow", str(wf_json)])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Token" in out
+        assert "workflow total (wall-clock)" in out.lower()
