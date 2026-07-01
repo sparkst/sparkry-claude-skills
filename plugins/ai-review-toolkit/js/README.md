@@ -14,6 +14,33 @@ model tiering — stays deterministic in-code rather than relying on an LLM agen
   `formatFindings`, `buildReviewerPrompt`, `buildFixerPrompt` (pure; the workflow
   reads files and passes content in).
 
+## The Workflow script
+
+- **`review-loop.workflow.js`** — the ultracode Workflow that runs the
+  review→synthesize→gate→fix convergence loop (qreview = `rounds:1`, qloop =
+  until-converged). **Generated, not hand-edited.**
+- **`review-loop.template.js`** — the orchestration source (meta + loop) with a
+  `// @@INLINE@@` marker.
+- **`build-workflow.mjs`** — assembles `review-loop.workflow.js` by inlining
+  `adjudication.mjs` + `prompts.mjs` into the template (`--write`/`--check`).
+
+The Workflow sandbox can't `import` sibling modules at runtime, so the
+deterministic JS is **inlined** into one self-contained script. `adjudication.mjs`
+stays the single, node-tested source of truth; `build-workflow.test.mjs` runs
+`--check` in CI to forbid drift. To change the loop's adjudication, edit
+`adjudication.mjs`/`prompts.mjs` (or the template) then `node build-workflow.mjs --write`.
+
+Design constraints the workflow works within:
+- **Team via `args`.** `team-selector.py` stays Python (the oracle), so the skill
+  resolves reviewer models upstream and passes `args.team` in.
+- **Path-based prompts.** The sandboxed script can't read files; reviewer/fixer
+  agents `Read`/`Edit` the artifact themselves. Prior-round findings (held in
+  memory by the script) are still embedded via `formatFindings`.
+- **In-place fixer, no worktree isolation.** Fixes persist so the next round's
+  reviewers see them.
+- Loop semantics mirror `loop-driver.py`: min-2-rounds floor, fix-ALL gate,
+  stuck detection, max-rounds escalation.
+
 ## Drift lock (Python is the oracle)
 
 The Python in `../tools/` remains the source of truth. Each JS module is validated
