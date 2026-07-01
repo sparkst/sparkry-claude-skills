@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = join(HERE, "review-loop.template.js");
 const OUTPUT = join(HERE, "review-loop.workflow.js");
-const INLINE_SOURCES = ["adjudication.mjs", "prompts.mjs"];
+const INLINE_SOURCES = ["adjudication.mjs", "prompts.mjs", "workflow-helpers.mjs"];
 const MARKER_TOKEN = "@@INLINE@@";
 // Match the ENTIRE marker line so no trailing text on it can leak into code.
 const MARKER_LINE = /^[^\n]*@@INLINE@@[^\n]*$/m;

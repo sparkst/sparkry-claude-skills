@@ -572,6 +572,35 @@ If a finding is genuinely unfixable (requires external dependency, architectural
 Output a JSON array of resolution objects. No other text.`;
 }
 
+// ===== inlined from workflow-helpers.mjs (generated; edit workflow-helpers.mjs, then rebuild) =====
+// Orchestration-only helpers for review-loop.workflow.js.
+//
+// These are NOT part of the Python-oracle adjudication contract (they have no
+// Python equivalent), so they live outside adjudication.mjs and are inlined
+// into the generated workflow separately. Pure functions; unit-tested by
+// workflow-helpers.test.mjs.
+
+/**
+ * Make finding IDs unique within a synthesized set.
+ *
+ * Reviewers number their own findings independently (P0-001, P0-002, ...), so
+ * two distinct findings from two reviewers routinely collide on the same id.
+ * Dedup merges by *title*, not id, so collisions survive synthesis — which
+ * breaks the id-keyed fix-ALL gate (checkFixCompleteness) and tempts the fixer
+ * to invent disambiguated ids that then match nothing. This suffixes each
+ * collision deterministically (`P0-001`, `P0-001-2`, `P0-001-3`, …), preserving
+ * order and leaving already-unique ids untouched.
+ */
+function ensureUniqueIds(findings) {
+  const counts = new Map();
+  return findings.map((f) => {
+    const id = String(f.id ?? "");
+    const n = (counts.get(id) ?? 0) + 1;
+    counts.set(id, n);
+    return n === 1 ? f : { ...f, id: `${id}-${n}` };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Structured-output schemas (agents are forced to return these shapes)
 // ---------------------------------------------------------------------------
@@ -719,9 +748,13 @@ function fixerPrompt(artifact, requirements, testSummary, findings) {
     '## Instructions',
     '',
     'Fix EVERY finding above, regardless of severity (P0 through P3). Apply the edits to the artifact on disk.',
-    'For each finding, return a resolution: finding_id, status ("FIXED" with evidence, or "ESCALATED" with',
-    'justification if genuinely unfixable — no WONTFIX/DEFERRED/OUT_OF_SCOPE), evidence (what changed and where),',
-    'and description.',
+    'For each finding, return a resolution with these fields:',
+    '- finding_id: copy the finding\'s id EXACTLY as shown in its heading above (e.g. "P0-001" or',
+    '  "P0-001-2") — verbatim, do NOT shorten, rename, or append anything to it. The gate matches ids literally.',
+    '- status: "FIXED" (with evidence) or "ESCALATED" (with justification if genuinely unfixable). No',
+    '  WONTFIX/DEFERRED/OUT_OF_SCOPE.',
+    '- evidence: what changed and where (file:line).',
+    '- description: brief explanation of the fix.',
   ].join('\n')
 }
 
@@ -789,7 +822,10 @@ for (let r = 1; r <= maxRounds; r++) {
   if (test?.failures?.length) reviewerLists.push(test.failures)
 
   const dropped = []
-  const findings = synthesizeFindings(reviewerLists, dropped)
+  // Reviewers number findings independently, so distinct findings collide on
+  // ids (e.g. two P0-001s). Make them unique so the id-keyed fix-ALL gate is
+  // meaningful and the fixer can echo exact ids.
+  const findings = ensureUniqueIds(synthesizeFindings(reviewerLists, dropped))
   const counts = countBySeverity(findings)
   const { converged, message } = checkConvergence(findings, threshold)
   roundReports.push({ round: r, findings, counts, dropped: dropped.length, converged, message })
