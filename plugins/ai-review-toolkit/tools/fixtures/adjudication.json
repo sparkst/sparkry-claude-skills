@@ -1,0 +1,993 @@
+{
+  "cases": {
+    "check_convergence": [
+      {
+        "expected": {
+          "converged": true,
+          "message": "converged"
+        },
+        "input": {
+          "findings": []
+        },
+        "name": "zero_findings_converged"
+      },
+      {
+        "expected": {
+          "converged": false,
+          "message": "1 P0 finding(s) remain"
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P0-a",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "r1",
+              "title": "a"
+            }
+          ]
+        },
+        "name": "p0_blocks"
+      },
+      {
+        "expected": {
+          "converged": false,
+          "message": "1 P1 finding(s) remain"
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-a",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "a"
+            }
+          ]
+        },
+        "name": "p1_blocks"
+      },
+      {
+        "expected": {
+          "converged": true,
+          "message": "converged"
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P2-a",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "a"
+            }
+          ],
+          "threshold": 1
+        },
+        "name": "low_within_threshold"
+      },
+      {
+        "expected": {
+          "converged": false,
+          "message": "2 low-severity finding(s) exceed threshold (1)"
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P2-a",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "a"
+            },
+            {
+              "finding": "f",
+              "id": "P3-b",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P3",
+              "source": "r1",
+              "title": "b"
+            }
+          ],
+          "threshold": 1
+        },
+        "name": "low_over_threshold"
+      },
+      {
+        "expected": {
+          "converged": false,
+          "message": "no valid findings to evaluate \u2014 expected at least 1, got 0"
+        },
+        "input": {
+          "findings": [],
+          "min_findings": 1
+        },
+        "name": "min_findings_guard"
+      }
+    ],
+    "check_fix_completeness": [
+      {
+        "expected": {
+          "complete": true,
+          "missing": []
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "A"
+            }
+          ],
+          "resolutions": [
+            {
+              "evidence": "a.py:1",
+              "finding_id": "P1-aaa",
+              "status": "FIXED"
+            }
+          ]
+        },
+        "name": "all_fixed_complete"
+      },
+      {
+        "expected": {
+          "complete": false,
+          "missing": [
+            "P2-bbb"
+          ]
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "A"
+            },
+            {
+              "finding": "f",
+              "id": "P2-bbb",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "B"
+            }
+          ],
+          "resolutions": [
+            {
+              "evidence": "a.py:1",
+              "finding_id": "P1-aaa",
+              "status": "FIXED"
+            }
+          ]
+        },
+        "name": "missing_resolution"
+      },
+      {
+        "expected": {
+          "complete": false,
+          "missing": [
+            "P1-aaa"
+          ]
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "A"
+            }
+          ],
+          "resolutions": [
+            {
+              "evidence": "x",
+              "finding_id": "P1-aaa",
+              "status": "WONTFIX"
+            }
+          ]
+        },
+        "name": "prohibited_status_invalid"
+      },
+      {
+        "expected": {
+          "complete": true,
+          "missing": []
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "A"
+            }
+          ],
+          "resolutions": [
+            {
+              "evidence": "needs arch change",
+              "finding_id": "P1-aaa",
+              "status": "ESCALATED"
+            }
+          ]
+        },
+        "name": "escalated_counts_as_resolved"
+      },
+      {
+        "expected": {
+          "complete": false,
+          "missing": [
+            "P1-aaa"
+          ]
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "A"
+            }
+          ],
+          "resolutions": [
+            {
+              "evidence": "",
+              "finding_id": "P1-aaa",
+              "status": "FIXED"
+            }
+          ]
+        },
+        "name": "fixed_without_evidence_invalid"
+      }
+    ],
+    "count_by_severity": [
+      {
+        "expected": {
+          "P0": 0,
+          "P1": 0,
+          "P2": 0,
+          "P3": 0
+        },
+        "input": {
+          "findings": []
+        },
+        "name": "empty"
+      },
+      {
+        "expected": {
+          "P0": 2,
+          "P1": 1,
+          "P2": 1,
+          "P3": 1
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P0-a",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "r1",
+              "title": "a"
+            },
+            {
+              "finding": "f",
+              "id": "P1-b",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "b"
+            },
+            {
+              "finding": "f",
+              "id": "P2-c",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "c"
+            },
+            {
+              "finding": "f",
+              "id": "P3-d",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P3",
+              "source": "r1",
+              "title": "d"
+            },
+            {
+              "finding": "f",
+              "id": "P0-e",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "r1",
+              "title": "e"
+            }
+          ]
+        },
+        "name": "mixed"
+      },
+      {
+        "expected": {
+          "P0": 0,
+          "P1": 0,
+          "P2": 2,
+          "P3": 0
+        },
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P2-a",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "a"
+            },
+            {
+              "finding": "f",
+              "id": "P2-b",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "b"
+            }
+          ]
+        },
+        "name": "all_p2"
+      }
+    ],
+    "deduplicate_findings": [
+      {
+        "expected": [],
+        "input": {
+          "findings": []
+        },
+        "name": "empty"
+      },
+      {
+        "expected": [
+          {
+            "evidence": [],
+            "finding": "f",
+            "id": "P1-aaa",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P1",
+            "source": "r1",
+            "sources": [
+              "r1"
+            ],
+            "title": "A"
+          },
+          {
+            "evidence": [],
+            "finding": "f",
+            "id": "P2-bbb",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P2",
+            "source": "r1",
+            "sources": [
+              "r1"
+            ],
+            "title": "B"
+          }
+        ],
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "A"
+            },
+            {
+              "finding": "f",
+              "id": "P2-bbb",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "B"
+            }
+          ]
+        },
+        "name": "no_dupes"
+      },
+      {
+        "expected": [
+          {
+            "evidence": [],
+            "finding": "f",
+            "id": "P0-aaa",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P0",
+            "source": "r1",
+            "sources": [
+              "r1",
+              "r2"
+            ],
+            "title": "Same Bug"
+          }
+        ],
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P2-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "r1",
+              "title": "Same Bug"
+            },
+            {
+              "finding": "f",
+              "id": "P0-bbb",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "r2",
+              "title": "same bug"
+            }
+          ]
+        },
+        "name": "max_severity_wins"
+      },
+      {
+        "expected": [
+          {
+            "evidence": [],
+            "finding": "f",
+            "id": "P1-aaa",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P1",
+            "source": "r1",
+            "sources": [
+              "r1",
+              "r2"
+            ],
+            "title": "  SQL   Injection "
+          }
+        ],
+        "input": {
+          "findings": [
+            {
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "  SQL   Injection "
+            },
+            {
+              "finding": "f",
+              "id": "P1-ccc",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r2",
+              "title": "sql injection"
+            }
+          ]
+        },
+        "name": "normalized_title_whitespace_case"
+      },
+      {
+        "expected": [
+          {
+            "evidence": [
+              "a.py:1",
+              "b.py:2"
+            ],
+            "finding": "f",
+            "id": "P1-aaa",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P1",
+            "source": "r1",
+            "sources": [
+              "r1",
+              "r2"
+            ],
+            "title": "Bug"
+          }
+        ],
+        "input": {
+          "findings": [
+            {
+              "evidence": [
+                "a.py:1"
+              ],
+              "finding": "f",
+              "id": "P1-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r1",
+              "title": "Bug"
+            },
+            {
+              "evidence": [
+                "b.py:2"
+              ],
+              "finding": "f",
+              "id": "P1-bbb",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P1",
+              "source": "r2",
+              "title": "bug"
+            }
+          ]
+        },
+        "name": "sources_and_evidence_aggregate"
+      }
+    ],
+    "resolve_reviewer_model": [
+      {
+        "expected": "opus",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "security-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 1,
+            "tool_types": 1
+          }
+        },
+        "name": "security_always_opus"
+      },
+      {
+        "expected": "opus",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "architecture-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 1,
+            "tool_types": 1
+          }
+        },
+        "name": "architecture_always_opus"
+      },
+      {
+        "expected": "sonnet",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "code-quality-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 1,
+            "tool_types": 1
+          }
+        },
+        "name": "simple_stays_sonnet"
+      },
+      {
+        "expected": "opus",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "ux-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 2,
+            "tool_types": 1
+          }
+        },
+        "name": "multi_file_escalates"
+      },
+      {
+        "expected": "opus",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "ux-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 1,
+            "tool_types": 3
+          }
+        },
+        "name": "three_tool_types_escalates"
+      },
+      {
+        "expected": "sonnet",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "ux-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 1,
+            "tool_types": 2
+          }
+        },
+        "name": "two_tool_types_stays"
+      },
+      {
+        "expected": "opus",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "ux-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.21,
+            "file_count": 1,
+            "tool_types": 1
+          }
+        },
+        "name": "over_20pct_context_escalates"
+      },
+      {
+        "expected": "sonnet",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "ux-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.2,
+            "file_count": 1,
+            "tool_types": 1
+          }
+        },
+        "name": "at_20pct_context_stays"
+      }
+    ],
+    "synthesize_findings": [
+      {
+        "expected": {
+          "dropped": [],
+          "findings": []
+        },
+        "input": {
+          "reviewer_results": [
+            [],
+            []
+          ]
+        },
+        "name": "empty"
+      },
+      {
+        "expected": {
+          "dropped": [],
+          "findings": [
+            {
+              "evidence": [],
+              "finding": "f",
+              "id": "P0-aaa",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "r1",
+              "sources": [
+                "r1",
+                "r2"
+              ],
+              "title": "Shared"
+            },
+            {
+              "evidence": [],
+              "finding": "f",
+              "id": "P3-ccc",
+              "recommendation": "fix it",
+              "requirement": "REQ-1",
+              "severity": "P3",
+              "source": "r2",
+              "sources": [
+                "r2"
+              ],
+              "title": "Minor"
+            }
+          ]
+        },
+        "input": {
+          "reviewer_results": [
+            [
+              {
+                "finding": "f",
+                "id": "P2-aaa",
+                "recommendation": "fix it",
+                "requirement": "REQ-1",
+                "severity": "P2",
+                "source": "r1",
+                "title": "Shared"
+              }
+            ],
+            [
+              {
+                "finding": "f",
+                "id": "P0-bbb",
+                "recommendation": "fix it",
+                "requirement": "REQ-1",
+                "severity": "P0",
+                "source": "r2",
+                "title": "shared"
+              },
+              {
+                "finding": "f",
+                "id": "P3-ccc",
+                "recommendation": "fix it",
+                "requirement": "REQ-1",
+                "severity": "P3",
+                "source": "r2",
+                "title": "Minor"
+              }
+            ]
+          ]
+        },
+        "name": "dedup_and_sort_p0_first"
+      },
+      {
+        "expected": {
+          "dropped": [
+            {
+              "errors": [
+                "invalid id format 'P1-ok'; expected pattern P[0-3]-<alphanumeric 3+>"
+              ],
+              "finding": {
+                "finding": "f",
+                "id": "P1-ok",
+                "recommendation": "fix it",
+                "requirement": "REQ-1",
+                "severity": "P1",
+                "source": "r1",
+                "title": "Good"
+              }
+            },
+            {
+              "errors": [
+                "missing required field: title",
+                "missing required field: requirement",
+                "missing required field: finding",
+                "missing required field: recommendation",
+                "missing required field: source",
+                "invalid severity 'P9'; must be one of ['P0', 'P1', 'P2', 'P3']",
+                "invalid id format 'bad'; expected pattern P[0-3]-<alphanumeric 3+>"
+              ],
+              "finding": {
+                "id": "bad",
+                "severity": "P9"
+              }
+            }
+          ],
+          "findings": []
+        },
+        "input": {
+          "reviewer_results": [
+            [
+              {
+                "finding": "f",
+                "id": "P1-ok",
+                "recommendation": "fix it",
+                "requirement": "REQ-1",
+                "severity": "P1",
+                "source": "r1",
+                "title": "Good"
+              },
+              {
+                "id": "bad",
+                "severity": "P9"
+              }
+            ]
+          ]
+        },
+        "name": "invalid_findings_dropped"
+      }
+    ],
+    "validate_finding": [
+      {
+        "expected": {
+          "errors": [],
+          "valid": true
+        },
+        "input": {
+          "finding": {
+            "finding": "f",
+            "id": "P0-abc",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P0",
+            "source": "r1",
+            "title": "T"
+          }
+        },
+        "name": "valid"
+      },
+      {
+        "expected": {
+          "errors": [
+            "missing required field: requirement",
+            "missing required field: finding",
+            "missing required field: recommendation",
+            "missing required field: source"
+          ],
+          "valid": false
+        },
+        "input": {
+          "finding": {
+            "id": "P0-abc",
+            "severity": "P0",
+            "title": "T"
+          }
+        },
+        "name": "missing_required_field"
+      },
+      {
+        "expected": {
+          "errors": [
+            "missing required field: title"
+          ],
+          "valid": false
+        },
+        "input": {
+          "finding": {
+            "finding": "f",
+            "id": "P0-abc",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P0",
+            "source": "r1",
+            "title": "   "
+          }
+        },
+        "name": "empty_string_field"
+      },
+      {
+        "expected": {
+          "errors": [
+            "invalid severity 'P9'; must be one of ['P0', 'P1', 'P2', 'P3']"
+          ],
+          "valid": false
+        },
+        "input": {
+          "finding": {
+            "finding": "f",
+            "id": "P0-abc",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P9",
+            "source": "r1",
+            "title": "T"
+          }
+        },
+        "name": "bad_severity"
+      },
+      {
+        "expected": {
+          "errors": [
+            "invalid id format 'XX'; expected pattern P[0-3]-<alphanumeric 3+>"
+          ],
+          "valid": false
+        },
+        "input": {
+          "finding": {
+            "finding": "f",
+            "id": "XX",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P0",
+            "source": "r1",
+            "title": "T"
+          }
+        },
+        "name": "malformed_id"
+      },
+      {
+        "expected": {
+          "errors": [
+            "id/severity mismatch: id 'P1-abc' does not start with severity 'P0'"
+          ],
+          "valid": false
+        },
+        "input": {
+          "finding": {
+            "finding": "f",
+            "id": "P1-abc",
+            "recommendation": "fix it",
+            "requirement": "REQ-1",
+            "severity": "P0",
+            "source": "r1",
+            "title": "T"
+          }
+        },
+        "name": "id_severity_mismatch"
+      }
+    ]
+  },
+  "meta": {
+    "purpose": "golden adjudication corpus generated from the Python oracle; the JS port must reproduce it exactly",
+    "regenerate": "python3 gen-golden-fixtures.py --write"
+  }
+}
