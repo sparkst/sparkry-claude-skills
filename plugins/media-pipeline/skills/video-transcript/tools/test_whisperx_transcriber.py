@@ -163,12 +163,14 @@ class TestWhisperXTranscription:
         def progress_callback(data: Dict[str, Any]):
             progress_updates.append(data)
 
-        def mock_run_whisperx_with_progress(audio_path, model, language, diarize, hf_token, callback=None):
-            # Simulate progress updates
-            if callback:
-                callback({"stage": "loading_model", "percent": 0})
-                callback({"stage": "transcribing", "percent": 50})
-                callback({"stage": "complete", "percent": 100})
+        def mock_run_whisperx_with_progress(audio_path, model, language, diarize, hf_token,
+                                            progress_callback=None, **kwargs):
+            # Simulate progress updates. Signature mirrors the real _run_whisperx,
+            # which takes progress_callback= plus num/min/max_speakers kwargs.
+            if progress_callback:
+                progress_callback({"stage": "loading_model", "percent": 0})
+                progress_callback({"stage": "transcribing", "percent": 50})
+                progress_callback({"stage": "complete", "percent": 100})
             return (mock_whisperx_result, 2)
 
         with patch('whisperx_transcriber.WHISPERX_AVAILABLE', True), \
