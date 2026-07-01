@@ -16,6 +16,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install test deps
         # pyyaml is a runtime import in integrations-trello (trello_integration.py)
         run: pip install pytest pyyaml
@@ -25,6 +29,9 @@ jobs:
 
       - name: Run ai-review-toolkit tests
         run: python3 -m pytest plugins/ai-review-toolkit/tools/ -x -q
+
+      - name: Run ai-review-toolkit JS parity tests
+        run: node --test 'plugins/ai-review-toolkit/js/**/*.test.mjs'
 
       - name: Run integrations-trello tests
         run: python3 -m pytest plugins/integrations-trello/skills/trello/scripts/ -x -q
