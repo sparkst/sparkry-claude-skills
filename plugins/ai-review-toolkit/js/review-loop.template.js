@@ -7,7 +7,7 @@ export const meta = {
   ],
 }
 
-// @@INLINE@@  (build-workflow.mjs injects adjudication.mjs + prompts.mjs here)
+// @@INLINE@@ build-workflow.mjs replaces this whole line with adjudication.mjs + prompts.mjs
 
 // ---------------------------------------------------------------------------
 // Structured-output schemas (agents are forced to return these shapes)
@@ -166,13 +166,16 @@ function fixerPrompt(artifact, requirements, testSummary, findings) {
 // The convergence loop — mirrors loop-driver.py's state machine.
 // ---------------------------------------------------------------------------
 
-const artifact = args?.artifact
-const requirements = args?.requirements
-const team = args?.team || []
-const threshold = args?.threshold ?? 0
-const singleRound = args?.rounds === 1
+// `args` may arrive as a parsed object or a JSON string, depending on how the
+// Workflow was invoked; tolerate both.
+const A = typeof args === "string" ? JSON.parse(args) : (args || {})
+const artifact = A.artifact
+const requirements = A.requirements
+const team = A.team || []
+const threshold = A.threshold ?? 0
+const singleRound = A.rounds === 1
 const minRounds = singleRound ? 1 : 2
-const maxRounds = Math.max(args?.maxRounds ?? (singleRound ? 1 : 5), minRounds)
+const maxRounds = Math.max(A.maxRounds ?? (singleRound ? 1 : 5), minRounds)
 
 if (!artifact || !requirements) throw new Error('review-loop requires args.artifact and args.requirements')
 if (team.length < 2 && !singleRound) throw new Error('review-loop requires at least 2 reviewers (args.team)')

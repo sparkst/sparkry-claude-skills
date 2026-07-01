@@ -21,7 +21,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = join(HERE, "review-loop.template.js");
 const OUTPUT = join(HERE, "review-loop.workflow.js");
 const INLINE_SOURCES = ["adjudication.mjs", "prompts.mjs"];
-const MARKER = "// @@INLINE@@";
+const MARKER_TOKEN = "@@INLINE@@";
+// Match the ENTIRE marker line so no trailing text on it can leak into code.
+const MARKER_LINE = /^[^\n]*@@INLINE@@[^\n]*$/m;
 
 // Strip ES module syntax so the source can live as plain top-level declarations
 // inside the workflow script: drop `export ` prefixes and any import lines.
@@ -36,8 +38,8 @@ function stripModuleSyntax(src) {
 
 function build() {
   const template = readFileSync(TEMPLATE, "utf8");
-  if (!template.includes(MARKER)) {
-    throw new Error(`template is missing the ${MARKER} injection marker`);
+  if (!MARKER_LINE.test(template)) {
+    throw new Error(`template is missing the ${MARKER_TOKEN} injection marker`);
   }
 
   const inlined = INLINE_SOURCES.map((name) => {
@@ -50,7 +52,11 @@ function build() {
     "// Source: review-loop.template.js + adjudication.mjs + prompts.mjs.\n" +
     "// Regenerate: node build-workflow.mjs --write\n";
 
-  return banner + "\n" + template.replace(MARKER, inlined) + "\n";
+  const generated = banner + "\n" + template.replace(MARKER_LINE, inlined) + "\n";
+  if (generated.includes(MARKER_TOKEN)) {
+    throw new Error("injection marker survived into generated output");
+  }
+  return generated;
 }
 
 function main() {
