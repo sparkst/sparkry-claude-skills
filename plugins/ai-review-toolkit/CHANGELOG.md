@@ -1,5 +1,25 @@
 # Changelog — ai-review-toolkit
 
+## 1.2.0
+
+### Changed
+- **`/qreview` and `/qloop` now run on the ultracode Workflow engine.** Both
+  SKILLs are thin wrappers that resolve the review team via `team-selector.py`
+  (deterministic model tiering, unchanged) and invoke `js/review-loop.workflow.js`
+  — one Workflow script that owns parallel reviewer fan-out, JS synthesis/dedup,
+  the fix-ALL gate, the min-2-rounds floor, stuck detection, and max-rounds
+  escalation. `/qreview` = `rounds:1` (diagnose-only); `/qloop` = until-converged
+  with a single in-place fixer per round. Invoking the skill is the explicit
+  opt-in to run the Workflow.
+- The deterministic adjudication is now the JS port (`js/adjudication.mjs`),
+  drift-locked byte-for-byte against the Python oracle in CI; `scorecard.py`
+  reads Workflow runs via `--workflow`.
+
+### Deprecated
+- The hand-driven Python drivers (`review-driver.py`, `loop-driver.py`) are
+  retained for one release as a fallback (`skills/*/driver-fallback.md`) and
+  will be removed once the Workflow path is proven (step 7).
+
 ## 1.1.0
 
 ### Added
