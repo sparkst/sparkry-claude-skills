@@ -32,6 +32,13 @@ Run `tools/review-driver.py init` to set up review state. This:
 
 Inspect the team composition. If the team does not cover a domain the user cares about, override by adjusting the `--reviewers` count or providing a custom catalog.
 
+**Model tiering (Sonnet 5 by default).** Each reviewer in the returned team carries a `model` field resolved by a deterministic policy: reviewers default to **Sonnet 5** and only escalate to **Opus** when the lens is high-stakes (`security-reviewer`, `architecture-reviewer`) or when the change is complex. Pass the complexity signals so escalation is accurate:
+- `--files N` — number of files the change spans (escalates every reviewer to Opus if `> 1`).
+- `--tool-types N` — distinct tool-execution types the review will need (escalates if `> 2`). Estimate from the artifact (e.g. distinct file types / whether it needs Read+Grep+Bash+…).
+- `--context-window N` — window used for the ">20% of context" rule (default 200000). The artifact's byte size drives the context fraction automatically.
+
+You MUST honor the resolved `model` when spawning each reviewer in Step 4. Do not silently run every reviewer on the orchestrator's model.
+
 ### Step 3: Execute Deterministic Tests
 
 Test execution happens during init (Step 2). Review the test results before spawning reviewers. If all tests pass, proceed. If tests fail, those failures are auto-classified as findings:
@@ -43,6 +50,8 @@ Test failure findings are included in the final synthesis alongside reviewer fin
 ### Step 4: Spawn Reviewer Agents in Parallel
 
 For each reviewer on the team, construct the reviewer prompt using the template below (see "Reviewer Agent Prompt Template") with the reviewer's name, lens, artifact content, requirements, and test results. Then spawn each reviewer as a subagent using the Agent tool, all in parallel.
+
+**Use each reviewer's resolved model.** When spawning a reviewer via the Agent tool, pass `model=<the `model` value for that reviewer from the team composition>` (e.g. `sonnet` or `opus`). This is what keeps the common case on Sonnet 5 while high-stakes/complex reviews escalate to Opus. Spawning without an explicit `model` makes the subagent inherit the orchestrator's model (Opus) and defeats the token savings.
 
 Each reviewer agent receives ONLY:
 1. The artifact content (full text)
@@ -87,6 +96,27 @@ If the synthesis `dropped_count` is non-zero, report: "N findings were dropped d
 End with the convergence assessment:
 - **Converged (safe to ship)**: zero P0, zero P1, low-severity count within threshold
 - **Not converged**: state how many P0/P1 remain and what must be fixed
+
+### Step 8: Emit the Deterministic Scorecard (mandatory)
+
+After presenting findings, ALWAYS run the scorecard and show its output verbatim. It is a pure, reproducible summary — no LLM involved — so it renders the same way every run:
+
+```
+tools/scorecard.py --transcript <this session's transcript JSONL>
+```
+
+- `--state` auto-detects `.qreview/state.json`; pass it explicitly if the CWD differs.
+- `--transcript` should be this session's transcript (`~/.claude/projects/<cwd-slug>/<session-id>.jsonl`). If omitted, the tool auto-detects the newest transcript for the current project directory.
+- Token/time are scoped to this review via `--since` (defaults to the run's `created_at`); pass `--since <ISO>` to widen or narrow the window.
+- `--pricing PATH` overrides the built-in USD rate table.
+
+The scorecard reports four sections, always in this order:
+1. **Process** — status, convergence, and per-step detail (team + models, tests pass/fail, per-reviewer findings, synthesis).
+2. **Issues Found** — totals by severity (P0-P3) and any schema-dropped findings.
+3. **Token Cost** — per-model token breakdown and USD cost, plus grand total.
+4. **Model Execution Time** — sum of per-request durations per model and overall (model execution time, **not** wall clock).
+
+Present this scorecard as the final output of every review.
 
 ## Severity Taxonomy
 

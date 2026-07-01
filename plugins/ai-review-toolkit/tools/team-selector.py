@@ -11,7 +11,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,76 @@ class AgentDef:
     model: str
     description: str
     review_lens: str
+
+
+@dataclass
+class Complexity:
+    """Deterministic change-complexity signals used to tier reviewer models.
+
+    file_count        -- number of files the change/artifact spans.
+    tool_types        -- distinct tool-execution types the review is expected
+                         to need (heuristic; orchestrator may override).
+    context_fraction  -- fraction of the reviewer's context the artifact
+                         consumes at start (0.0-1.0).
+    """
+
+    file_count: int = 1
+    tool_types: int = 1
+    context_fraction: float = 0.0
+
+    @classmethod
+    def from_signals(
+        cls,
+        file_count: int = 1,
+        tool_types: int = 1,
+        artifact_bytes: int = 0,
+        context_window: int = 200_000,
+    ) -> "Complexity":
+        """Build Complexity, deriving context_fraction from artifact size.
+
+        Uses the standard ~4 bytes/token estimate.
+        """
+        window = context_window if context_window > 0 else 200_000
+        est_tokens = artifact_bytes / 4
+        fraction = est_tokens / window
+        return cls(
+            file_count=file_count,
+            tool_types=tool_types,
+            context_fraction=fraction,
+        )
+
+    def escalates(self) -> bool:
+        """True if change complexity alone warrants Opus."""
+        return (
+            self.file_count > 1
+            or self.tool_types > 2
+            or self.context_fraction > 0.20
+        )
+
+
+# Reviewers whose lens always warrants the strongest model.
+HIGH_STAKES_REVIEWERS: frozenset[str] = frozenset(
+    {"security-reviewer", "architecture-reviewer"}
+)
+
+
+def resolve_reviewer_model(
+    agent: "AgentDef",
+    complexity: "Complexity | None" = None,
+) -> str:
+    """Pick the model for a reviewer under the Option-3 tiering policy.
+
+    Sonnet 5 is the default. Escalate to Opus when the lens is high-stakes
+    (security/architecture) or when change complexity crosses a threshold
+    (multi-file, >2 tool-execution types, or >20% of context at start).
+    A catalog may pin a cheaper base model (e.g. haiku); escalation only
+    ever pushes the model *up* to opus.
+    """
+    if agent.name in HIGH_STAKES_REVIEWERS:
+        return "opus"
+    if complexity is not None and complexity.escalates():
+        return "opus"
+    return agent.model
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +277,7 @@ _DEFAULT_CATALOG: list[dict[str, Any]] = [
     {
         "name": "ux-reviewer",
         "domains": ["frontend", "content"],
-        "model": "haiku",
+        "model": "sonnet",
         "description": "User experience and accessibility reviewer",
         "review_lens": "user experience, accessibility, clarity",
     },
@@ -221,7 +291,7 @@ _DEFAULT_CATALOG: list[dict[str, Any]] = [
     {
         "name": "code-quality-reviewer",
         "domains": ["backend", "frontend", "testing", "performance"],
-        "model": "haiku",
+        "model": "sonnet",
         "description": "Code quality, testing, and performance reviewer",
         "review_lens": "code quality, test coverage, performance",
     },
@@ -341,8 +411,13 @@ def select_team_with_scores(
     min_reviewers: int = 2,
     max_reviewers: int = 5,
     catalog_path: str | None = None,
+    complexity: "Complexity | None" = None,
 ) -> tuple[list[AgentDef], list[DomainScore]]:
-    """Select team and return (team, domain_scores) to avoid re-classification."""
+    """Select team and return (team, domain_scores) to avoid re-classification.
+
+    Each returned agent's ``model`` reflects the Option-3 tiering policy
+    (see :func:`resolve_reviewer_model`); the shared catalog is not mutated.
+    """
     if min_reviewers < 2:
         min_reviewers = 2
     if max_reviewers < min_reviewers:
@@ -384,6 +459,12 @@ def select_team_with_scores(
             f"only {len(team)} available"
         )
 
+    # Apply the tiering policy without mutating the shared catalog objects.
+    team = [
+        replace(agent, model=resolve_reviewer_model(agent, complexity))
+        for agent in team
+    ]
+
     return team, domain_scores
 
 
@@ -393,6 +474,7 @@ def select_team(
     min_reviewers: int = 2,
     max_reviewers: int = 5,
     catalog_path: str | None = None,
+    complexity: "Complexity | None" = None,
 ) -> list[AgentDef]:
     """Select the optimal review team for the given artifact.
 
@@ -404,6 +486,7 @@ def select_team(
         min_reviewers=min_reviewers,
         max_reviewers=max_reviewers,
         catalog_path=catalog_path,
+        complexity=complexity,
     )
     return team
 
@@ -456,8 +539,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min", dest="min_reviewers", type=int, default=2, help="Minimum reviewers (default: 2)")
     parser.add_argument("--max", dest="max_reviewers", type=int, default=5, help="Maximum reviewers (default: 5)")
     parser.add_argument("--json", dest="json_output", action="store_true", help="Output as JSON instead of Markdown")
+    parser.add_argument("--files", type=int, default=1, help="Number of files the change spans (escalates to Opus if >1)")
+    parser.add_argument("--tool-types", dest="tool_types", type=int, default=1, help="Distinct tool-execution types expected (escalates if >2)")
+    parser.add_argument("--context-fraction", dest="context_fraction", type=float, default=None, help="Fraction of context the artifact consumes at start (escalates if >0.20)")
+    parser.add_argument("--context-window", dest="context_window", type=int, default=200_000, help="Context window for deriving context-fraction from artifact size (default: 200000)")
 
     args = parser.parse_args(argv)
+
+    if args.context_fraction is not None:
+        complexity = Complexity(
+            file_count=args.files,
+            tool_types=args.tool_types,
+            context_fraction=args.context_fraction,
+        )
+    else:
+        artifact_bytes = 0
+        if args.artifact:
+            try:
+                artifact_bytes = Path(args.artifact).stat().st_size
+            except OSError:
+                artifact_bytes = 0
+        complexity = Complexity.from_signals(
+            file_count=args.files,
+            tool_types=args.tool_types,
+            artifact_bytes=artifact_bytes,
+            context_window=args.context_window,
+        )
 
     try:
         team, domain_scores = select_team_with_scores(
@@ -466,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             min_reviewers=args.min_reviewers,
             max_reviewers=args.max_reviewers,
             catalog_path=args.catalog,
+            complexity=complexity,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

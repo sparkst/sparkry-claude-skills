@@ -27,6 +27,8 @@ Run `tools/loop-driver.py init` with the artifact path, requirements path, and o
 
 Inspect the team. If coverage is wrong, re-init with different parameters.
 
+**Model tiering (Sonnet 5 by default).** Reviewers default to **Sonnet 5** and escalate to **Opus** only for high-stakes lenses (`security-reviewer`, `architecture-reviewer`) or complex changes. Pass the complexity signals at init so escalation is accurate: `--files N` (escalates if `> 1`), `--tool-types N` (escalates if `> 2`), `--context-window N` (the artifact's byte size drives the ">20% of context" rule). The resolved per-reviewer model is stored in the team composition and surfaced in Step 3.
+
 ### Step 2: Run Deterministic Tests
 
 Run `tools/loop-driver.py next` to get the next action. On a fresh round, this returns `{"action": "run_tests"}`.
@@ -39,9 +41,9 @@ Record test results via `tools/loop-driver.py record-tests --round N --results-f
 
 ### Step 3: Spawn Reviewer Agents (Round N)
 
-After tests, `tools/loop-driver.py next` returns `{"action": "spawn_reviewers", "prompts": [...]}`.
+After tests, `tools/loop-driver.py next` returns `{"action": "spawn_reviewers", "prompts": [...], "models": [...]}`.
 
-For each reviewer on the team, spawn a subagent using the Agent tool. All reviewers run in parallel.
+For each reviewer on the team, spawn a subagent using the Agent tool. All reviewers run in parallel. **Spawn reviewer `i` with `model=models[i]`** (the `models` array is parallel to `prompts`). Do not let reviewers inherit the orchestrator's model — that discards the Sonnet-5 default and its token savings.
 
 **Round 1 reviewers receive ONLY:**
 1. The artifact content (full text)
@@ -71,7 +73,9 @@ Present the synthesized findings to the user sorted by severity.
 
 After synthesis, `tools/loop-driver.py next` returns `{"action": "spawn_fixer", "prompt": "..."}`.
 
-Spawn a fixer agent with the full synthesized finding list. The fixer prompt is provided in the `prompt` field of the `spawn_fixer` action dict. It includes:
+Spawn a fixer agent with the full synthesized finding list. **Choose the fixer's model by the same escalation rule the reviewers use:** default to **Sonnet 5**, but use **Opus** when the fix is inherently complex — it spans more than one file, needs more than two distinct tool-execution types, or the artifact plus findings exceed ~20% of context. Since fixes frequently touch multiple files, they will often land on Opus; a single-file, low-tool fix stays on Sonnet 5.
+
+The fixer prompt is provided in the `prompt` field of the `spawn_fixer` action dict. It includes:
 - Every finding at every severity level (P0 through P3)
 - The artifact content
 - The requirements
@@ -120,6 +124,18 @@ After each round's synthesis, `tools/loop-driver.py next` checks convergence via
 If converged AND `current_round >= min_rounds` (hard minimum of 2), the loop returns `{"action": "converged", "summary": "..."}`. Present the final summary to the user.
 
 If `current_round >= max_rounds` and not converged, the loop returns `{"action": "escalated", "reason": "...", "unresolved": [...]}`. Present the unresolved findings and ask the user to choose: continue (raise max_rounds), accept current state, or abandon.
+
+Whenever the loop terminates (converged OR escalated), ALWAYS emit the deterministic scorecard as the final output (see "Deterministic Scorecard" below).
+
+### Deterministic Scorecard (mandatory final step)
+
+When the loop ends, run the scorecard and present it verbatim. It is pure and reproducible (no LLM):
+
+```
+tools/scorecard.py --transcript <this session's transcript JSONL>
+```
+
+It auto-detects `.qloop/state.json`, scopes token/time to the run via `--since` (defaults to the run's `created_at`), and reports four sections in order: **Process** (per-round status, team + models, tests, findings), **Issues Found** (totals by severity across the final synthesis), **Token Cost** (per-model tokens + USD, plus total), and **Model Execution Time** (sum of per-request durations per model and overall — model execution time, **not** wall clock). Pass `--pricing PATH` to override USD rates.
 
 ### Step 9: Stuck Detection
 

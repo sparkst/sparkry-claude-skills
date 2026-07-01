@@ -117,11 +117,13 @@ class TestLoadCatalog:
         assert "requirements-reviewer" in names
 
     def test_default_catalog_agent_types(self) -> None:
+        # Base catalog defaults to sonnet for all reviewers ("Sonnet more
+        # often"); the tiering policy escalates to opus at selection time.
         catalog = load_catalog()
         agent_map = {a.name: a for a in catalog}
         assert agent_map["requirements-reviewer"].model == "sonnet"
-        assert agent_map["ux-reviewer"].model == "haiku"
-        assert agent_map["code-quality-reviewer"].model == "haiku"
+        assert agent_map["ux-reviewer"].model == "sonnet"
+        assert agent_map["code-quality-reviewer"].model == "sonnet"
 
     def test_custom_catalog_from_json(self, tmp_path: Path) -> None:
         custom: list[dict[str, Any]] = [
