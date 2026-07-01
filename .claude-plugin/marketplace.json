@@ -215,7 +215,7 @@
       "name": "ai-review-toolkit",
       "source": "./plugins/ai-review-toolkit",
       "description": "Type-agnostic multi-agent review toolkit. Spawn N clean-context reviewers to evaluate any artifact against requirements. Iterative review-fix cycles with deterministic convergence.",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "license": "MIT",
       "keywords": ["review", "multi-agent", "quality", "pipeline", "type-agnostic"],
       "category": "development",
