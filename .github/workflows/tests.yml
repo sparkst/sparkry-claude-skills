@@ -21,3 +21,6 @@ jobs:
 
       - name: Run QRALPH tests
         run: python3 -m pytest plugins/qralph/skills/qralph/tools/ -x -q
+
+      - name: Run ai-review-toolkit tests
+        run: python3 -m pytest plugins/ai-review-toolkit/tools/ -x -q

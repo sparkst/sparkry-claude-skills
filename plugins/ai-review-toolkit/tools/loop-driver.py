@@ -139,6 +139,9 @@ def init_loop(
     threshold: int = 0,
     max_rounds: int = 5,
     base: str = ".",
+    files: int = 1,
+    tool_types: int = 1,
+    context_window: int = 200_000,
 ) -> dict[str, Any]:
     """Create loop state. Select team. Return state."""
     artifact_abs = str(Path(artifact_path).resolve())
@@ -160,11 +163,23 @@ def init_loop(
     description = artifact_content[:2000] if artifact_content else artifact_path
     min_rev = max(reviewer_count or 2, 2)
     max_rev = max(reviewer_count or 5, min_rev)
-    team_agents = _get_team_selector().select_team(
+    ts = _get_team_selector()
+    try:
+        artifact_bytes = Path(artifact_abs).stat().st_size
+    except OSError:
+        artifact_bytes = 0
+    complexity = ts.Complexity.from_signals(
+        file_count=files,
+        tool_types=tool_types,
+        artifact_bytes=artifact_bytes,
+        context_window=context_window,
+    )
+    team_agents = ts.select_team(
         description=description,
         artifact_path=artifact_abs,
         min_reviewers=min_rev,
         max_reviewers=max_rev,
+        complexity=complexity,
     )
     team = [
         {
@@ -257,10 +272,12 @@ def next_action(state: dict[str, Any], base_dir: str = ".", confirm: bool = Fals
     # Phase: tests_done -> spawn reviewers
     if phase == "tests_done":
         prompts = []
+        models = []
         for i, agent in enumerate(state.get("team", [])):
             prompt = get_reviewer_prompt(state, i, current_round_num)
             prompts.append(prompt)
-        return {"action": "spawn_reviewers", "prompts": prompts}
+            models.append(agent.get("model", "sonnet"))
+        return {"action": "spawn_reviewers", "prompts": prompts, "models": models}
 
     # Phase: reviewing -> waiting for all reviewers
     if phase == "reviewing":
@@ -852,6 +869,9 @@ def main(argv: list[str] | None = None) -> int:
     init_p.add_argument("--reviewers", type=int, default=None, help="Number of reviewers")
     init_p.add_argument("--threshold", type=int, default=0, help="Convergence threshold for P2+P3")
     init_p.add_argument("--max-rounds", type=int, default=5, help="Maximum review rounds")
+    init_p.add_argument("--files", type=int, default=1, help="Files the change spans (escalates reviewers to Opus if >1)")
+    init_p.add_argument("--tool-types", dest="tool_types", type=int, default=1, help="Distinct tool-execution types expected (escalates if >2)")
+    init_p.add_argument("--context-window", dest="context_window", type=int, default=200_000, help="Context window for the >20%% escalation rule (default 200000)")
 
     # next
     next_parser = subparsers.add_parser("next", help="Get next action from state machine")
@@ -888,6 +908,9 @@ def main(argv: list[str] | None = None) -> int:
             reviewer_count=args.reviewers,
             threshold=args.threshold,
             max_rounds=args.max_rounds,
+            files=args.files,
+            tool_types=args.tool_types,
+            context_window=args.context_window,
         )
         print(json.dumps(state, indent=2, default=str))
         return 0

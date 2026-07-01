@@ -149,6 +149,9 @@ def init_review(
     reviewer_count: int | None = None,
     catalog_path: str | None = None,
     base_dir: str | None = None,
+    files: int = 1,
+    tool_types: int = 1,
+    context_window: int = 200_000,
 ) -> dict[str, Any]:
     """Set up review state. Discover tests and select team.
 
@@ -186,12 +189,24 @@ def init_review(
     min_rev = max(reviewer_count or 2, 2)
     max_rev = max(reviewer_count or 5, min_rev)
 
+    try:
+        artifact_bytes = Path(artifact_abs).stat().st_size
+    except OSError:
+        artifact_bytes = 0
+    complexity = team_selector.Complexity.from_signals(
+        file_count=files,
+        tool_types=tool_types,
+        artifact_bytes=artifact_bytes,
+        context_window=context_window,
+    )
+
     team_agents = team_selector.select_team(
         description=description,
         artifact_path=artifact_abs,
         min_reviewers=min_rev,
         max_reviewers=max_rev,
         catalog_path=catalog_path,
+        complexity=complexity,
     )
 
     team_dicts: list[dict[str, Any]] = [
@@ -459,6 +474,9 @@ def main(argv: list[str] | None = None) -> int:
     init_parser.add_argument("--requirements", required=True, help="Path to requirements")
     init_parser.add_argument("--reviewers", type=int, default=None, help="Number of reviewers")
     init_parser.add_argument("--catalog", default=None, help="Path to custom agent catalog")
+    init_parser.add_argument("--files", type=int, default=1, help="Files the change spans (escalates reviewers to Opus if >1)")
+    init_parser.add_argument("--tool-types", dest="tool_types", type=int, default=1, help="Distinct tool-execution types expected (escalates if >2)")
+    init_parser.add_argument("--context-window", dest="context_window", type=int, default=200_000, help="Context window for the >20%% escalation rule (default 200000)")
 
     # status
     subparsers.add_parser("status", help="Show current review status")
@@ -482,6 +500,9 @@ def main(argv: list[str] | None = None) -> int:
                 requirements_path=args.requirements,
                 reviewer_count=args.reviewers,
                 catalog_path=args.catalog,
+                files=args.files,
+                tool_types=args.tool_types,
+                context_window=args.context_window,
             )
         except (FileNotFoundError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)

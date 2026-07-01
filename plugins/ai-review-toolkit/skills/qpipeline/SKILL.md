@@ -120,6 +120,11 @@ Call `tools/pipeline-driver.py next` to get the next action. The driver returns 
 
 After completing each action, call `tools/pipeline-driver.py record-result` with the phase outcome, then call `next` again.
 
+**Model tiering (Sonnet 5 by default).** Agent-spawning phases follow the same policy as `/qreview` and `/qloop`: default to **Sonnet 5**, escalate to **Opus** for high-stakes lenses (`security-reviewer`, `architecture-reviewer`) or complex work (change spans more than one file, needs more than two distinct tool-execution types, or exceeds ~20% of context).
+- `spawn_reviewers` / `run_loop` — pass the complexity flags (`--files`, `--tool-types`) into the underlying `review-driver.py` / `loop-driver.py init`, and spawn each reviewer with its resolved `model` (surfaced in the team composition / `models` array).
+- `spawn_verifier` — a fresh-context verifier is a reviewer: default Sonnet 5, escalate to Opus by the same rule.
+- `execute_plan` — implementation typically touches multiple files, so it usually runs on **Opus**; a single-file, low-tool task stays on Sonnet 5.
+
 ### Step 3: Handle Gates
 
 Gates use a two-call protocol:
@@ -132,6 +137,14 @@ If the user rejects at a gate, record the feedback and handle per phase type (de
 ### Step 4: Pipeline Completion
 
 When `next` returns `{"action": "complete"}`, the pipeline is done. Present the summary to the user.
+
+Then ALWAYS emit the deterministic scorecard as the final output (pure, reproducible, no LLM):
+
+```
+tools/scorecard.py --state <the review-loop's .qloop/state.json (or the phase state richest in findings)> --transcript <this session's transcript JSONL>
+```
+
+Point `--state` at the sub-protocol state that carries the findings (usually the review-loop's `.qloop/state.json`; a single `review` phase writes `.qreview/state.json`). The scorecard reports **Process**, **Issues Found** (by severity), **Token Cost** (per-model tokens + USD, plus total), and **Model Execution Time** (sum of per-request durations — model execution time, **not** wall clock). Token/time cover this session's model activity; scope with `--since <ISO>` and override rates with `--pricing PATH`.
 
 ## Compositional Integrity
 

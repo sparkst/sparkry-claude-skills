@@ -190,6 +190,18 @@ class TestNextAction:
         assert "prompts" in action
         assert len(action["prompts"]) == len(state["team"])
 
+    def test_spawn_reviewers_exposes_per_reviewer_models(
+        self, tmp_path: Path, artifact_file: Path, requirements_file: Path
+    ) -> None:
+        # REQ-105: the loop must tell the orchestrator which model to spawn
+        # each reviewer on, parallel to prompts.
+        state = _init(tmp_path, artifact_file, requirements_file)
+        state["rounds"][0]["phase"] = "tests_done"
+        state["rounds"][0]["test_results"] = {"summary": "1/1 passed", "all_passed": True}
+        action = _next(state, tmp_path)
+        assert "models" in action
+        assert action["models"] == [a["model"] for a in state["team"]]
+
     def test_returns_spawn_fixer_after_review_synthesis(
         self, tmp_path: Path, artifact_file: Path, requirements_file: Path
     ) -> None:
