@@ -1,0 +1,184 @@
+{
+  "cases": {
+    "fixer_prompt": [
+      {
+        "expected": "You are a fixer agent. Your job is to fix ALL findings from the review.\n\n## Artifact\n\ndef login(user, pw):\n    return pw == 'admin'\n\n\n## Requirements\n\n## REQ-1: Authentication\n- Acceptance: no hardcoded credentials\n\n\n## Test Results\n\n2 passed, 1 failed\n\n## Findings to Fix (ALL must be addressed)\n\n### P0-abc: Hardcoded credential\n**Severity:** P0\n**Requirement:** REQ-1\n**Finding:** Password compared against literal 'admin'.\n**Recommendation:** Hash and compare against a stored credential.\n**Evidence:** auth.py:2\n**Sources:** security-reviewer\n\n### P2-def: Missing type hints\n**Severity:** P2\n**Requirement:** REQ-1\n**Finding:** login() lacks type annotations.\n**Recommendation:** Add parameter and return type hints.\n**Sources:** code-quality-reviewer\n\n## Instructions\n\nFix EVERY finding listed above. Every single one, regardless of severity (P0 through P3).\n\nFor each finding, produce a resolution with these fields:\n- finding_id: the ID of the finding being resolved (e.g., P0-001)\n- status: MUST be \"FIXED\" with evidence of the fix. No WONTFIX, DEFERRED, or OUT_OF_SCOPE.\n- evidence: what changed and where (file:line for code, section:quote for content)\n- description: brief explanation of the fix\n\nIf a finding is genuinely unfixable (requires external dependency, architectural constraint, or user decision), set status to \"ESCALATED\" with justification.\n\nOutput a JSON array of resolution objects. No other text.",
+        "input": {
+          "artifact_content": "def login(user, pw):\n    return pw == 'admin'\n",
+          "findings": [
+            {
+              "evidence": [
+                "auth.py:2"
+              ],
+              "finding": "Password compared against literal 'admin'.",
+              "id": "P0-abc",
+              "recommendation": "Hash and compare against a stored credential.",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "security-reviewer",
+              "sources": [
+                "security-reviewer"
+              ],
+              "title": "Hardcoded credential"
+            },
+            {
+              "evidence": [],
+              "finding": "login() lacks type annotations.",
+              "id": "P2-def",
+              "recommendation": "Add parameter and return type hints.",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "code-quality-reviewer",
+              "sources": [
+                "code-quality-reviewer"
+              ],
+              "title": "Missing type hints"
+            }
+          ],
+          "requirements_content": "## REQ-1: Authentication\n- Acceptance: no hardcoded credentials\n",
+          "test_summary": "2 passed, 1 failed"
+        },
+        "name": "round1"
+      }
+    ],
+    "format_findings": [
+      {
+        "expected": "No findings.",
+        "input": {
+          "findings": []
+        },
+        "name": "empty"
+      },
+      {
+        "expected": "### P0-abc: Hardcoded credential\n**Severity:** P0\n**Requirement:** REQ-1\n**Finding:** Password compared against literal 'admin'.\n**Recommendation:** Hash and compare against a stored credential.\n**Evidence:** auth.py:2\n**Sources:** security-reviewer\n\n### P2-def: Missing type hints\n**Severity:** P2\n**Requirement:** REQ-1\n**Finding:** login() lacks type annotations.\n**Recommendation:** Add parameter and return type hints.\n**Sources:** code-quality-reviewer",
+        "input": {
+          "findings": [
+            {
+              "evidence": [
+                "auth.py:2"
+              ],
+              "finding": "Password compared against literal 'admin'.",
+              "id": "P0-abc",
+              "recommendation": "Hash and compare against a stored credential.",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "security-reviewer",
+              "sources": [
+                "security-reviewer"
+              ],
+              "title": "Hardcoded credential"
+            },
+            {
+              "evidence": [],
+              "finding": "login() lacks type annotations.",
+              "id": "P2-def",
+              "recommendation": "Add parameter and return type hints.",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "code-quality-reviewer",
+              "sources": [
+                "code-quality-reviewer"
+              ],
+              "title": "Missing type hints"
+            }
+          ]
+        },
+        "name": "with_evidence_and_sources"
+      }
+    ],
+    "reviewer_prompt": [
+      {
+        "expected": "You are a security-reviewer reviewing an artifact.\n\nYour review lens: security vulnerabilities, auth, data protection\n\n## Artifact\n\ndef login(user, pw):\n    return pw == 'admin'\n\n\n## Requirements\n\n## REQ-1: Authentication\n- Acceptance: no hardcoded credentials\n\n\n## Test Results\n\n2 passed, 1 failed\n\n## Instructions\n\nReview the artifact against the requirements through your lens of security vulnerabilities, auth, data protection.\n\nOutput your findings as a JSON array. Each finding must have these fields:\n- id: string matching pattern P[0-3]-NNN (e.g., P0-001, P1-002)\n- severity: one of P0, P1, P2, P3\n- title: concise description of the issue\n- requirement: which requirement this relates to\n- finding: detailed description of the problem\n- recommendation: how to fix it\n- source: \"security-reviewer\"\n- evidence: file path and line number if applicable\n\nSeverity guide:\n- P0: Blocks shipping (correctness, security, data loss, requirement violation)\n- P1: Must fix before v1 (quality, error handling, incomplete coverage)\n- P2: Should fix (code smell, suboptimal pattern, minor UX, doc gap)\n- P3: Nice to have (style, optional optimization, cosmetic)\n\nOutput ONLY the JSON array. No other text.",
+        "input": {
+          "agent": {
+            "description": "Security vulnerability and data protection reviewer",
+            "domains": [
+              "security",
+              "compliance",
+              "backend"
+            ],
+            "model": "opus",
+            "name": "security-reviewer",
+            "review_lens": "security vulnerabilities, auth, data protection"
+          },
+          "artifact_content": "def login(user, pw):\n    return pw == 'admin'\n",
+          "prior_findings": [],
+          "prior_resolutions": [],
+          "requirements_content": "## REQ-1: Authentication\n- Acceptance: no hardcoded credentials\n",
+          "round_num": 1,
+          "test_summary": "2 passed, 1 failed"
+        },
+        "name": "round1_fresh"
+      },
+      {
+        "expected": "You are a security-reviewer reviewing an artifact.\n\nYour review lens: security vulnerabilities, auth, data protection\n\n## Artifact\n\ndef login(user, pw):\n    return pw == 'admin'\n\n\n## Requirements\n\n## REQ-1: Authentication\n- Acceptance: no hardcoded credentials\n\n\n## Test Results\n\n3 passed, 0 failed\n\n## Prior Round Findings (Round 1)\n\n### P0-abc: Hardcoded credential\n**Severity:** P0\n**Requirement:** REQ-1\n**Finding:** Password compared against literal 'admin'.\n**Recommendation:** Hash and compare against a stored credential.\n**Evidence:** auth.py:2\n**Sources:** security-reviewer\n\n### P2-def: Missing type hints\n**Severity:** P2\n**Requirement:** REQ-1\n**Finding:** login() lacks type annotations.\n**Recommendation:** Add parameter and return type hints.\n**Sources:** code-quality-reviewer\n\n## Fix Resolutions Applied\n\n- **P0-abc**: FIXED -- Replaced literal check with bcrypt verify.\n  Evidence: auth.py:2\n- **P2-def**: ESCALATED -- Type-hint rollout tracked separately.\n  Evidence: needs project-wide typing pass\n\n## Verification Instructions\n\nThe artifact content above is the POST-FIX version (after round 1 fixes). For each fix resolution listed above, navigate to the cited evidence location in the artifact and verify the fix is correct. Also check for NEW issues introduced by the fixes \u2014 regressions, broken logic, incomplete changes.\n\n## Instructions\n\nReview the artifact against the requirements through your lens of security vulnerabilities, auth, data protection.\n\nOutput your findings as a JSON array. Each finding must have these fields:\n- id: string matching pattern P[0-3]-NNN (e.g., P0-001, P1-002)\n- severity: one of P0, P1, P2, P3\n- title: concise description of the issue\n- requirement: which requirement this relates to\n- finding: detailed description of the problem\n- recommendation: how to fix it\n- source: \"security-reviewer\"\n- evidence: file path and line number if applicable\n\nSeverity guide:\n- P0: Blocks shipping (correctness, security, data loss, requirement violation)\n- P1: Must fix before v1 (quality, error handling, incomplete coverage)\n- P2: Should fix (code smell, suboptimal pattern, minor UX, doc gap)\n- P3: Nice to have (style, optional optimization, cosmetic)\n\nOutput ONLY the JSON array. No other text.",
+        "input": {
+          "agent": {
+            "description": "Security vulnerability and data protection reviewer",
+            "domains": [
+              "security",
+              "compliance",
+              "backend"
+            ],
+            "model": "opus",
+            "name": "security-reviewer",
+            "review_lens": "security vulnerabilities, auth, data protection"
+          },
+          "artifact_content": "def login(user, pw):\n    return pw == 'admin'\n",
+          "prior_findings": [
+            {
+              "evidence": [
+                "auth.py:2"
+              ],
+              "finding": "Password compared against literal 'admin'.",
+              "id": "P0-abc",
+              "recommendation": "Hash and compare against a stored credential.",
+              "requirement": "REQ-1",
+              "severity": "P0",
+              "source": "security-reviewer",
+              "sources": [
+                "security-reviewer"
+              ],
+              "title": "Hardcoded credential"
+            },
+            {
+              "evidence": [],
+              "finding": "login() lacks type annotations.",
+              "id": "P2-def",
+              "recommendation": "Add parameter and return type hints.",
+              "requirement": "REQ-1",
+              "severity": "P2",
+              "source": "code-quality-reviewer",
+              "sources": [
+                "code-quality-reviewer"
+              ],
+              "title": "Missing type hints"
+            }
+          ],
+          "prior_resolutions": [
+            {
+              "description": "Replaced literal check with bcrypt verify.",
+              "evidence": "auth.py:2",
+              "finding_id": "P0-abc",
+              "status": "FIXED"
+            },
+            {
+              "description": "Type-hint rollout tracked separately.",
+              "evidence": "needs project-wide typing pass",
+              "finding_id": "P2-def",
+              "status": "ESCALATED"
+            }
+          ],
+          "requirements_content": "## REQ-1: Authentication\n- Acceptance: no hardcoded credentials\n",
+          "round_num": 2,
+          "test_summary": "3 passed, 0 failed"
+        },
+        "name": "round2_verification"
+      }
+    ]
+  },
+  "meta": {
+    "purpose": "golden prompt-construction corpus from the Python oracle; js/prompts.mjs must reproduce it exactly",
+    "regenerate": "python3 gen-prompt-fixtures.py --write"
+  }
+}
