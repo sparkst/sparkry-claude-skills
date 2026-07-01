@@ -16,11 +16,27 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install pytest
-        run: pip install pytest
+      - name: Install test deps
+        # pyyaml is a runtime import in integrations-trello (trello_integration.py)
+        run: pip install pytest pyyaml
 
       - name: Run QRALPH tests
         run: python3 -m pytest plugins/qralph/skills/qralph/tools/ -x -q
 
       - name: Run ai-review-toolkit tests
         run: python3 -m pytest plugins/ai-review-toolkit/tools/ -x -q
+
+      - name: Run integrations-trello tests
+        run: python3 -m pytest plugins/integrations-trello/skills/trello/scripts/ -x -q
+
+      - name: Run media-pipeline tests
+        run: python3 -m pytest plugins/media-pipeline/skills/video-transcript/tools/ -x -q
+
+      - name: Run qshortcuts-learning tests
+        run: python3 -m pytest plugins/qshortcuts-learning/skills/memory-store/scripts/ -x -q
+
+      - name: Run writing-swarms (headline-swarm) tests
+        run: python3 -m pytest plugins/writing-swarms/skills/headline-swarm/tools/ -x -q
+
+      - name: Run writing-swarms (soundbite-swarm) tests
+        run: python3 -m pytest plugins/writing-swarms/skills/soundbite-swarm/tools/ -x -q
