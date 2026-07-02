@@ -8,7 +8,7 @@
 // and tools/test_prompt_parity.py against tools/fixtures/prompts.json.
 
 // finding-parser.py::REVIEWER_OUTPUT_INSTRUCTIONS ({reviewer_name} is templated).
-const REVIEWER_OUTPUT_INSTRUCTIONS = `Output your findings as a JSON array. Each finding must have these fields:
+export const REVIEWER_OUTPUT_INSTRUCTIONS = `Output your findings as a JSON array. Each finding must have these fields:
 - id: string matching pattern P[0-3]-NNN (e.g., P0-001, P1-002)
 - severity: one of P0, P1, P2, P3
 - title: concise description of the issue
