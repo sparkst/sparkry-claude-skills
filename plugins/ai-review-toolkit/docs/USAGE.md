@@ -11,7 +11,7 @@ When to reach for `/qreview` vs `/qloop` vs `/qpipeline` (and when not to).
 | --- | --- | --- | --- |
 | A second opinion / "is this ready?" — surface blind spots, no changes | **`/qreview`** | No (diagnose-only) | Cheapest (1 round) |
 | Make it ship-ready — fix ALL findings and prove convergence | **`/qloop`** | **Yes, in place** | ~2–5× qreview |
-| A custom, gated multi-phase flow (test-gate → execute → review-loop → verify) with human checkpoints | **`/qpipeline`** | Depends on phases | Medium |
+| A multi-phase flow (execute → review-loop → verify), gate-free *or* with human checkpoints | **`/qpipeline`** | Depends on phases | Medium |
 | Concept → deployed, greenfield build | **`/qralph`** | Yes | Heaviest |
 | You already have a plan / a small edit | qcode · qcheck | — | — |
 
@@ -25,6 +25,14 @@ start with `/qloop`. Use `/qreview` when you specifically want to look before to
 - **Diagnose-only** — never edits the artifact. Ends with a scorecard (tokens / USD / time).
 - Best for: pre-PR gate, reviewing a spec/strategy doc, "did I miss anything?".
 
+**Example prompts** (just type these — invoking the skill is the opt-in):
+```
+/qreview review src/auth/session.ts against requirements/current.md
+/qreview second opinion on this PRD — docs/prd-billing.md, grade it against docs/prd-billing.rubric.md
+/qreview review the changes on this branch against the acceptance criteria in REQ-101..REQ-108
+/qreview review src/api/ for security and error handling before I open the PR
+```
+
 ## `/qloop` — converge until ship-ready
 
 - Loop: review → **fix ALL findings in place** → clean-context re-review, until converged or hard-stop.
@@ -35,10 +43,41 @@ start with `/qloop`. Use `/qreview` when you specifically want to look before to
   what's stuck. Ends with a scorecard.
 - Best for: getting a module/doc you're willing to have edited to green.
 
-## `/qpipeline` — gated multi-phase flow (unchanged)
+**Example prompts** (commit or stash first — the fixer edits in place):
+```
+/qloop converge src/parser.py against requirements/parser.md — fix everything, maxRounds 3
+/qloop get docs/strategy.md ship-ready against docs/strategy.rubric.md
+/qloop fix all findings in src/checkout/ against requirements/checkout.md until it converges
+```
 
-- Composable presets (review / thorough / content / code) that sequence phases and **pause at human gates**.
-- Use when you want governed sequencing with checkpoints, not an autonomous run.
+## `/qpipeline` — composable multi-phase flow (unchanged)
+
+- Composable presets that sequence phases; **only the gate phases (`ideate`, `plan`, `demo`, `deploy`)
+  pause for you.** Pick a gate-free preset to run start-to-finish with no check-ins.
+
+| Preset | Phases | Checks in? |
+| --- | --- | --- |
+| `review` | test-gate → review-loop → verify | **No — just goes** |
+| `code` | review-loop → test-gate → verify | **No — just goes** |
+| `content` | review-loop → verify | **No — just goes** |
+| `thorough` | ideate → plan → execute → review-loop → test-gate → verify → demo | Yes (3 gates) |
+
+**Example prompts:**
+```
+# no check-ins — runs the whole preset to completion:
+/qpipeline run the code preset on src/feature/x against requirements/x.md
+/qpipeline run the review preset on src/api/ against requirements/api.md
+
+# gated — stops at ideate / plan / demo for your approval:
+/qpipeline run the thorough preset to build the billing feature from requirements/billing.md
+
+# your own no-checkin flow (custom phases, no gate phases):
+/qpipeline run custom phases execute,review-loop,verify on src/feature/x against requirements/x.md
+```
+
+There's no global "auto-confirm all gates" flag — you go gate-free by choosing gate-free phases. Note
+`/qpipeline` is still the Python-driver (agent-driven step by step), not the autonomous Workflow that
+`/qloop` runs on. For unattended review+fix of a single artifact, prefer `/qloop`.
 
 ## Operating notes (the things that bite)
 
