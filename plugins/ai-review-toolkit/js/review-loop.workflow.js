@@ -601,6 +601,24 @@ function ensureUniqueIds(findings) {
   });
 }
 
+// ===== inlined from loop-engine.mjs (generated; edit loop-engine.mjs, then rebuild) =====
+// Shared review→synthesize→gate→fix convergence loop engine.
+//
+// Extracted from review-loop so BOTH review-loop.workflow.js and the future
+// pipeline-auto.workflow.js can run the SAME drift-locked loop per artifact
+// WITHOUT nesting workflow() (which is one level only). The Workflow globals
+// (agent/parallel/phase/log) are injected via `ctx`, so this stays a pure,
+// unit-testable function with no hidden dependency on the sandbox runtime.
+//
+// These imports are STRIPPED at build time — build-workflow.mjs inlines
+// adjudication.mjs / prompts.mjs / workflow-helpers.mjs / this file into one
+// scope, so the bare references resolve there. The imports exist only for
+// standalone node use + loop-engine.test.mjs.
+
+
+
+
+
 // ---------------------------------------------------------------------------
 // Structured-output schemas (agents are forced to return these shapes)
 // ---------------------------------------------------------------------------
@@ -677,10 +695,9 @@ const TEST_SCHEMA = {
 // ---------------------------------------------------------------------------
 // Prompt assembly for the sandboxed script.
 //
-// Unlike the Python driver, this script cannot read files, so reviewer/fixer
-// prompts reference the artifact/requirements by PATH and instruct the agent to
-// Read them. Prior-round findings ARE held in memory by the script, so they are
-// embedded via the inlined formatFindings().
+// The script cannot read files, so reviewer/fixer prompts reference the
+// artifact/requirements by PATH and instruct the agent to Read them. Prior-round
+// findings ARE held in memory, so they are embedded via formatFindings().
 // ---------------------------------------------------------------------------
 
 function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary, priorFindings, priorResolutions) {
@@ -758,24 +775,6 @@ function fixerPrompt(artifact, requirements, testSummary, findings) {
   ].join('\n')
 }
 
-// ---------------------------------------------------------------------------
-// The convergence loop — mirrors loop-driver.py's state machine.
-// ---------------------------------------------------------------------------
-
-// `args` may arrive as a parsed object or a JSON string, depending on how the
-// Workflow was invoked; tolerate both.
-const A = typeof args === "string" ? JSON.parse(args) : (args || {})
-const artifact = A.artifact
-const requirements = A.requirements
-const team = A.team || []
-const threshold = A.threshold ?? 0
-const singleRound = A.rounds === 1
-const minRounds = singleRound ? 1 : 2
-const maxRounds = Math.max(A.maxRounds ?? (singleRound ? 1 : 5), minRounds)
-
-if (!artifact || !requirements) throw new Error('review-loop requires args.artifact and args.requirements')
-if (team.length < 2 && !singleRound) throw new Error('review-loop requires at least 2 reviewers (args.team)')
-
 // Normalized P0/P1 title set for stuck detection.
 function p0p1Titles(findings) {
   const s = new Set()
@@ -788,105 +787,154 @@ function p0p1Titles(findings) {
 }
 const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x))
 
-const roundReports = []
-let priorFindings = []
-let priorResolutions = []
-let prevP0P1 = null
-let outcome = null
+// ---------------------------------------------------------------------------
+// The convergence loop — mirrors loop-driver.py's state machine.
+// ---------------------------------------------------------------------------
 
-for (let r = 1; r <= maxRounds; r++) {
-  phase(r === 1 ? 'Review' : `Review (round ${r})`)
+/**
+ * Run the review→synthesize→gate→fix loop for a single artifact.
+ *
+ * @param config { artifact, requirements, team, threshold, rounds, maxRounds }
+ *   rounds===1 → single-pass diagnose (qreview: min 1 round, no fixer beyond it);
+ *   otherwise until-converged (qloop: min 2 rounds, in-place fixer per round).
+ * @param ctx { agent, parallel, phase, log } — the injected Workflow globals.
+ * @returns { outcome, rounds, final_findings, final_counts, history }
+ */
+async function runLoop(config, ctx) {
+  const { agent, parallel, phase, log } = ctx
+  const {
+    artifact,
+    requirements,
+    team = [],
+    threshold = 0,
+    rounds,
+    maxRounds: maxRoundsArg,
+  } = config
 
-  // Deterministic test gate — an agent runs the project's tests, returns a summary.
-  const test = await agent(
-    `Run this project's test suite (prefer \`python3 tools/test-runner.py\` if present, else the project's ` +
-      `standard test command) for the artifact at ${artifact}. Do NOT fix anything. Report a one-line summary, ` +
-      `whether all passed, and any failures as P0/P1 findings.`,
-    { label: `tests:r${r}`, phase: `Round ${r}`, model: 'sonnet', schema: TEST_SCHEMA },
-  )
-  const testSummary = test?.summary ?? 'No test results available.'
+  const singleRound = rounds === 1
+  const minRounds = singleRound ? 1 : 2
+  const maxRounds = Math.max(maxRoundsArg ?? (singleRound ? 1 : 5), minRounds)
 
-  // Fan out N clean-context reviewers with their resolved models.
-  const reviews = await parallel(
-    team.map((agentDef) => () =>
-      agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions), {
-        label: `review:${agentDef.name}:r${r}`,
-        phase: `Round ${r}`,
-        model: agentDef.model || 'sonnet',
-        schema: FINDINGS_SCHEMA,
-      }),
-    ),
-  )
+  if (!artifact || !requirements) throw new Error('runLoop requires artifact and requirements')
+  if (team.length < 2 && !singleRound) throw new Error('runLoop requires at least 2 reviewers (team)')
 
-  const reviewerLists = reviews.filter(Boolean).map((x) => x.findings || [])
-  if (test?.failures?.length) reviewerLists.push(test.failures)
+  const roundReports = []
+  let priorFindings = []
+  let priorResolutions = []
+  let prevP0P1 = null
+  let outcome = null
 
-  const dropped = []
-  // Reviewers number findings independently, so distinct findings collide on
-  // ids (e.g. two P0-001s). Make them unique so the id-keyed fix-ALL gate is
-  // meaningful and the fixer can echo exact ids.
-  const findings = ensureUniqueIds(synthesizeFindings(reviewerLists, dropped))
-  const counts = countBySeverity(findings)
-  const { converged, message } = checkConvergence(findings, threshold)
-  roundReports.push({ round: r, findings, counts, dropped: dropped.length, converged, message })
-  log(`Round ${r}: ${findings.length} findings (P0=${counts.P0} P1=${counts.P1} P2=${counts.P2} P3=${counts.P3}) — ${message}`)
+  for (let r = 1; r <= maxRounds; r++) {
+    phase(r === 1 ? 'Review' : `Review (round ${r})`)
 
-  // Converged AND past the minimum-rounds floor → done.
-  if (converged && r >= minRounds) {
-    outcome = { status: 'converged', message, round: r }
-    break
-  }
+    // Deterministic test gate — an agent runs the project's tests, returns a summary.
+    const test = await agent(
+      `Run this project's test suite (prefer \`python3 tools/test-runner.py\` if present, else the project's ` +
+        `standard test command) for the artifact at ${artifact}. Do NOT fix anything. Report a one-line summary, ` +
+        `whether all passed, and any failures as P0/P1 findings.`,
+      { label: `tests:r${r}`, phase: `Round ${r}`, model: 'sonnet', schema: TEST_SCHEMA },
+    )
+    const testSummary = test?.summary ?? 'No test results available.'
 
-  // Out of rounds → escalate with the unresolved P0/P1s.
-  if (r >= maxRounds) {
-    const unresolved = findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
-    outcome = { status: 'escalated', reason: `Max rounds (${maxRounds}) reached without convergence. ${message}.`, unresolved, round: r }
-    break
-  }
+    // Fan out N clean-context reviewers with their resolved models.
+    const reviews = await parallel(
+      team.map((agentDef) => () =>
+        agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions), {
+          label: `review:${agentDef.name}:r${r}`,
+          phase: `Round ${r}`,
+          model: agentDef.model || 'sonnet',
+          schema: FINDINGS_SCHEMA,
+        }),
+      ),
+    )
 
-  // Converged early but below the floor → advance to re-review, no fix needed.
-  if (converged) {
+    const reviewerLists = reviews.filter(Boolean).map((x) => x.findings || [])
+    if (test?.failures?.length) reviewerLists.push(test.failures)
+
+    const dropped = []
+    // Reviewers number findings independently, so distinct findings collide on
+    // ids (e.g. two P0-001s). Make them unique so the id-keyed fix-ALL gate is
+    // meaningful and the fixer can echo exact ids.
+    const findings = ensureUniqueIds(synthesizeFindings(reviewerLists, dropped))
+    const counts = countBySeverity(findings)
+    const { converged, message } = checkConvergence(findings, threshold)
+    roundReports.push({ round: r, findings, counts, dropped: dropped.length, converged, message })
+    log(`Round ${r}: ${findings.length} findings (P0=${counts.P0} P1=${counts.P1} P2=${counts.P2} P3=${counts.P3}) — ${message}`)
+
+    // Converged AND past the minimum-rounds floor → done.
+    if (converged && r >= minRounds) {
+      outcome = { status: 'converged', message, round: r }
+      break
+    }
+
+    // Out of rounds → escalate with the unresolved P0/P1s.
+    if (r >= maxRounds) {
+      const unresolved = findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
+      outcome = { status: 'escalated', reason: `Max rounds (${maxRounds}) reached without convergence. ${message}.`, unresolved, round: r }
+      break
+    }
+
+    // Converged early but below the floor → advance to re-review, no fix needed.
+    if (converged) {
+      priorFindings = findings
+      priorResolutions = []
+      prevP0P1 = p0p1Titles(findings)
+      continue
+    }
+
+    // Not converged → single in-place fixer for ALL findings.
+    phase(`Fix (round ${r})`)
+    const fix = await agent(fixerPrompt(artifact, requirements, testSummary, findings), {
+      label: `fix:r${r}`,
+      phase: `Round ${r}`,
+      model: 'sonnet',
+      schema: RESOLUTIONS_SCHEMA,
+    })
+    const resolutions = fix?.resolutions || []
+
+    // Fix-ALL gate — every finding needs a FIXED/ESCALATED resolution with evidence.
+    const { complete, missing } = checkFixCompleteness(findings, resolutions)
+    if (!complete) {
+      outcome = { status: 'escalated', reason: `Fix-ALL gate failed: ${missing.length} finding(s) unresolved (${missing.join(', ')}).`, unresolved: findings.filter((f) => missing.includes(String(f.id))), round: r }
+      break
+    }
+
+    // Stuck detection — identical P0/P1 set across two consecutive rounds.
+    const curP0P1 = p0p1Titles(findings)
+    if (prevP0P1 && curP0P1.size > 0 && sameSet(prevP0P1, curP0P1)) {
+      outcome = { status: 'escalated', reason: `Stuck: identical P0/P1 findings in rounds ${r - 1} and ${r}. Fix approach is not working.`, unresolved: findings.filter((f) => f.severity === 'P0' || f.severity === 'P1'), round: r }
+      break
+    }
+
     priorFindings = findings
-    priorResolutions = []
-    prevP0P1 = p0p1Titles(findings)
-    continue
+    priorResolutions = resolutions
+    prevP0P1 = curP0P1
   }
 
-  // Not converged → single in-place fixer for ALL findings.
-  phase(`Fix (round ${r})`)
-  const fix = await agent(fixerPrompt(artifact, requirements, testSummary, findings), {
-    label: `fix:r${r}`,
-    phase: `Round ${r}`,
-    model: 'sonnet',
-    schema: RESOLUTIONS_SCHEMA,
-  })
-  const resolutions = fix?.resolutions || []
-
-  // Fix-ALL gate — every finding needs a FIXED/ESCALATED resolution with evidence.
-  const { complete, missing } = checkFixCompleteness(findings, resolutions)
-  if (!complete) {
-    outcome = { status: 'escalated', reason: `Fix-ALL gate failed: ${missing.length} finding(s) unresolved (${missing.join(', ')}).`, unresolved: findings.filter((f) => missing.includes(String(f.id))), round: r }
-    break
+  const last = roundReports[roundReports.length - 1] || {}
+  return {
+    outcome,
+    rounds: roundReports.length,
+    final_findings: last.findings || [],
+    final_counts: last.counts || countBySeverity([]),
+    history: roundReports.map((rr) => ({ round: rr.round, counts: rr.counts, converged: rr.converged, message: rr.message })),
   }
-
-  // Stuck detection — identical P0/P1 set across two consecutive rounds.
-  const curP0P1 = p0p1Titles(findings)
-  if (prevP0P1 && curP0P1.size > 0 && sameSet(prevP0P1, curP0P1)) {
-    outcome = { status: 'escalated', reason: `Stuck: identical P0/P1 findings in rounds ${r - 1} and ${r}. Fix approach is not working.`, unresolved: findings.filter((f) => f.severity === 'P0' || f.severity === 'P1'), round: r }
-    break
-  }
-
-  priorFindings = findings
-  priorResolutions = resolutions
-  prevP0P1 = curP0P1
 }
 
-const last = roundReports[roundReports.length - 1] || {}
-return {
-  outcome,
-  rounds: roundReports.length,
-  final_findings: last.findings || [],
-  final_counts: last.counts || countBySeverity([]),
-  history: roundReports.map((rr) => ({ round: rr.round, counts: rr.counts, converged: rr.converged, message: rr.message })),
-}
+// `args` may arrive as a parsed object or a JSON string, depending on how the
+// Workflow was invoked; tolerate both. The whole loop lives in the inlined
+// runLoop() (loop-engine.mjs) so review-loop and pipeline-auto share one engine.
+const A = typeof args === "string" ? JSON.parse(args) : (args || {})
+
+return await runLoop(
+  {
+    artifact: A.artifact,
+    requirements: A.requirements,
+    team: A.team || [],
+    threshold: A.threshold ?? 0,
+    rounds: A.rounds,
+    maxRounds: A.maxRounds,
+  },
+  { agent, parallel, phase, log },
+)
 

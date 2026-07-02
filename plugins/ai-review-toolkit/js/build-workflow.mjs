@@ -20,19 +20,22 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = join(HERE, "review-loop.template.js");
 const OUTPUT = join(HERE, "review-loop.workflow.js");
-const INLINE_SOURCES = ["adjudication.mjs", "prompts.mjs", "workflow-helpers.mjs"];
+const INLINE_SOURCES = ["adjudication.mjs", "prompts.mjs", "workflow-helpers.mjs", "loop-engine.mjs"];
 const MARKER_TOKEN = "@@INLINE@@";
 // Match the ENTIRE marker line so no trailing text on it can leak into code.
 const MARKER_LINE = /^[^\n]*@@INLINE@@[^\n]*$/m;
 
 // Strip ES module syntax so the source can live as plain top-level declarations
-// inside the workflow script: drop `export ` prefixes and any import lines.
+// inside the workflow script: drop import statements (single- OR multi-line —
+// inlined siblings resolve in-scope) and `export ` prefixes.
 function stripModuleSyntax(src) {
   return src
-    .split("\n")
-    .filter((line) => !/^\s*import\s.+from\s.+;?\s*$/.test(line))
-    .map((line) => line.replace(/^export\s+/, ""))
-    .join("\n")
+    // `import ... from "...";` spanning one or more lines
+    .replace(/^[ \t]*import\b[\s\S]*?\bfrom\s*['"][^'"]+['"]\s*;?[ \t]*$/gm, "")
+    // bare side-effect import: `import "...";`
+    .replace(/^[ \t]*import\s+['"][^'"]+['"]\s*;?[ \t]*$/gm, "")
+    // drop the `export ` keyword, preserving indentation
+    .replace(/^([ \t]*)export\s+/gm, "$1")
     .trim();
 }
 
