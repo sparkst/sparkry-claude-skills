@@ -101,9 +101,15 @@ workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
 
 - **Minimum 2 rounds.** Round 1 finds; round 2 verifies fixes and catches
   regressions. The loop never reports `converged` before the floor.
-- **Fix-ALL gate.** Every finding at every severity needs a `FIXED`/`ESCALATED`
-  resolution with evidence (`checkFixCompleteness`). No WONTFIX/DEFERRED/
-  OUT_OF_SCOPE. A failed gate escalates.
+- **Fix-ALL gate on significant findings.** Every P0/P1 — plus any P2/P3 a
+  reviewer flags `significance:true` or that recurs across rounds — needs a
+  `FIXED`/`ESCALATED` resolution with evidence (`checkFixCompleteness`). No
+  WONTFIX/DEFERRED/OUT_OF_SCOPE. A failed gate escalates.
+- **Trivial P2/P3 are spot-fixed, not looped.** First-seen, unflagged cosmetic
+  nits get a cheap Haiku spot-fix + spot-check each round — they're still
+  addressed, but they don't block convergence or reset the loop. Convergence is
+  reached when the *significant* set is clear (P0/P1 always count as significant,
+  so they stay 0-to-ship).
 - **Max rounds → escalated, never converged.** A terminal state that blocks
   downstream work until the user decides.
 - **Stuck detection.** Identical P0/P1 findings across two consecutive rounds
