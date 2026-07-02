@@ -52,8 +52,17 @@ start with `/qloop`. Use `/qreview` when you specifically want to look before to
 
 ## `/qpipeline` — composable multi-phase flow (unchanged)
 
-- Composable presets that sequence phases; **only the gate phases (`ideate`, `plan`, `demo`, `deploy`)
-  pause for you.** Pick a gate-free preset to run start-to-finish with no check-ins.
+- **The reviews and the loop are built into every preset — you don't add them.** The `review-loop` phase
+  *is* the qloop convergence cycle (review → fix → re-review until zero P0/P1); `verify` (independent
+  fresh-context acceptance) is included too. You pick a **preset**, not individual phases.
+- **Just `/qpipeline <artifact> against <requirements>` defaults to the `review` preset**
+  (`test-gate → review-loop → verify`) — tests, the review-and-fix loop, then a verify, no gates. You only
+  name a preset or phases to change the shape.
+- **Building vs. reviewing:** the gate-free presets (`review`/`code`/`content`) review-and-fix an *existing*
+  artifact — none include an `execute` (implement) step. Only `thorough` has `execute` by default, and it
+  gates. To implement *and* loop with no check-ins, use custom phases `execute,review-loop,verify`.
+- **Only the gate phases (`ideate`, `plan`, `demo`, `deploy`) pause for you.** Pick a gate-free preset to
+  run start-to-finish with no check-ins.
 
 | Preset | Phases | Checks in? |
 | --- | --- | --- |
