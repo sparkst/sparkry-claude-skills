@@ -1,7 +1,7 @@
 ---
 name: qpipeline
-description: "This skill should be used when the user asks to \"run the full pipeline\", \"qpipeline\", \"end-to-end review\", \"thorough review\", or wants a composable multi-phase workflow. Presets: review (quick), thorough (full QRALPH-equivalent), content, code. Custom phase composition supported."
-version: 0.1.0
+description: "This skill should be used when the user asks to \"run the full pipeline\", \"qpipeline\", \"end-to-end review\", \"thorough review\", \"qpipeline auto\", an autonomous build, or wants a composable multi-phase workflow. Presets: review (quick), thorough (full QRALPH-equivalent), content, code. `auto` = autonomous end-to-end SDLC Workflow. Custom phase composition supported."
+version: 0.2.0
 ---
 
 # /qpipeline -- Composable Multi-Phase Pipeline Orchestrator
@@ -11,6 +11,54 @@ version: 0.1.0
 Orchestrate end-to-end workflows by composing review primitives into phased pipelines. The pipeline driver (`tools/pipeline-driver.py`) IS the orchestrator -- it manages state, enforces phase ordering, validates compositional integrity, and controls transitions. This is NOT skill-to-skill composition. The driver owns the lifecycle.
 
 Ship with four presets. Accept custom phase lists. Checkpoint at every boundary. Gate on human approval where required. Never skip a phase.
+
+The presets above are the **gated, human-in-the-loop** pipeline (Python driver). `/qpipeline auto` is a **separate, autonomous** mode — see below.
+
+## Autonomous mode: `/qpipeline auto`
+
+When the user asks for `/qpipeline auto` (or "build this autonomously end-to-end"), run the **`pipeline-auto` ultracode Workflow** — NOT the Python driver. The driver exists to pause at human gates; `auto` is the opposite (no stopping). This mode drives a full SDLC from a one-line goal to a verified stop:
+
+`requirements → design → separate-context TDD (per-slice worktrees, by wave) → serialized integration → unit/integration verify → stop-at-verify`
+
+Every emitted artifact converges through the **same** engine that powers `/qloop` (run in-process per artifact), and every "need a human" moment routes through **`/qdecide` first** — a `decline` hard-stops, a `draft` on reversible-internal work proceeds-and-stages, and anything irreversible/external/spend is human-gated (qdecide can never authorize it). The whole run stays on a feature branch.
+
+### Run it
+
+Resolve the workflow script path (`js/` beside `tools/`):
+- plugin: `<plugin>/js/pipeline-auto.workflow.js`
+- fork: `~/.claude/ai-review-tools/js/pipeline-auto.workflow.js`
+
+Invoke the **Workflow** tool with that `scriptPath` and:
+
+```json
+{
+  "goal": "<the one-line goal to build>",
+  "requirements": "requirements/current.md",
+  "design": "DESIGN.md",
+  "toolsDir": "<plugin>/tools  (or ~/.claude/ai-review-tools/tools in the fork)",
+  "threshold": 0,
+  "maxRounds": 4,
+  "maxParallel": 5
+}
+```
+
+Optional args: `deployTarget` (declared, never inferred — see §6 of the design), `stopAfter` (`requirements`|`design`|`tdd`|`integration`, for staged/bounded runs), `planOnly: true` (a zero-spend parser/plan check), and `team` (pre-resolved; otherwise phase 0 resolves it via `team-selector.py`). The Workflow streams per-phase progress via `log()` (watch with `/workflows`) and returns a `report` with each artifact's convergence outcome. On a hard-stop / human-gate it returns `{status:"halted", at, decision, report}` — surface the decision and stop.
+
+**This mutates the working tree** (it authors requirements/design and, in the TDD phase, builds code in git worktrees). Run it in the target project on a branch you're willing to have modified.
+
+### `/qpipeline auto prod`
+
+The production tail (staging deploy → guardrail gate → prod deploy → curated cumulative smoke suite → auto-rollback) is **Phase F — not yet shipped**. Until then, `auto` always stops at the verified point; passing `prodAutonomous`/`deployTarget` does not deploy. Do not tell the user `auto prod` deploys yet.
+
+> **Validation status:** phases 0–2 (requirements → design → slice validation) are behaviorally verified end-to-end; the full inlined Workflow parses in the sandbox. Phases 3–6 (per-slice TDD worktrees, serialized integration, verify) are structurally complete and parser-verified but await a full end-to-end behavioral run before production reliance.
+
+### Scorecard (mandatory final step)
+
+When the Workflow ends, run the deterministic scorecard against the run and present it verbatim (same as `/qloop` step 5):
+
+```
+python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
+```
 
 ## Presets
 
