@@ -1,5 +1,27 @@
 # Changelog — ai-review-toolkit
 
+## 1.3.0
+
+### Changed
+- **`/qloop` now splits P2/P3 into significant vs. trivial.** P0/P1 and any P2/P3
+  a reviewer flags `significance:true` (or that recurs across rounds) get the full
+  fix-loop + fix-ALL gate as before. First-seen, unflagged cosmetic nits get a
+  cheap **Haiku spot-fix + spot-check** each round instead — still addressed, but
+  they no longer block convergence or reset the loop. Convergence is reached when
+  the *significant* set is clear (P0/P1 always count as significant, so they stay
+  0-to-ship). Cheaper trivial tail, faster convergence on cosmetic churn.
+- Reviewer finding schema gains an optional additive `significance` boolean.
+
+### Internal
+- The convergence loop was extracted from `review-loop.template.js` into a
+  shared, unit-tested `js/loop-engine.mjs` (`runLoop(config, ctx)` with Workflow
+  globals injected). Both `review-loop.workflow.js` and the upcoming
+  `pipeline-auto.workflow.js` inline the same drift-locked engine — no nesting,
+  no fork. `adjudication.mjs` (the Python-oracle contract) is untouched; the
+  `significance` flag is carried at the workflow layer (captured from raw
+  reviewer findings before dedup strips it), so golden parity is preserved.
+- `build-workflow.mjs` now strips multi-line imports when inlining.
+
 ## 1.2.0
 
 ### Changed

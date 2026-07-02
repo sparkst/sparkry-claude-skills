@@ -632,6 +632,22 @@ const FINDING_PROPS = {
   recommendation: { type: 'string' },
   source: { type: 'string' },
   evidence: { type: 'string', description: 'file:line or section:quote, if applicable' },
+  // OPTIONAL. Reviewer flag: a P2/P3 that is actually significant (real risk /
+  // requirement gap), so it gets the full fix-loop rather than a cheap spot-fix.
+  // Additive-only: the drift-locked adjudication ignores it, so the golden
+  // corpus stays frozen.
+  significance: { type: 'boolean', description: 'true = this P2/P3 is significant, full-loop it (not a trivial cosmetic nit)' },
+}
+
+// Cheap verification of trivial spot-fixes.
+const SPOTCHECK_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['all_applied', 'not_applied'],
+  properties: {
+    all_applied: { type: 'boolean' },
+    not_applied: { type: 'array', items: { type: 'string' }, description: 'finding ids whose spot-fix did not land' },
+  },
 }
 
 const FINDINGS_SCHEMA = {
@@ -775,17 +791,74 @@ function fixerPrompt(artifact, requirements, testSummary, findings) {
   ].join('\n')
 }
 
+function spotFixerPrompt(artifact, requirements, trivialFindings) {
+  return [
+    'You are a spot-fixer for TRIVIAL, low-risk findings (cosmetic nits, style, minor wording).',
+    'Apply each fix IN PLACE, minimally and safely — do NOT refactor or change behavior.',
+    '',
+    `Artifact to fix: ${artifact}`,
+    `Requirements: ${requirements}`,
+    '',
+    '## Trivial findings to spot-fix',
+    '',
+    formatFindings(trivialFindings),
+    '',
+    '## Instructions',
+    '',
+    'Make the smallest edit that resolves each nit. For each, return a resolution: finding_id (copy the id',
+    'EXACTLY as shown in its heading — verbatim), status "FIXED" (with evidence) or "ESCALATED" (if it is not',
+    'actually trivial), evidence (file:line), and a one-line description.',
+  ].join('\n')
+}
+
+function spotCheckPrompt(artifact, trivialResolutions) {
+  const lines = trivialResolutions.map((r) => `- ${r.finding_id}: ${r.evidence ?? ''}`)
+  return [
+    'Spot-check that these trivial fixes actually landed in the artifact. Read ONLY the cited evidence',
+    'locations — do not re-review the whole file.',
+    '',
+    `Artifact: ${artifact}`,
+    '',
+    '## Claimed trivial fixes',
+    '',
+    lines.join('\n'),
+    '',
+    'Return all_applied (true if every cited fix is present) and not_applied (the finding ids whose fix is missing).',
+  ].join('\n')
+}
+
+// Normalized title for recurrence + stuck detection.
+function normTitle(f) {
+  return String(f.title ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
 // Normalized P0/P1 title set for stuck detection.
 function p0p1Titles(findings) {
   const s = new Set()
   for (const f of findings) {
-    if (f.severity === 'P0' || f.severity === 'P1') {
-      s.add(String(f.title ?? '').trim().toLowerCase().replace(/\s+/g, ' '))
-    }
+    if (f.severity === 'P0' || f.severity === 'P1') s.add(normTitle(f))
   }
   return s
 }
 const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x))
+
+// A finding is SIGNIFICANT (gets the full fix-loop) if it is P0/P1, a reviewer
+// flagged it significant, or its title recurred from the previous round
+// (persistence = significance). Otherwise it is TRIVIAL (spot-fix + spot-check).
+//
+// `flaggedTitles` and `prevTitles` are matched by normalized title because
+// deduplicateFindings rebuilds merged findings without the `significance` field
+// (it is not part of the drift-locked adjudication schema), so the flag is
+// captured from the RAW reviewer findings before synthesis.
+function isSignificant(f, prevTitles, flaggedTitles) {
+  const t = normTitle(f)
+  return (
+    f.severity === 'P0' ||
+    f.severity === 'P1' ||
+    flaggedTitles.has(t) ||
+    prevTitles.has(t)
+  )
+}
 
 // ---------------------------------------------------------------------------
 // The convergence loop — mirrors loop-driver.py's state machine.
@@ -822,6 +895,7 @@ async function runLoop(config, ctx) {
   let priorFindings = []
   let priorResolutions = []
   let prevP0P1 = null
+  let prevAllTitles = new Set() // for recurrence-based significance promotion
   let outcome = null
 
   for (let r = 1; r <= maxRounds; r++) {
@@ -851,17 +925,54 @@ async function runLoop(config, ctx) {
     const reviewerLists = reviews.filter(Boolean).map((x) => x.findings || [])
     if (test?.failures?.length) reviewerLists.push(test.failures)
 
+    // Capture reviewer `significance` flags from the RAW findings by normalized
+    // title, BEFORE synthesis strips the field during dedup.
+    const flaggedTitles = new Set()
+    for (const list of reviewerLists) {
+      for (const f of list) if (f && f.significance === true) flaggedTitles.add(normTitle(f))
+    }
+
     const dropped = []
     // Reviewers number findings independently, so distinct findings collide on
     // ids (e.g. two P0-001s). Make them unique so the id-keyed fix-ALL gate is
     // meaningful and the fixer can echo exact ids.
     const findings = ensureUniqueIds(synthesizeFindings(reviewerLists, dropped))
     const counts = countBySeverity(findings)
-    const { converged, message } = checkConvergence(findings, threshold)
-    roundReports.push({ round: r, findings, counts, dropped: dropped.length, converged, message })
-    log(`Round ${r}: ${findings.length} findings (P0=${counts.P0} P1=${counts.P1} P2=${counts.P2} P3=${counts.P3}) — ${message}`)
 
-    // Converged AND past the minimum-rounds floor → done.
+    // Split into significant (full fix-loop) and trivial (spot-fix). P0/P1 are
+    // always significant; a recurring or reviewer-flagged P2/P3 is too.
+    const significant = findings.filter((f) => isSignificant(f, prevAllTitles, flaggedTitles))
+    const trivial = findings.filter((f) => !isSignificant(f, prevAllTitles, flaggedTitles))
+
+    // The LOOP gate is significant-only: trivial P2/P3 don't block convergence
+    // (they're spot-fixed opportunistically). P0/P1 stay 0-total-hard because
+    // they're always significant.
+    const { converged, message } = checkConvergence(significant, threshold)
+    const newP0P1 = findings.filter(
+      (f) => (f.severity === 'P0' || f.severity === 'P1') && !prevP0P1?.has(normTitle(f)),
+    ).length
+    roundReports.push({ round: r, findings, counts, significant: significant.length, trivial: trivial.length, newP0P1, dropped: dropped.length, converged, message })
+    log(`Round ${r}: ${findings.length} findings (P0=${counts.P0} P1=${counts.P1} P2=${counts.P2} P3=${counts.P3}; ${significant.length} significant / ${trivial.length} trivial, ${newP0P1} new P0/P1) — ${message}`)
+
+    // Spot-fix trivial nits cheaply (Haiku) + a light spot-check. Opportunistic,
+    // non-blocking, doesn't reset the convergence counter.
+    let trivialResolutions = []
+    if (trivial.length) {
+      const spot = await agent(spotFixerPrompt(artifact, requirements, trivial), {
+        label: `spotfix:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: RESOLUTIONS_SCHEMA,
+      })
+      trivialResolutions = spot?.resolutions || []
+      if (trivialResolutions.length) {
+        const check = await agent(spotCheckPrompt(artifact, trivialResolutions), {
+          label: `spotcheck:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: SPOTCHECK_SCHEMA,
+        })
+        if (check && check.all_applied === false && check.not_applied?.length) {
+          log(`Round ${r}: spot-check flagged ${check.not_applied.length} trivial fix(es) not applied: ${check.not_applied.join(', ')}`)
+        }
+      }
+    }
+
+    // Converged (no significant findings) AND past the minimum-rounds floor → done.
     if (converged && r >= minRounds) {
       outcome = { status: 'converged', message, round: r }
       break
@@ -874,17 +985,18 @@ async function runLoop(config, ctx) {
       break
     }
 
-    // Converged early but below the floor → advance to re-review, no fix needed.
+    // Significant cleared early but below the floor → advance to re-review.
     if (converged) {
       priorFindings = findings
-      priorResolutions = []
+      priorResolutions = trivialResolutions
       prevP0P1 = p0p1Titles(findings)
+      prevAllTitles = new Set(findings.map(normTitle))
       continue
     }
 
-    // Not converged → single in-place fixer for ALL findings.
+    // Not converged → full in-place fixer for the SIGNIFICANT findings.
     phase(`Fix (round ${r})`)
-    const fix = await agent(fixerPrompt(artifact, requirements, testSummary, findings), {
+    const fix = await agent(fixerPrompt(artifact, requirements, testSummary, significant), {
       label: `fix:r${r}`,
       phase: `Round ${r}`,
       model: 'sonnet',
@@ -892,10 +1004,10 @@ async function runLoop(config, ctx) {
     })
     const resolutions = fix?.resolutions || []
 
-    // Fix-ALL gate — every finding needs a FIXED/ESCALATED resolution with evidence.
-    const { complete, missing } = checkFixCompleteness(findings, resolutions)
+    // Fix-ALL gate — every SIGNIFICANT finding needs a FIXED/ESCALATED resolution with evidence.
+    const { complete, missing } = checkFixCompleteness(significant, resolutions)
     if (!complete) {
-      outcome = { status: 'escalated', reason: `Fix-ALL gate failed: ${missing.length} finding(s) unresolved (${missing.join(', ')}).`, unresolved: findings.filter((f) => missing.includes(String(f.id))), round: r }
+      outcome = { status: 'escalated', reason: `Fix-ALL gate failed: ${missing.length} finding(s) unresolved (${missing.join(', ')}).`, unresolved: significant.filter((f) => missing.includes(String(f.id))), round: r }
       break
     }
 
@@ -907,8 +1019,9 @@ async function runLoop(config, ctx) {
     }
 
     priorFindings = findings
-    priorResolutions = resolutions
+    priorResolutions = [...resolutions, ...trivialResolutions]
     prevP0P1 = curP0P1
+    prevAllTitles = new Set(findings.map(normTitle))
   }
 
   const last = roundReports[roundReports.length - 1] || {}
@@ -917,7 +1030,10 @@ async function runLoop(config, ctx) {
     rounds: roundReports.length,
     final_findings: last.findings || [],
     final_counts: last.counts || countBySeverity([]),
-    history: roundReports.map((rr) => ({ round: rr.round, counts: rr.counts, converged: rr.converged, message: rr.message })),
+    history: roundReports.map((rr) => ({
+      round: rr.round, counts: rr.counts, significant: rr.significant, trivial: rr.trivial,
+      newP0P1: rr.newP0P1, converged: rr.converged, message: rr.message,
+    })),
   }
 }
 
