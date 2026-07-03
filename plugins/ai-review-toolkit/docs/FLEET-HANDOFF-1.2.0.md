@@ -33,18 +33,47 @@ Interactive, in a Claude Code session on each machine:
 /plugin marketplace update sparkry-claude-skills
 ```
 
-Headless / fleet-job equivalent (the marketplace is a git-backed clone; updating = pulling it):
+**Headless / fleet-job equivalent — use the `claude plugin` CLI, NOT a raw git pull.**
+A `git pull` of the marketplace clone updates only the *source*. Claude Code loads plugins from a
+version-pinned **cache** (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`) plus the
+`installed_plugins.json` records — and a git pull rebuilds *neither*, so the machine keeps loading the
+**old** version (the marketplace `plugin.json` will read the new number while `claude plugin list` still
+shows the old one). Use the CLI, which refreshes the marketplace **and** rebuilds the cache + install
+records:
 
 ```sh
-git -C ~/.claude/plugins/marketplaces/sparkry-claude-skills fetch origin --quiet
-git -C ~/.claude/plugins/marketplaces/sparkry-claude-skills checkout main
-git -C ~/.claude/plugins/marketplaces/sparkry-claude-skills pull --ff-only
-# verify the machine now sees 1.2.0:
-python3 -c "import json;print(json.load(open('$HOME/.claude/plugins/marketplaces/sparkry-claude-skills/plugins/ai-review-toolkit/.claude-plugin/plugin.json'))['version'])"
+claude plugin marketplace update sparkry-claude-skills
+claude plugin update  ai-review-toolkit@sparkry-claude-skills --scope user \
+  || claude plugin install ai-review-toolkit@sparkry-claude-skills --scope user
+# verify — expect the current version at Scope: user:
+claude plugin list | grep -A2 ai-review-toolkit
 ```
 
-New sessions pick up 1.2.0 after the pull. (`marketplace.json` was bumped, so the interactive update won't
-no-op.)
+- **`--scope user` is required.** Fleet jobs run in a *fresh clone per job* (an arbitrary project path),
+  so a **project**-scoped install never covers them — only a user-scoped one does. `update` fails if the
+  plugin isn't already installed at that scope, hence the `|| install` fallback. Don't pipe the command
+  through `tail`/`grep` when relying on the `||` — a pipe masks the exit code and the fallback won't fire.
+- **No "restart" needed for jobs.** Each headless `claude -p` job is a fresh process, so the next job
+  picks up the new version automatically (the CLI's "restart to apply" is thus satisfied for the worker).
+- **Version-agnostic.** This always converges the machine on whatever is current on `main`; it is not
+  specific to 1.2.0. (Verified in practice converging the fleet through 1.3.0 → 1.4.0.)
+
+**Update the account that runs jobs, not the SSH login.** On most hosts these differ: the worker runs as a
+service user — `builder` on the macOS/launchd nodes, `claude` on the Linux/systemd node — while `travis`
+is only the interactive login. Run the CLI as the worker user:
+
+```sh
+sudo -u builder -H bash -lc 'cd "$HOME" 2>/dev/null || cd /tmp
+  export PATH="$HOME/.local/bin:$PATH"
+  claude plugin marketplace add sparkst/sparkry-claude-skills 2>/dev/null || true
+  claude plugin install ai-review-toolkit@sparkry-claude-skills --scope user
+  claude plugin list | grep -A2 ai-review-toolkit'
+```
+
+Two gotchas doing this: **(1)** `sudo -u builder` inherits your cwd — if that's another user's home,
+every `claude` call dies with `getcwd: … Permission denied` (EACCES). `cd "$HOME"` first (with `-H` so
+`$HOME` is the worker's). **(2)** A never-provisioned worker has **no marketplace registered at all**, so
+`claude plugin marketplace add sparkst/sparkry-claude-skills` must run before the install.
 
 **Prereqs per machine:** the Workflow (ultracode) tool available in Claude Code, and `python3` for the
 scorecard. If the Workflow tool isn't available, the skills fall back to the legacy Python-driver protocol
@@ -75,8 +104,10 @@ Skills:
 
 ## Bare-name fork (reference only — NOT the fleet path)
 
-The primary box (and any machine deliberately forked, e.g. jarvis) runs `/qreview` `/qloop` `/qpipeline` as
-USER-level skills with the plugin disabled: `~/.claude/skills/{qreview,qloop,qpipeline}/SKILL.md` +
+Only the **primary box** (Travis's interactive machine) is a fork — it runs `/qreview` `/qloop` `/qpipeline`
+as USER-level skills with the plugin disabled. (jarvis is **not** a fork: it takes the marketplace plugin
+like every other fleet node — verified in the 1.4.0 rollout.) The fork lives at
+`~/.claude/skills/{qreview,qloop,qpipeline}/SKILL.md` +
 `~/.claude/ai-review-tools/*.py` (flat) + `~/.claude/ai-review-tools/js/review-loop.workflow.js`. The fork
 does **not** auto-update — it needs a manual re-sync (copy `js/review-loop.workflow.js`, copy runtime
 `tools/*.py` except `test_*.py`/`gen-*.py`, and copy the SKILLs with the tool paths rewritten to absolute).
