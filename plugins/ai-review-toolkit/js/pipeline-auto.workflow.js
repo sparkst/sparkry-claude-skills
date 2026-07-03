@@ -1326,6 +1326,10 @@ const maxParallel = A.maxParallel ?? 5
 const deployTarget = A.deployTarget ?? null
 const prodAutonomous = A.prodAutonomous === true
 const planOnly = A.planOnly === true
+// Optional bound: halt after a named phase ('requirements'|'design'|'tdd'|'integration').
+// Used for staged runs and for a cost-capped behavioral smoke that stops before the
+// TDD worktrees build inside a repo. null = run the whole SDLC to the verified stop.
+const stopAfter = A.stopAfter || null
 
 let team = Array.isArray(A.team) ? A.team : []
 
@@ -1422,6 +1426,16 @@ function halts(decision) {
   return decision && (decision.action === 'hard-stop' || decision.action === 'human-gate')
 }
 
+// Authoring agents each produce exactly ONE document; the product itself is built
+// later under the separate-context TDD gate. Without this guard an eager author
+// scaffolds the whole project (impl + tests + npm install), which pre-satisfies the
+// tests and makes the red gate spuriously fail — the two-context TDD is corrupted.
+const DOC_ONLY =
+  'Write ONLY the single document named above. Do NOT create, edit, or scaffold ANY other file — no ' +
+  'source code, no test files, no package.json/tsconfig/lockfiles, no directories — and do NOT run ' +
+  'installers, generators, or build tools. The implementation is authored later under a separate TDD ' +
+  'gate that requires the tests to fail before any code exists; producing code now breaks that gate.'
+
 // planOnly: prove the whole inlined bundle links in the sandbox and echo the
 // resolved plan — the cheap early parser/link smoke (no agent spend).
 if (planOnly) {
@@ -1475,12 +1489,15 @@ await agent(
     `Author the requirements for this goal at ${requirementsPath} in the project's REQ-ID format`,
     '(each `## REQ-NNN` with an Acceptance line). Be complete and testable; no implementation.',
     `Goal: ${JSON.stringify(goal)}`,
+    '',
+    DOC_ONLY,
   ].join('\n'),
   { label: 'requirements-author', model: 'sonnet' },
 )
 const reqRun = await converge(requirementsPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.requirements = reqRun.outcome
 if (halts(reqRun.decision)) return { status: 'halted', at: 'requirements', decision: reqRun.decision, report }
+if (stopAfter === 'requirements') return { status: 'stopped', at: 'requirements', report }
 
 // ── Phase 2: DESIGN (contracts + slice decomposition) → converge ─────────
 phase('Design')
@@ -1490,6 +1507,8 @@ await agent(
     'slice is {id, summary, public_contract, files[], test_files[], req_ids[], depends_on[]}. File ownership',
     'MUST be a partition (no two slices share a file); shared code goes in an explicit S-000 kernel with no',
     `deps. Cover every REQ-ID in ${requirementsPath}. Read the requirements first.`,
+    '',
+    DOC_ONLY,
   ].join('\n'),
   { label: 'design-author', model: 'sonnet' },
 )
@@ -1506,6 +1525,8 @@ const sliceRun = await agent(
     `  python3 ${toolsDir}/tdd-harness.py validate-slices --slices ${slicesPath} --req-ids <comma-separated REQ-IDs>`,
     `  python3 ${toolsDir}/tdd-harness.py waves --slices ${slicesPath}`,
     'Return {valid, errors, slices, waves} (waves = array of arrays of slice ids).',
+    '',
+    `${DOC_ONLY} (Here the single document is ${slicesPath}; you may also read ${designPath}.)`,
   ].join('\n'),
   { label: 'slice-plan', model: 'sonnet', schema: SLICES_SCHEMA },
 )
@@ -1518,6 +1539,7 @@ if (!sliceRun || !sliceRun.valid || !slices.length) {
 }
 const sliceById = {}
 for (const s of slices) sliceById[s.id] = s
+if (stopAfter === 'design') return { status: 'stopped', at: 'design', report }
 
 // ── Phase 3: separate-context TDD, per slice, one worktree each, by wave ──
 phase('TDD')
@@ -1536,6 +1558,7 @@ for (const wave of waves) {
     if (r && r.green) greenIds.push(r.id)
   }
 }
+if (stopAfter === 'tdd') return { status: 'stopped', at: 'tdd', greenIds, report }
 
 // One slice: TEST-WRITER (red-gated) then IMPLEMENTER (tests read-only, tamper-checked, green-gated),
 // each converged. Runs in an isolated worktree so parallel slices never clobber each other.
@@ -1610,12 +1633,17 @@ await agent(buildIntegrationTestWriterPrompt(slices, { designPath, requirementsP
   label: 'integration-test-writer', model: 'sonnet',
 })
 await agent(
-  `Author ${integrationPlanPath}: how the slices compose, the seams under test, and the deploy/verify checklist. Read ${designPath}.`,
+  [
+    `Author ${integrationPlanPath}: how the slices compose, the seams under test, and the deploy/verify checklist. Read ${designPath}.`,
+    '',
+    DOC_ONLY,
+  ].join('\n'),
   { label: 'integration-plan-author', model: 'sonnet' },
 )
 const intPlanRun = await converge(integrationPlanPath, { rounds: undefined, maxRounds: 3 })
 report.artifacts.integration_plan = intPlanRun.outcome
 if (halts(intPlanRun.decision)) return { status: 'halted', at: 'integration-plan', decision: intPlanRun.decision, report }
+if (stopAfter === 'integration') return { status: 'stopped', at: 'integration', report }
 
 // ── Phase 6: unit + integration verify (hard gate), scorecard ────────────
 phase('Verify')
