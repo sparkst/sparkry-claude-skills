@@ -31,8 +31,16 @@ const QDECIDE_VALIDATOR = '/Users/travis/.claude/skills/qdecide/tools/validate-p
 const threshold = A.threshold ?? 0
 const maxRounds = A.maxRounds ?? 4
 const maxParallel = A.maxParallel ?? 5
+// deployTarget is DECLARED, never inferred: {kind, stagingCmd, prodCmd, stagingUrl,
+// prodUrl, rollbackCmd, stateful}. null → stop at the verified point (plain `auto`
+// with no deploy). Present → run the staging tail; prodAutonomous adds the prod tail.
 const deployTarget = A.deployTarget ?? null
 const prodAutonomous = A.prodAutonomous === true
+const deployPlanPath = A.deployPlan || 'DEPLOY-PLAN.md'
+// The ONE curated, cumulative smoke suite every feature appends its checks to.
+const smokeSuitePath = A.smokeContract || 'smoke/prod.suite.json'
+const smokeBatchSize = A.smokeBatchSize ?? 25
+const humanConfirmed = A.humanConfirmed === true
 const planOnly = A.planOnly === true
 // Optional bound: halt after a named phase ('requirements'|'design'|'tdd'|'integration').
 // Used for staged runs and for a cost-capped behavioral smoke that stops before the
@@ -82,6 +90,46 @@ const SLICES_SCHEMA = {
 const GATE_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['ok', 'reason'],
   properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, tests_collected: { type: 'integer' }, exit_code: { type: 'integer' } },
+}
+// ── Prod-tail schemas (Phase F2) ──────────────────────────────────────────
+const SUITE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['valid', 'checks', 'newChecksAdded'],
+  properties: {
+    valid: { type: 'boolean' },
+    newChecksAdded: { type: 'boolean' },
+    errors: { type: 'array', items: { type: 'string' } },
+    checks: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: true, required: ['id'],
+        properties: { id: { type: 'string' }, description: { type: 'string' }, feature: { type: 'string' }, assert: { type: 'string' } },
+      },
+    },
+  },
+}
+const DEPLOY_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['ok', 'reason'],
+  properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, url: { type: 'string' } },
+}
+const SMOKE_BATCH_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['results'],
+  properties: {
+    results: {
+      type: 'array',
+      items: {
+        type: 'object', additionalProperties: false, required: ['id', 'passed'],
+        properties: { id: { type: 'string' }, passed: { type: 'boolean' }, evidence: { type: 'string' } },
+      },
+    },
+  },
+}
+const DEPLOY_GATE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['allowed', 'blockers'],
+  properties: { allowed: { type: 'boolean' }, blockers: { type: 'array', items: { type: 'string' } } },
+}
+const ROLLBACK_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['action', 'reason'],
+  properties: { action: { type: 'string' }, reason: { type: 'string' } },
 }
 
 // ── qdecide adapter: a thin Haiku agent shells validate-proposal.py; the exit
@@ -161,6 +209,14 @@ if (planOnly) {
       buildImplementerPrompt: typeof buildImplementerPrompt,
       buildConflictResolverPrompt: typeof buildConflictResolverPrompt,
       buildIntegrationTestWriterPrompt: typeof buildIntegrationTestWriterPrompt,
+      buildDeployPlanPrompt: typeof buildDeployPlanPrompt,
+      buildStagingDeployPrompt: typeof buildStagingDeployPrompt,
+      buildProdPublishPrompt: typeof buildProdPublishPrompt,
+      buildSmokeBatchPrompt: typeof buildSmokeBatchPrompt,
+      buildRollbackPrompt: typeof buildRollbackPrompt,
+      planSmokeBatches: typeof planSmokeBatches,
+      aggregateSmoke: typeof aggregateSmoke,
+      buildGateState: typeof buildGateState,
     },
   }
 }
@@ -369,6 +425,201 @@ if (!verify || !verify.ok) {
   return { status: 'halted', at: 'verify', decision, report }
 }
 
-// deployTarget null → stop at a verified point (the prod tail is Phase F, opt-in).
-log(`Pipeline complete to verified stop. deployTarget=${deployTarget ? (deployTarget.kind || 'declared') : 'null (stop-at-verify)'}.`)
-return { status: 'verified', report }
+// deployTarget null → stop at the verified point (plain `/qpipeline auto`, no deploy).
+if (!deployTarget) {
+  log('Pipeline complete to verified stop. deployTarget=null (stop-at-verify).')
+  return { status: 'verified', report }
+}
+
+// ── Phase 7: the production tail (DEPLOY-PLAN → staging deploy → staging smoke) ──
+// A deployTarget is DECLARED, so run the reversible staging tail. The prod tail
+// (phase 8) only runs under prodAutonomous (`/qpipeline auto prod`).
+phase('Deploy')
+
+// DEPLOY-PLAN: declared commands + smoke assertions + rollback criteria, reviewed up
+// front (qloop'd), and the feature appends its checks to the cumulative suite.
+await agent(
+  buildDeployPlanPrompt(deployTarget, { requirementsPath, designPath, planPath: deployPlanPath, suitePath: smokeSuitePath }),
+  { label: 'deploy-plan-author', model: 'sonnet' },
+)
+const deployPlanRun = await converge(deployPlanPath, { rounds: undefined, maxRounds: 3 })
+report.artifacts.deploy_plan = deployPlanRun.outcome
+if (halts(deployPlanRun.decision)) return { status: 'halted', at: 'deploy-plan', decision: deployPlanRun.decision, report }
+
+// Read + validate the cumulative smoke suite; confirm THIS feature added its checks
+// (the guardrail refuses a feature that ships no smoke check for its new behavior).
+const suiteRun = await agent(
+  [
+    `Read the cumulative prod smoke suite ${smokeSuitePath} and validate it:`,
+    `  python3 ${toolsDir}/prod-tail.py validate-suite --suite ${smokeSuitePath}`,
+    `Then confirm this feature's NEW behavior added at least one NEW check (cross-check ${deployPlanPath}).`,
+    'Return {valid, checks:[{id,description,feature,assert?}], newChecksAdded, errors}.',
+  ].join('\n'),
+  { label: 'smoke-suite', model: 'haiku', schema: SUITE_SCHEMA },
+)
+const suiteChecks = (suiteRun && Array.isArray(suiteRun.checks)) ? suiteRun.checks : []
+if (!suiteRun || !suiteRun.valid || !suiteChecks.length) {
+  const decision = await qdecide({ type: 'converge', artifact: smokeSuitePath, reason: `Invalid/empty smoke suite: ${(suiteRun && suiteRun.errors || []).join('; ') || 'no checks'}` })
+  return { status: 'halted', at: 'smoke-suite', decision, report }
+}
+
+// Staging deploy (reversible-internal — routed through qdecide for the record).
+const stagingDeploy = await agent(
+  buildStagingDeployPrompt(deployTarget, { planPath: deployPlanPath }),
+  { label: 'staging-deploy', model: 'sonnet', phase: 'Deploy', schema: DEPLOY_SCHEMA },
+)
+if (!stagingDeploy || !stagingDeploy.ok) {
+  const decision = await qdecide({ type: 'staging-deploy', reason: `Staging deploy failed: ${(stagingDeploy && stagingDeploy.reason) || 'no result'}` })
+  return { status: 'halted', at: 'staging-deploy', decision, report }
+}
+
+// Staging smoke: the FULL curated suite via parallel Haiku fan-out.
+const stagingSmoke = await runSmoke(suiteChecks, { url: deployTarget.stagingUrl, environment: 'staging' })
+report.stagingSmoke = stagingSmoke
+if (!stagingSmoke.ok) {
+  // Staging smoke failed → NEVER touch prod. Escalate.
+  const decision = await qdecide({ type: 'staging-deploy', reason: `Staging smoke failed (${stagingSmoke.passed}/${stagingSmoke.total}): ${stagingSmoke.failed.join(', ')}` })
+  return { status: 'halted', at: 'staging-smoke', decision, report }
+}
+
+// Fan the curated suite out in batches (order-preserving) and combine all-or-nothing.
+// Pure helpers mirror prod-tail.py; the batches drive parallel() Haiku smoke agents.
+async function runSmoke(checks, { url, environment }) {
+  const batches = planSmokeBatches(checks, smokeBatchSize)
+  const batchResults = await parallel(
+    batches.map((b) => () => agent(
+      buildSmokeBatchPrompt(b, { url, environment }),
+      { label: `smoke:${environment}:${b.length}`, model: 'haiku', phase: 'Deploy', schema: SMOKE_BATCH_SCHEMA },
+    )),
+  )
+  const flat = []
+  for (const r of batchResults.filter(Boolean)) for (const x of (r.results || [])) flat.push(x)
+  return aggregateSmoke(flat)
+}
+
+// The convergence artifacts, mapped to the {name,p0,p1} shape the gate checks. By
+// this point every one has converged (0 P0/P1) or the pipeline already halted.
+function convergedArtifacts() {
+  const arts = report.artifacts || {}
+  return Object.keys(arts).map((name) => {
+    const counts = (arts[name] && arts[name].counts) || {}
+    return { name, p0: counts.P0 ?? 0, p1: counts.P1 ?? 0 }
+  })
+}
+
+// prodAutonomous OFF (`/qpipeline auto`) → staged/verified STOP, before prod.
+if (!prodAutonomous) {
+  log(`Staging deployed + smoked green (${stagingSmoke.passed}/${stagingSmoke.total}). Stopping before prod (pass prodAutonomous / use \`auto prod\` to deploy).`)
+  return { status: 'staged', report }
+}
+
+// ── Phase 8: GUARDRAIL GATE → qdecide(irreversible) → prod publish → prod smoke ──
+phase('Prod')
+
+// qdecide the IRREVERSIBLE prod deploy. Per H-010 it can never AUTHORIZE; a `decline`
+// hard-blocks, and its recommendation feeds the deterministic guardrail gate. The
+// prodAutonomous opt-in (a declared `auto prod` + rollbackCmd) is the human's
+// pre-authorization; qdecide here acts as a veto/router, not the authorizer.
+const qd = await qdecide({
+  type: 'prod-deploy',
+  reason: `Deploy "${goal}" to production (${deployTarget.kind || 'declared'})`,
+  action: `Publish to production: ${deployTarget.prodCmd || '(declared prodCmd)'}`,
+})
+if (qd.action === 'hard-stop') return { status: 'halted', at: 'prod-guardrail', decision: qd, report }
+
+// Dry-validate the declared rollback command (prod is REFUSED without one). Never
+// executes a real rollback.
+let rollbackDryOk = false
+if (deployTarget.rollbackCmd) {
+  const rbDry = await agent(
+    [
+      `Dry-validate the declared rollback command WITHOUT executing a real rollback: ${deployTarget.rollbackCmd}`,
+      'Confirm it exists and would run (e.g. --dry-run / --help / a plan), but do NOT roll anything back.',
+      'Return {ok, reason}.',
+    ].join('\n'),
+    { label: 'rollback-dry-validate', model: 'haiku', phase: 'Prod', schema: GATE_SCHEMA },
+  )
+  rollbackDryOk = !!(rbDry && rbDry.ok)
+}
+
+// Deterministic §6 guardrail gate — prod-tail.py deploy_gate is the single source of
+// truth. The agent writes the state JSON to a temp file and runs the gate.
+const gateState = buildGateState({
+  artifacts: convergedArtifacts(),
+  unitGreen: !!verify.ok,
+  integrationGreen: !!verify.ok,
+  stagingSmoke,
+  deployTarget,
+  rollbackDryOk,
+  prodSmokeReviewed: true, // DEPLOY-PLAN converged → prod smoke assertions reviewed up front
+  newSmokeChecksAdded: !!(suiteRun && suiteRun.newChecksAdded),
+  qdecideDecision: qd.recommendation,
+  prodAutonomous,
+  humanConfirmed,
+})
+const gate = await agent(
+  [
+    'Evaluate the deterministic production guardrail gate. Write this EXACT JSON to a temp file, then run:',
+    `  python3 ${toolsDir}/prod-tail.py deploy-gate --state <tempfile> ; echo "EXIT:$?"`,
+    'Return {allowed, blockers} exactly as the tool prints (allowed=true only on EXIT:0).',
+    '',
+    'GATE STATE:',
+    JSON.stringify(gateState),
+  ].join('\n'),
+  { label: 'guardrail-gate', model: 'haiku', phase: 'Prod', schema: DEPLOY_GATE_SCHEMA },
+)
+report.deployGate = gate || { allowed: false, blockers: ['gate did not run'] }
+if (!gate || !gate.allowed) {
+  // Surface every blocker in one shot — this is the effective human gate.
+  const decision = await qdecide({ type: 'prod-deploy', reason: `Guardrail gate refused prod: ${(gate && gate.blockers || ['unknown']).join('; ')}` })
+  return { status: 'halted', at: 'guardrail-gate', gate: report.deployGate, decision, report }
+}
+
+// Gate green → PROD PUBLISH (irreversible).
+const prodPublish = await agent(
+  buildProdPublishPrompt(deployTarget, { planPath: deployPlanPath }),
+  { label: 'prod-publish', model: 'sonnet', phase: 'Prod', schema: DEPLOY_SCHEMA },
+)
+if (!prodPublish || !prodPublish.ok) {
+  const decision = await qdecide({ type: 'prod-deploy', reason: `Prod publish failed: ${(prodPublish && prodPublish.reason) || 'no result'}` })
+  return { status: 'halted', at: 'prod-publish', decision, report }
+}
+
+// Prod smoke: the FULL curated suite against production.
+const prodSmoke = await runSmoke(suiteChecks, { url: deployTarget.prodUrl, environment: 'production' })
+report.prodSmoke = prodSmoke
+if (prodSmoke.ok) {
+  log(`PROMOTED: prod deploy of "${goal}" smoked green (${prodSmoke.passed}/${prodSmoke.total}).`)
+  return { status: 'promoted', report }
+}
+
+// Prod smoke FAILED → rollback_decision (stateful downgrades to hard-page, #7).
+const rb = await agent(
+  [
+    'Prod smoke FAILED. Decide the recovery action deterministically — run exactly:',
+    `  python3 ${toolsDir}/prod-tail.py rollback --smoke-failed ${deployTarget.stateful ? '--stateful ' : ''}${deployTarget.rollbackCmd ? '--rollback-present' : ''} ; echo "EXIT:$?"`,
+    'Return {action, reason} exactly as printed (action is "rollback" or "hard-page").',
+  ].join('\n'),
+  { label: 'rollback-decision', model: 'haiku', phase: 'Prod', schema: ROLLBACK_SCHEMA },
+)
+report.rollback = rb || { action: 'hard-page', reason: 'no result' }
+if (!rb || rb.action !== 'rollback') {
+  // Stateful or no-rollback target → page a human immediately (no auto-rollback).
+  const decision = await qdecide({ type: 'prod-deploy', reason: `Prod smoke failed on a stateful/no-rollback target — HARD PAGE. Failures: ${prodSmoke.failed.join(', ')}` })
+  return { status: 'hard-page', at: 'prod-smoke', decision, report }
+}
+
+// Auto-rollback → re-smoke to PROVE prod is restored.
+const rollback = await agent(
+  buildRollbackPrompt(deployTarget),
+  { label: 'auto-rollback', model: 'sonnet', phase: 'Prod', schema: DEPLOY_SCHEMA },
+)
+const reSmoke = await runSmoke(suiteChecks, { url: deployTarget.prodUrl, environment: 'production' })
+report.reSmoke = reSmoke
+if (rollback && rollback.ok && reSmoke.ok) {
+  const decision = await qdecide({ type: 'prod-deploy', reason: `Prod deploy of "${goal}" failed smoke; auto-rollback restored prod (re-smoke ${reSmoke.passed}/${reSmoke.total} green). Review needed.` })
+  return { status: 'rolled-back', at: 'prod-smoke', decision, report }
+}
+// Rollback did NOT restore prod → hard-page immediately.
+const decision = await qdecide({ type: 'prod-deploy', reason: `Prod smoke failed AND auto-rollback did NOT restore prod (re-smoke ${reSmoke.passed}/${reSmoke.total}). HARD PAGE.` })
+return { status: 'hard-page', at: 'prod-smoke', decision, report }

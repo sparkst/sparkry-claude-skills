@@ -153,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     vs = sub.add_parser("validate-suite", help="Validate a smoke suite JSON")
     vs.add_argument("--suite", required=True, help="Path to smoke suite JSON (or - for stdin)")
 
+    rb = sub.add_parser("rollback", help="Decide the recovery action after a prod-smoke result")
+    rb.add_argument("--smoke-failed", action="store_true", help="Prod smoke failed")
+    rb.add_argument("--stateful", action="store_true", help="Target is stateful (downgrades to hard-page, #7)")
+    rb.add_argument("--rollback-present", action="store_true", help="A validated rollback command is available")
+
     args = parser.parse_args(argv)
 
     if args.command == "deploy-gate":
@@ -164,6 +169,16 @@ def main(argv: list[str] | None = None) -> int:
         ok, errors = validate_smoke_suite(_load(args.suite))
         print(json.dumps({"ok": ok, "errors": errors}, indent=2))
         return 0 if ok else 1
+
+    if args.command == "rollback":
+        res = rollback_decision(
+            smoke_failed=args.smoke_failed,
+            stateful=args.stateful,
+            rollback_present=args.rollback_present,
+        )
+        print(json.dumps(res, indent=2))
+        # Non-zero when a human must be paged, so the workflow can branch on exit code.
+        return 1 if res["action"] == "hard-page" else 0
 
     parser.print_help()
     return 1

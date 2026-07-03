@@ -43,6 +43,7 @@ const TARGETS = [
       "tdd-prompts.mjs",
       "escalation-broker.mjs",
       "integrator-prompts.mjs",
+      "prod-prompts.mjs",
     ],
   },
 ];
