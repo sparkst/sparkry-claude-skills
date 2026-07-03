@@ -35,7 +35,7 @@ Invoke the **Workflow** tool with that `scriptPath` and:
   "goal": "<the one-line goal to build>",
   "requirements": "requirements/current.md",
   "design": "DESIGN.md",
-  "toolsDir": "<plugin>/tools  (or ~/.claude/ai-review-tools/tools in the fork)",
+  "toolsDir": "<plugin>/tools  (or ~/.claude/ai-review-tools in the fork)",
   "threshold": 0,
   "maxRounds": 4,
   "maxParallel": 5
