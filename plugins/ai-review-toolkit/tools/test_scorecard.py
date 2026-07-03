@@ -291,6 +291,51 @@ class TestRenderMarkdown:
 
 
 # ---------------------------------------------------------------------------
+# Deploy gate surfacing (Phase F2: the §6 guardrail verdict lives in the scorecard)
+# ---------------------------------------------------------------------------
+
+class TestDeployGate:
+    def test_no_deploy_section_when_state_has_no_gate(self):
+        report = build_scorecard(_qreview_state(), aggregate_transcript([]), load_pricing())
+        assert report.get("deploy") is None
+
+    def test_deploy_section_surfaces_allowed_verdict(self):
+        state = {**_qreview_state(), "deploy_gate": {"allowed": True, "blockers": [],
+                 "checklist": {"unit_green": True}}}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        assert report["deploy"]["allowed"] is True
+        assert report["deploy"]["blockers"] == []
+
+    def test_deploy_section_surfaces_blockers(self):
+        state = {**_qreview_state(), "deploy_gate": {"allowed": False,
+                 "blockers": ["unit suite is not green", "qdecide returned decline"]}}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        assert report["deploy"]["allowed"] is False
+        assert len(report["deploy"]["blockers"]) == 2
+
+    def test_deploy_section_carries_prod_smoke_and_status(self):
+        state = {**_qreview_state(), "status": "promoted",
+                 "deploy_gate": {"allowed": True, "blockers": []},
+                 "prod_smoke": {"ok": True, "total": 210, "passed": 210, "failed": []}}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        assert report["deploy"]["prod_smoke"]["passed"] == 210
+
+    def test_render_shows_deploy_gate_verdict_and_blockers(self):
+        state = {**_qreview_state(), "deploy_gate": {"allowed": False,
+                 "blockers": ["no rollbackCmd declared"]}}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        md = render_markdown(report)
+        assert "Deploy" in md
+        assert "REFUSED" in md or "BLOCKED" in md
+        assert "no rollbackCmd declared" in md
+
+    def test_render_omits_deploy_section_without_a_gate(self):
+        report = build_scorecard(_qreview_state(), aggregate_transcript([]), load_pricing())
+        md = render_markdown(report)
+        assert "Deploy Gate" not in md
+
+
+# ---------------------------------------------------------------------------
 # CLI end-to-end
 # ---------------------------------------------------------------------------
 

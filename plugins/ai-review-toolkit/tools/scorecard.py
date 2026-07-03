@@ -297,6 +297,32 @@ def _process_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
+def _deploy_section(state: dict[str, Any]) -> dict[str, Any] | None:
+    """Surface the prod GUARDRAIL GATE verdict (Phase F2) when a run produced one.
+
+    Returns None for the common case (no deploy tail), so the scorecard only grows
+    a Deploy section for `/qpipeline auto prod` runs. See prod-tail.py `deploy_gate`.
+    """
+    gate = state.get("deploy_gate")
+    if not isinstance(gate, dict):
+        return None
+    section: dict[str, Any] = {
+        "allowed": bool(gate.get("allowed")),
+        "blockers": list(gate.get("blockers", []) or []),
+        "checklist": gate.get("checklist", {}) or {},
+    }
+    for key in ("staging_smoke", "prod_smoke"):
+        smoke = state.get(key)
+        if isinstance(smoke, dict):
+            section[key] = {
+                "ok": bool(smoke.get("ok")),
+                "total": int(smoke.get("total", 0) or 0),
+                "passed": int(smoke.get("passed", 0) or 0),
+                "failed": list(smoke.get("failed", []) or []),
+            }
+    return section
+
+
 def build_scorecard(
     state: dict[str, Any],
     transcript_agg: dict[str, Any],
@@ -347,7 +373,7 @@ def build_scorecard(
             "note": "model execution time = sum of per-request durations, not wall clock",
         }
 
-    return {
+    report: dict[str, Any] = {
         "process": {
             "status": state.get("status"),
             "converged": syn.get("converged") if syn else None,
@@ -373,6 +399,11 @@ def build_scorecard(
         },
         "time": time_section,
     }
+
+    deploy = _deploy_section(state)
+    if deploy is not None:
+        report["deploy"] = deploy
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +486,23 @@ def render_markdown(report: dict[str, Any]) -> str:
     else:
         lines.append("- unavailable (no transcript matched)")
     lines.append("")
+
+    dep = report.get("deploy")
+    if dep is not None:
+        verdict = "ALLOWED (prod publish authorized)" if dep.get("allowed") else "REFUSED (prod blocked)"
+        lines.append("## Deploy Gate\n")
+        lines.append(f"- Guardrail gate: **{verdict}**")
+        for b in dep.get("blockers", []):
+            lines.append(f"  - blocker: {b}")
+        for label, key in (("Staging smoke", "staging_smoke"), ("Prod smoke", "prod_smoke")):
+            smoke = dep.get(key)
+            if smoke:
+                mark = "PASS" if smoke.get("ok") else "FAIL"
+                line = f"- {label}: **{mark}** ({smoke.get('passed', 0)}/{smoke.get('total', 0)})"
+                if smoke.get("failed"):
+                    line += f" — failed: {', '.join(str(f) for f in smoke['failed'])}"
+                lines.append(line)
+        lines.append("")
 
     return "\n".join(lines)
 

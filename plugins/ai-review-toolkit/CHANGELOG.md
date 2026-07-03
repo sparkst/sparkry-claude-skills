@@ -1,5 +1,34 @@
 # Changelog — ai-review-toolkit
 
+## 1.5.0
+
+### Added
+- **`/qpipeline auto prod` — the autonomous production tail (Phase F2).** After the
+  verified stop, `auto prod` (`prodAutonomous: true` + a declared `deployTarget`)
+  runs: `DEPLOY-PLAN (qloop'd) → staging deploy → staging smoke → guardrail gate →
+  qdecide(irreversible) → prod publish → prod smoke → PROMOTE | auto-rollback →
+  re-smoke → escalate/hard-page`. Plain `/qpipeline auto` is unchanged: no
+  `deployTarget` stops at verify (`status: verified`); with a `deployTarget` it
+  staging-deploys + smokes then stops before prod (`status: staged`).
+- **`deployTarget` is DECLARED, never inferred** — `{kind, stagingCmd, prodCmd,
+  stagingUrl, prodUrl, rollbackCmd, stateful}`. `rollbackCmd` is mandatory for prod
+  (the gate refuses prod without a present, dry-validated rollback); `stateful:true`
+  downgrades a failed-smoke recovery to hard-page-only (code rollback can't undo
+  data mutations).
+- **Curated cumulative prod smoke suite** (`smoke/prod.suite.json`, `smokeContract`
+  arg): one versioned regression net every feature appends its checks to (the gate
+  fails a feature that ships no smoke check for its new behavior); the full suite
+  runs against prod via parallel Haiku fan-out.
+- The **guardrail-gate verdict now surfaces in the scorecard** (`scorecard.py`),
+  with staging/prod smoke pass-rates and every blocker.
+
+### Internal
+- New `js/prod-prompts.mjs` (deploy/publish/smoke/rollback prompt builders +
+  in-process `planSmokeBatches`/`aggregateSmoke` mirrors + `buildGateState`),
+  inlined into `pipeline-auto.workflow.js`. `prod-tail.py` gains a `rollback` CLI
+  subcommand (exit-coded so the workflow branches deterministically). All safety
+  verdicts (`deploy_gate`, `rollback_decision`) stay single-source in `prod-tail.py`.
+
 ## 1.3.0
 
 ### Changed

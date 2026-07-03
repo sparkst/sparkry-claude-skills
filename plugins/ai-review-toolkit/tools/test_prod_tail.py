@@ -173,3 +173,43 @@ def test_smoke_suite_rejects_missing_required_fields():
     suite = {"version": 1, "checks": [{"id": "SMK-001"}]}
     ok, errors = validate_smoke_suite(suite)
     assert ok is False
+
+
+# ── CLI: rollback subcommand (the failure-path verdict, shelled by the workflow) ──
+
+def _run_cli(argv):
+    """Run prod_tail.main(argv), capturing stdout + exit code."""
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = prod_tail.main(argv)
+    import json as _json
+    out = _json.loads(buf.getvalue()) if buf.getvalue().strip() else None
+    return code, out
+
+
+def test_cli_rollback_stateless_failure_auto_rolls_back():
+    code, out = _run_cli(["rollback", "--smoke-failed", "--rollback-present"])
+    assert out["action"] == "rollback"
+    assert code == 0  # a decidable verdict is a successful invocation
+
+
+def test_cli_rollback_stateful_downgrades_to_hard_page():
+    code, out = _run_cli(["rollback", "--smoke-failed", "--stateful", "--rollback-present"])
+    assert out["action"] == "hard-page"
+    # a hard-page is a non-zero exit so the workflow can branch on it deterministically
+    assert code != 0
+
+
+def test_cli_rollback_no_command_hard_pages():
+    code, out = _run_cli(["rollback", "--smoke-failed"])
+    assert out["action"] == "hard-page"
+    assert code != 0
+
+
+def test_cli_rollback_passed_smoke_is_noop():
+    code, out = _run_cli(["rollback", "--rollback-present"])
+    assert out["action"] == "none"
+    assert code == 0

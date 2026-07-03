@@ -1,7 +1,7 @@
 ---
 name: qpipeline
 description: "This skill should be used when the user asks to \"run the full pipeline\", \"qpipeline\", \"end-to-end review\", \"thorough review\", \"qpipeline auto\", an autonomous build, or wants a composable multi-phase workflow. Presets: review (quick), thorough (full QRALPH-equivalent), content, code. `auto` = autonomous end-to-end SDLC Workflow. Custom phase composition supported."
-version: 0.2.0
+version: 0.3.0
 ---
 
 # /qpipeline -- Composable Multi-Phase Pipeline Orchestrator
@@ -42,15 +42,38 @@ Invoke the **Workflow** tool with that `scriptPath` and:
 }
 ```
 
-Optional args: `deployTarget` (declared, never inferred — see §6 of the design), `stopAfter` (`requirements`|`design`|`tdd`|`integration`, for staged/bounded runs), `planOnly: true` (a zero-spend parser/plan check), and `team` (pre-resolved; otherwise phase 0 resolves it via `team-selector.py`). The Workflow streams per-phase progress via `log()` (watch with `/workflows`) and returns a `report` with each artifact's convergence outcome. On a hard-stop / human-gate it returns `{status:"halted", at, decision, report}` — surface the decision and stop.
+Optional args: `deployTarget` (declared, never inferred — see §6 of the design and the `auto prod` section below), `prodAutonomous: true` (opt-in prod deploy — set by `auto prod`), `smokeContract` (path to the cumulative smoke suite, default `smoke/prod.suite.json`), `stopAfter` (`requirements`|`design`|`tdd`|`integration`, for staged/bounded runs), `planOnly: true` (a zero-spend parser/plan check), and `team` (pre-resolved; otherwise phase 0 resolves it via `team-selector.py`). The Workflow streams per-phase progress via `log()` (watch with `/workflows`) and returns a `report` with each artifact's convergence outcome. On a hard-stop / human-gate it returns `{status:"halted", at, decision, report}` — surface the decision and stop.
+
+**Return `status` values:** `verified` (no deployTarget — stopped at verify), `staged` (deployTarget given, staging deployed + smoked green, stopped before prod), `promoted` (`auto prod` — prod deployed + smoked green), `rolled-back` (prod smoke failed, auto-rollback restored prod), `hard-page` (prod smoke failed and a human must be paged — stateful target or rollback failed to restore), `halted` (a gate refused; see `decision`).
 
 **This mutates the working tree** (it authors requirements/design and, in the TDD phase, builds code in git worktrees). Run it in the target project on a branch you're willing to have modified.
 
 ### `/qpipeline auto prod`
 
-The production tail (staging deploy → guardrail gate → prod deploy → curated cumulative smoke suite → auto-rollback) is **Phase F — not yet shipped**. Until then, `auto` always stops at the verified point; passing `prodAutonomous`/`deployTarget` does not deploy. Do not tell the user `auto prod` deploys yet.
+`/qpipeline auto prod` is the explicit opt-in that, after the verified stop, runs the **production tail**: `DEPLOY-PLAN (qloop'd) → staging deploy → staging smoke → guardrail gate → qdecide(irreversible) → prod publish → prod smoke → PROMOTE | auto-rollback → re-smoke → escalate/hard-page`. Invoke the Workflow with `prodAutonomous: true` plus a declared `deployTarget`. Plain `/qpipeline auto` (no `prodAutonomous`) never publishes to prod: with a `deployTarget` it staging-deploys + smokes then stops (`status: staged`); with no `deployTarget` it stops at verify (`status: verified`).
 
-> **Validation status:** phases 0–2 (requirements → design → slice validation) are behaviorally verified end-to-end; the full inlined Workflow parses in the sandbox. Phases 3–6 (per-slice TDD worktrees, serialized integration, verify) are structurally complete and parser-verified but await a full end-to-end behavioral run before production reliance.
+**`deployTarget` is DECLARED, never inferred** (auto-detect may only *suggest* commands):
+
+```json
+{
+  "kind": "cloudflare-worker | vercel | npm | ...",
+  "stagingCmd": "wrangler deploy --env staging",
+  "prodCmd": "wrangler deploy --env production",
+  "stagingUrl": "https://staging.example.dev",
+  "prodUrl": "https://example.dev",
+  "rollbackCmd": "wrangler rollback --env production",
+  "stateful": false
+}
+```
+
+- **`rollbackCmd` is mandatory for prod** — the guardrail gate REFUSES prod without a present, dry-validated rollback.
+- **`stateful: true`** downgrades a failed-smoke recovery from auto-rollback to **hard-page-only** (code rollback can't undo DB/KV/R2 mutations).
+
+**The guardrail gate** (`prod-tail.py deploy_gate`, surfaced in the scorecard) must be fully green before prod: every artifact 0 P0/P1, unit + integration green, staging smoke 100%, rollback present + dry-validated, prod smoke assertions reviewed up front, this feature added its new smoke checks, `prodAutonomous` set, and **qdecide ≠ decline** (a `decline` hard-blocks; qdecide can never *authorize* an irreversible deploy — H-010).
+
+**The curated, cumulative prod smoke suite** (`smoke/prod.suite.json`, `smokeContract` arg) is ONE maintained, versioned artifact — a growing regression net, not per-run-ephemeral. **Every feature MUST append its checks** (the gate fails a feature that ships no smoke check for its new behavior). Post-deploy the FULL suite runs against prod via parallel Haiku fan-out (batched by `plan_smoke_batches`, target 200+ checks, sub-linear wall-clock). Any check fails → auto-rollback (stateless) or hard-page (stateful) → re-smoke to prove restored.
+
+> **Validation status:** phases 0–2 (requirements → design → slice validation) are behaviorally verified end-to-end; the full inlined Workflow (incl. the phase 7–8 prod tail) parses/links in the sandbox and the prod-tail safety cores are unit-tested. Phases 3–8 (per-slice TDD worktrees, serialized integration, verify, deploy tail) are structurally complete and parser-verified but await a full end-to-end behavioral run before production reliance. **Always dry-run `auto prod` against a throwaway staging target first.**
 
 ### Scorecard (mandatory final step)
 
