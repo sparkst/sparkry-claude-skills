@@ -24,6 +24,12 @@ Ship with four presets. Accept custom phase lists. Gate on human approval where 
 
 The presets above are the **gated, human-in-the-loop** pipeline. `/qpipeline auto` is a **separate, autonomous** mode — see below.
 
+## Version check (best-effort, non-blocking)
+
+Before the first phase, run `python3 <tools>/version-check.py check` once. It is
+rate-limited (~once/day) and fails silent-and-open. If it prints an upgrade notice,
+relay that single line to the user, then continue — never block, retry, or wait on it.
+
 ## Autonomous mode: `/qpipeline auto`
 
 When the user asks for `/qpipeline auto` (or "build this autonomously end-to-end"), run the **`pipeline-auto` ultracode Workflow**. The gated presets above exist to pause at human gates; `auto` is the opposite (no stopping). This mode drives a full SDLC from a one-line goal to a verified stop:

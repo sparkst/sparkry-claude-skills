@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # full history so the version-bump gate can diff against the base
 
       - uses: actions/setup-python@v6
         with:
@@ -19,6 +21,16 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
+
+      - name: Enforce ai-review-toolkit version bump
+        # A PR that changes plugin source must bump the version in BOTH plugin.json
+        # and marketplace.json (a stale marketplace.json silently no-ops updates).
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          python3 plugins/ai-review-toolkit/tools/check-version-bump.py --base "origin/$BASE_REF"
 
       - name: Install test deps
         # pyyaml is a runtime import in integrations-trello (trello_integration.py)

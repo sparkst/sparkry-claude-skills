@@ -31,6 +31,12 @@ locked against it in CI, so verdicts match the Python oracle exactly.
 
 Follow in order.
 
+### 0. Version check (best-effort, non-blocking)
+
+Run `python3 <tools>/version-check.py check` once at the start. It is rate-limited
+(~once/day) and fails silent-and-open. If it prints an upgrade notice, relay that
+single line to the user, then continue — never block, retry, or wait on it.
+
 ### 1. Identify artifact + requirements
 
 Accept a file path or inline content for each. Write inline content to a temp

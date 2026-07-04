@@ -57,3 +57,15 @@ commands/        <- Slash command descriptions
 - Never hand-write a review/pipeline workflow script -- the only sanctioned paths are
   `review-loop.workflow.js` and `pipeline-auto.workflow.js`; a hand-rolled script has
   no `model:` tiering and silently inherits the invoking session's model
+
+## Release discipline
+
+- **Any change to shippable plugin source requires a version bump in BOTH**
+  `.claude-plugin/plugin.json` AND the `ai-review-toolkit` entry of the root
+  `.claude-plugin/marketplace.json`, kept equal. A stale `marketplace.json` makes
+  `/plugin marketplace update` silently no-op. CHANGELOG-only edits are exempt.
+- Enforced by `tools/check-version-bump.py` — the CI step (`.github/workflows/tests.yml`,
+  on PRs) is the unbypassable gate; the local `.githooks/pre-push` hook is the fast
+  local catch. **Enable the hook once per clone:** `git config core.hooksPath .githooks`.
+  Bypass an intentional WIP push with `git push --no-verify` (CI still enforces it).
+- `tools/version-check.py` is the runtime self-check the SKILLs run at start.
