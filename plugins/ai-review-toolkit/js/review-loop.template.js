@@ -22,6 +22,11 @@ return await runLoop(
     threshold: A.threshold ?? 0,
     rounds: A.rounds,
     maxRounds: A.maxRounds,
+    // Optional CLI-time signals: `complexity` ({files, toolTypes, contextFraction})
+    // drives in-engine reviewer model tiering; `skipTests` suppresses the test
+    // gate for artifacts with no executable test surface.
+    complexity: A.complexity ?? null,
+    skipTests: A.skipTests ?? false,
   },
   { agent, parallel, phase, log },
 )
