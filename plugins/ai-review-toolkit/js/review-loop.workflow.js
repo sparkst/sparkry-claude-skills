@@ -279,30 +279,36 @@ function synthesizeFindings(reviewerResults, warnings = null) {
 // Model tiering
 // ---------------------------------------------------------------------------
 
-const HIGH_STAKES_REVIEWERS = new Set([
-  "security-reviewer",
-  "architecture-reviewer",
-]);
+// Lenses eligible for the domain-score-gated high-stakes opus seat (OPT-006:
+// architecture-reviewer dropped). Callers (team-selector.py) still gate the
+// seat on the security/compliance domain scoring or an explicit override, then
+// pass the resolved `highStakes` boolean here.
+const HIGH_STAKES_REVIEWERS = new Set(["security-reviewer"]);
 
-/** True if change complexity alone warrants Opus. */
+/**
+ * True if change complexity alone warrants Opus. OPT-005: raised from the
+ * hair-trigger to a genuinely-large-change bar; the tool_types trigger dropped.
+ */
 function escalates(complexity) {
-  return (
-    complexity.file_count > 1 ||
-    complexity.tool_types > 2 ||
-    complexity.context_fraction > 0.2
-  );
+  return complexity.file_count > 3 || complexity.context_fraction > 0.4;
 }
 
 /**
- * Pick the model for a reviewer under the Option-3 tiering policy.
- * High-stakes lens or escalating complexity -> opus; else the agent's model.
+ * Pick the model for a reviewer under the revised tiering policy. Pure function
+ * of explicit per-reviewer signals — the team-level decisions of who is
+ * eligible/high-stakes live in team-selector.py::select_team_with_scores.
+ * high_stakes -> opus; else eligible + large change -> opus; else agent.model.
  * Mirrors team-selector.py::resolve_reviewer_model.
  */
-function resolveReviewerModel(agent, complexity = null) {
-  if (HIGH_STAKES_REVIEWERS.has(agent.name)) {
+function resolveReviewerModel(
+  agent,
+  complexity = null,
+  { escalationEligible = false, highStakes = false } = {},
+) {
+  if (highStakes) {
     return "opus";
   }
-  if (complexity !== null && escalates(complexity)) {
+  if (escalationEligible && complexity !== null && escalates(complexity)) {
     return "opus";
   }
   return agent.model;

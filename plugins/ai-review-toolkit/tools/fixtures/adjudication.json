@@ -580,12 +580,33 @@
             "context_fraction": 0.0,
             "file_count": 1,
             "tool_types": 1
-          }
+          },
+          "high_stakes": true
         },
-        "name": "security_always_opus"
+        "name": "high_stakes_forces_opus"
       },
       {
-        "expected": "opus",
+        "expected": "sonnet",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "security-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 1,
+            "tool_types": 1
+          }
+        },
+        "name": "security_name_alone_stays_sonnet"
+      },
+      {
+        "expected": "sonnet",
         "input": {
           "agent": {
             "description": "d",
@@ -602,7 +623,7 @@
             "tool_types": 1
           }
         },
-        "name": "architecture_always_opus"
+        "name": "architecture_name_alone_stays_sonnet"
       },
       {
         "expected": "sonnet",
@@ -638,14 +659,15 @@
           },
           "complexity": {
             "context_fraction": 0.0,
-            "file_count": 2,
+            "file_count": 4,
             "tool_types": 1
-          }
+          },
+          "escalation_eligible": true
         },
-        "name": "multi_file_escalates"
+        "name": "eligible_multi_file_escalates"
       },
       {
-        "expected": "opus",
+        "expected": "sonnet",
         "input": {
           "agent": {
             "description": "d",
@@ -658,11 +680,32 @@
           },
           "complexity": {
             "context_fraction": 0.0,
-            "file_count": 1,
-            "tool_types": 3
+            "file_count": 9,
+            "tool_types": 1
           }
         },
-        "name": "three_tool_types_escalates"
+        "name": "not_eligible_multi_file_stays_sonnet"
+      },
+      {
+        "expected": "sonnet",
+        "input": {
+          "agent": {
+            "description": "d",
+            "domains": [
+              "backend"
+            ],
+            "model": "sonnet",
+            "name": "ux-reviewer",
+            "review_lens": "lens"
+          },
+          "complexity": {
+            "context_fraction": 0.0,
+            "file_count": 3,
+            "tool_types": 1
+          },
+          "escalation_eligible": true
+        },
+        "name": "three_files_does_not_escalate"
       },
       {
         "expected": "sonnet",
@@ -679,10 +722,11 @@
           "complexity": {
             "context_fraction": 0.0,
             "file_count": 1,
-            "tool_types": 2
-          }
+            "tool_types": 9
+          },
+          "escalation_eligible": true
         },
-        "name": "two_tool_types_stays"
+        "name": "tool_types_no_longer_escalates"
       },
       {
         "expected": "opus",
@@ -697,12 +741,13 @@
             "review_lens": "lens"
           },
           "complexity": {
-            "context_fraction": 0.21,
+            "context_fraction": 0.41,
             "file_count": 1,
             "tool_types": 1
-          }
+          },
+          "escalation_eligible": true
         },
-        "name": "over_20pct_context_escalates"
+        "name": "over_40pct_context_escalates"
       },
       {
         "expected": "sonnet",
@@ -717,12 +762,13 @@
             "review_lens": "lens"
           },
           "complexity": {
-            "context_fraction": 0.2,
+            "context_fraction": 0.4,
             "file_count": 1,
             "tool_types": 1
-          }
+          },
+          "escalation_eligible": true
         },
-        "name": "at_20pct_context_stays"
+        "name": "at_40pct_context_stays"
       }
     ],
     "synthesize_findings": [

@@ -38,11 +38,14 @@ Same as `/qreview` step 2 — run the team selector and capture the resolved tea
 ```
 python3 <tools>/team-selector.py "<short artifact description>" \
   --artifact <artifact_path> --json \
-  --files <N> --tool-types <N> --context-window 200000
+  --files <N> --context-window 200000 [--max 5] [--high-stakes]
 ```
 
-Parse the JSON `team` array. Pass it straight into the Workflow — **do not
-re-tier or override models by hand.**
+Default team is 3 reviewers seated by domain relevance; complexity escalates
+only the top-2 domain lenses (files `> 3` / context `> 40%`), security earns
+Opus only on a scored security domain or `--high-stakes`, and Opus is
+hard-capped at 2 seats. Parse the JSON `team` array. Pass it straight into the
+Workflow — **do not re-tier or override models by hand.**
 
 ### 3. Run the convergence Workflow
 
