@@ -77,35 +77,55 @@ class Complexity:
         )
 
     def escalates(self) -> bool:
-        """True if change complexity alone warrants Opus."""
+        """True if change complexity alone warrants Opus.
+
+        OPT-005: raised from the hair-trigger (files>1 OR tool_types>2 OR
+        ctx>0.20, which fired on virtually every real review) to a
+        genuinely-large-change bar. The tool_types trigger is dropped — it
+        added no signal a multi-file/big-context change didn't already carry.
+        """
         return (
-            self.file_count > 1
-            or self.tool_types > 2
-            or self.context_fraction > 0.20
+            self.file_count > 3
+            or self.context_fraction > 0.40
         )
 
 
-# Reviewers whose lens always warrants the strongest model.
-HIGH_STAKES_REVIEWERS: frozenset[str] = frozenset(
-    {"security-reviewer", "architecture-reviewer"}
-)
+# Lenses eligible for the domain-score-gated high-stakes opus seat.
+# OPT-006: architecture-reviewer dropped (it reaches opus via the per-reviewer
+# complexity path when architecture genuinely dominates). Membership here is
+# only *eligibility*: select_team_with_scores still gates the seat on the
+# security/compliance domain actually scoring (>0.3) or an explicit override.
+HIGH_STAKES_REVIEWERS: frozenset[str] = frozenset({"security-reviewer"})
+
+# Hard cap on paid opus seats per team (OPT-005).
+MAX_OPUS_SEATS: int = 2
 
 
 def resolve_reviewer_model(
     agent: "AgentDef",
     complexity: "Complexity | None" = None,
+    *,
+    escalation_eligible: bool = False,
+    high_stakes: bool = False,
 ) -> str:
-    """Pick the model for a reviewer under the Option-3 tiering policy.
+    """Pick the model for a reviewer under the revised tiering policy.
 
-    Sonnet 5 is the default. Escalate to Opus when the lens is high-stakes
-    (security/architecture) or when change complexity crosses a threshold
-    (multi-file, >2 tool-execution types, or >20% of context at start).
-    A catalog may pin a cheaper base model (e.g. haiku); escalation only
-    ever pushes the model *up* to opus.
+    Sonnet 5 is the default. This is a *pure* function of explicit per-reviewer
+    signals — the team-level decisions of *who* is eligible (top-2 domain lens)
+    and *who* is high-stakes (security domain scored / --high-stakes flag) are
+    made by :func:`select_team_with_scores`, so the JS mirror can stay a dumb,
+    parity-locked unit.
+
+    - ``high_stakes`` -> opus, regardless of complexity (OPT-006).
+    - ``escalation_eligible`` AND the change is genuinely large (OPT-005) -> opus.
+    - otherwise the agent's catalog model (never escalates a non-eligible seat).
+
+    A catalog may pin a cheaper base model (e.g. haiku); escalation only ever
+    pushes the model *up* to opus.
     """
-    if agent.name in HIGH_STAKES_REVIEWERS:
+    if high_stakes:
         return "opus"
-    if complexity is not None and complexity.escalates():
+    if escalation_eligible and complexity is not None and complexity.escalates():
         return "opus"
     return agent.model
 
@@ -405,18 +425,35 @@ def _score_agent(agent: AgentDef, domain_scores: list[DomainScore]) -> float:
     return sum(domain_map.get(d, 0.0) for d in agent.domains)
 
 
+def _security_domain_score(domain_scores: list[DomainScore]) -> float:
+    """Highest score across the security-shaped domains (OPT-006 gate)."""
+    return max(
+        (ds.score for ds in domain_scores if ds.domain in ("security", "compliance")),
+        default=0.0,
+    )
+
+
 def select_team_with_scores(
     description: str,
     artifact_path: str | None = None,
     min_reviewers: int = 2,
-    max_reviewers: int = 5,
+    max_reviewers: int = 3,
     catalog_path: str | None = None,
     complexity: "Complexity | None" = None,
+    high_stakes: bool = False,
 ) -> tuple[list[AgentDef], list[DomainScore]]:
     """Select team and return (team, domain_scores) to avoid re-classification.
 
-    Each returned agent's ``model`` reflects the Option-3 tiering policy
-    (see :func:`resolve_reviewer_model`); the shared catalog is not mutated.
+    Seating (OPT-014): every lens — including requirements-reviewer — competes
+    on its domain score; there is no unconditional seat. The default team size
+    is 3, sized by how many lenses clear the 0.5 relevance bar, floored at
+    ``min_reviewers`` (>= 2) and capped at ``max_reviewers``.
+
+    Model tiering (OPT-005/006): opus is spent per-reviewer, not team-wide. The
+    security lens earns opus only when the security/compliance domain scored
+    (>0.3) or ``high_stakes`` is set; complexity escalation reaches only the
+    top-2 domain-scoring *specialist* lenses; and no team carries more than
+    ``MAX_OPUS_SEATS`` opus seats. The shared catalog is not mutated.
     """
     if min_reviewers < 2:
         min_reviewers = 2
@@ -426,32 +463,17 @@ def select_team_with_scores(
     catalog = load_catalog(catalog_path)
     domain_scores = classify_domains(description, artifact_path)
 
-    req_reviewer: AgentDef | None = None
-    others: list[tuple[float, AgentDef]] = []
+    # Rank every lens by domain relevance; ties keep catalog order (stable).
+    ranked = sorted(
+        ((_score_agent(agent, domain_scores), idx, agent)
+         for idx, agent in enumerate(catalog)),
+        key=lambda t: (-t[0], t[1]),
+    )
 
-    for agent in catalog:
-        score = _score_agent(agent, domain_scores)
-        if agent.name == "requirements-reviewer":
-            req_reviewer = agent
-        else:
-            others.append((score, agent))
-
-    others.sort(key=lambda pair: pair[0], reverse=True)
-    above_threshold = sum(1 for score, _ in others if score > 0.3)
+    above_threshold = sum(1 for score, _, _ in ranked if score > 0.5)
     desired = max(min_reviewers, min(max_reviewers, above_threshold))
 
-    team: list[AgentDef] = []
-    if req_reviewer is not None:
-        team.append(req_reviewer)
-
-    slots_remaining = max(desired - len(team), 0)
-    if len(team) < min_reviewers:
-        slots_remaining = max(slots_remaining, min_reviewers - len(team))
-
-    for _score, agent in others[:slots_remaining]:
-        team.append(agent)
-
-    team = team[:max_reviewers]
+    team = [agent for _score, _idx, agent in ranked[:desired]]
 
     if len(team) < min_reviewers:
         raise ValueError(
@@ -459,22 +481,58 @@ def select_team_with_scores(
             f"only {len(team)} available"
         )
 
-    # Apply the tiering policy without mutating the shared catalog objects.
-    team = [
-        replace(agent, model=resolve_reviewer_model(agent, complexity))
+    # --- per-reviewer model tiering -------------------------------------
+    # Complexity escalates only the top-2 domain-scoring SPECIALIST lenses;
+    # the requirements-reviewer generalist covers ALL_DOMAINS and is never a
+    # specialist seat, so it is excluded from that ranking.
+    specialists = sorted(
+        ((_score_agent(agent, domain_scores), i, agent)
+         for i, agent in enumerate(team)
+         if agent.name != "requirements-reviewer"),
+        key=lambda t: (-t[0], t[1]),
+    )
+    escalation_eligible = {agent.name for _s, _i, agent in specialists[:2]}
+
+    sec_score = _security_domain_score(domain_scores)
+
+    def _is_high_stakes(agent: AgentDef) -> bool:
+        if high_stakes and agent.name in HIGH_STAKES_REVIEWERS:
+            return True
+        return agent.name in HIGH_STAKES_REVIEWERS and sec_score > 0.3
+
+    resolved = [
+        replace(agent, model=resolve_reviewer_model(
+            agent,
+            complexity,
+            escalation_eligible=agent.name in escalation_eligible,
+            high_stakes=_is_high_stakes(agent),
+        ))
         for agent in team
     ]
 
-    return team, domain_scores
+    # Hard cap on opus seats: keep high-stakes seats first, then the strongest
+    # domain-scoring lenses; demote the rest back to their catalog model.
+    opus_idxs = [i for i, a in enumerate(resolved) if a.model == "opus"]
+    if len(opus_idxs) > MAX_OPUS_SEATS:
+        opus_idxs.sort(key=lambda i: (
+            0 if _is_high_stakes(team[i]) else 1,
+            -_score_agent(team[i], domain_scores),
+            i,
+        ))
+        for i in opus_idxs[MAX_OPUS_SEATS:]:
+            resolved[i] = replace(resolved[i], model=team[i].model)
+
+    return resolved, domain_scores
 
 
 def select_team(
     description: str,
     artifact_path: str | None = None,
     min_reviewers: int = 2,
-    max_reviewers: int = 5,
+    max_reviewers: int = 3,
     catalog_path: str | None = None,
     complexity: "Complexity | None" = None,
+    high_stakes: bool = False,
 ) -> list[AgentDef]:
     """Select the optimal review team for the given artifact.
 
@@ -487,6 +545,7 @@ def select_team(
         max_reviewers=max_reviewers,
         catalog_path=catalog_path,
         complexity=complexity,
+        high_stakes=high_stakes,
     )
     return team
 
@@ -537,12 +596,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--artifact", default=None, help="Path to the artifact file")
     parser.add_argument("--catalog", default=None, help="Path to custom agent catalog JSON")
     parser.add_argument("--min", dest="min_reviewers", type=int, default=2, help="Minimum reviewers (default: 2)")
-    parser.add_argument("--max", dest="max_reviewers", type=int, default=5, help="Maximum reviewers (default: 5)")
+    parser.add_argument("--max", dest="max_reviewers", type=int, default=3, help="Maximum reviewers (default: 3; pass --max 5 for high-stakes reviews)")
     parser.add_argument("--json", dest="json_output", action="store_true", help="Output as JSON instead of Markdown")
-    parser.add_argument("--files", type=int, default=1, help="Number of files the change spans (escalates to Opus if >1)")
-    parser.add_argument("--tool-types", dest="tool_types", type=int, default=1, help="Distinct tool-execution types expected (escalates if >2)")
-    parser.add_argument("--context-fraction", dest="context_fraction", type=float, default=None, help="Fraction of context the artifact consumes at start (escalates if >0.20)")
+    parser.add_argument("--files", type=int, default=1, help="Number of files the change spans (escalates the top-2 domain lenses to Opus if >3)")
+    parser.add_argument("--tool-types", dest="tool_types", type=int, default=1, help="Distinct tool-execution types expected (retained for signal; no longer a model trigger)")
+    parser.add_argument("--context-fraction", dest="context_fraction", type=float, default=None, help="Fraction of context the artifact consumes at start (escalates the top-2 domain lenses if >0.40)")
     parser.add_argument("--context-window", dest="context_window", type=int, default=200_000, help="Context window for deriving context-fraction from artifact size (default: 200000)")
+    parser.add_argument("--high-stakes", dest="high_stakes", action="store_true", help="Force the security lens to Opus regardless of domain score (explicit override)")
 
     args = parser.parse_args(argv)
 
@@ -574,6 +634,7 @@ def main(argv: list[str] | None = None) -> int:
             max_reviewers=args.max_reviewers,
             catalog_path=args.catalog,
             complexity=complexity,
+            high_stakes=args.high_stakes,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)

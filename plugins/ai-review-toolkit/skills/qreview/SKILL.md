@@ -37,12 +37,16 @@ they are at `~/.claude/ai-review-tools/`.
 ```
 python3 <tools>/team-selector.py "<short artifact description>" \
   --artifact <artifact_path> --json \
-  --files <N> --tool-types <N> --context-window 200000
+  --files <N> --context-window 200000 [--max 5] [--high-stakes]
 ```
 
-- `--files N` — files the change spans (escalates every reviewer to Opus if `> 1`).
-- `--tool-types N` — distinct tool-execution types the review needs (escalates if `> 2`).
-- The artifact's byte size drives the ">20% of context" rule automatically.
+- Default team is **3** reviewers, seated by domain relevance (use `--max 5`
+  for genuinely high-stakes reviews; docs default to 2 — pass `--max 2`).
+- `--files N` — files the change spans (escalates only the top-2 domain lenses
+  to Opus if `> 3`). The artifact's byte size drives the ">40% of context"
+  rule automatically. Opus seats are hard-capped at 2 per team.
+- `--high-stakes` — force the security lens to Opus (it otherwise earns Opus
+  only when the security/compliance domain actually scores).
 
 Parse the JSON `team` array — objects of `{name, model, review_lens, ...}`. This
 is passed straight into the Workflow; **do not re-tier or override models by

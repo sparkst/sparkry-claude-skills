@@ -62,7 +62,12 @@ def run_case(fn: str, inp: dict) -> object:
     if fn == "resolve_reviewer_model":
         agent = team_selector.AgentDef(**inp["agent"])
         complexity = team_selector.Complexity(**inp["complexity"])
-        return team_selector.resolve_reviewer_model(agent, complexity)
+        return team_selector.resolve_reviewer_model(
+            agent,
+            complexity,
+            escalation_eligible=inp.get("escalation_eligible", False),
+            high_stakes=inp.get("high_stakes", False),
+        )
 
     if fn == "check_fix_completeness":
         complete, missing = loop_driver.check_fix_completeness(
@@ -149,14 +154,20 @@ _INPUTS: dict[str, list[dict]] = {
         ]}},
     ],
     "resolve_reviewer_model": [
-        {"name": "security_always_opus", "input": {"agent": _agent("security-reviewer"), "complexity": _complexity()}},
-        {"name": "architecture_always_opus", "input": {"agent": _agent("architecture-reviewer"), "complexity": _complexity()}},
+        # OPT-006: high_stakes (caller-gated) forces opus regardless of complexity.
+        {"name": "high_stakes_forces_opus", "input": {"agent": _agent("security-reviewer"), "complexity": _complexity(), "high_stakes": True}},
+        # OPT-006: the lens NAME alone no longer escalates.
+        {"name": "security_name_alone_stays_sonnet", "input": {"agent": _agent("security-reviewer"), "complexity": _complexity()}},
+        {"name": "architecture_name_alone_stays_sonnet", "input": {"agent": _agent("architecture-reviewer"), "complexity": _complexity()}},
         {"name": "simple_stays_sonnet", "input": {"agent": _agent("code-quality-reviewer"), "complexity": _complexity()}},
-        {"name": "multi_file_escalates", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(files=2)}},
-        {"name": "three_tool_types_escalates", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(tools=3)}},
-        {"name": "two_tool_types_stays", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(tools=2)}},
-        {"name": "over_20pct_context_escalates", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(ctx=0.21)}},
-        {"name": "at_20pct_context_stays", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(ctx=0.20)}},
+        # OPT-005: complexity escalates only an eligible (top-2 domain) lens.
+        {"name": "eligible_multi_file_escalates", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(files=4), "escalation_eligible": True}},
+        {"name": "not_eligible_multi_file_stays_sonnet", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(files=9)}},
+        {"name": "three_files_does_not_escalate", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(files=3), "escalation_eligible": True}},
+        # OPT-005: tool_types is no longer a trigger at any value.
+        {"name": "tool_types_no_longer_escalates", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(tools=9), "escalation_eligible": True}},
+        {"name": "over_40pct_context_escalates", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(ctx=0.41), "escalation_eligible": True}},
+        {"name": "at_40pct_context_stays", "input": {"agent": _agent("ux-reviewer"), "complexity": _complexity(ctx=0.40), "escalation_eligible": True}},
     ],
     "check_fix_completeness": [
         {"name": "all_fixed_complete", "input": {

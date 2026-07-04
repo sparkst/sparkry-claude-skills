@@ -55,7 +55,10 @@ function runCase(fn, inp) {
       return { findings, dropped };
     }
     case "resolve_reviewer_model":
-      return resolveReviewerModel(inp.agent, inp.complexity);
+      return resolveReviewerModel(inp.agent, inp.complexity, {
+        escalationEligible: inp.escalation_eligible ?? false,
+        highStakes: inp.high_stakes ?? false,
+      });
     case "check_fix_completeness": {
       const { complete, missing } = checkFixCompleteness(
         inp.findings,
