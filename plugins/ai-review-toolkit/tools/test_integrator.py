@@ -61,6 +61,38 @@ def test_merge_order_blocks_transitively():
     assert res["skipped"] == ["A"]
 
 
+def test_merge_order_treats_already_merged_slices_as_satisfied_dependencies():
+    # Wave-by-wave integration (SMOKE-004 fix): S-000 merged in an earlier wave,
+    # this wave's green slices depend on it. They must integrate, not block.
+    # (Re-smoke regression: merge-order blocked an entire green wave because the
+    # already-merged kernel was no longer in the per-wave green list.)
+    res = compute_merge_order(SLICES, ["S-101", "S-102"], merged_ids=["S-000"])
+    assert res["order"] == ["S-101", "S-102"]
+    assert res["blocked"] == []
+    # already-merged slices are neither skipped nor re-ordered
+    assert res["skipped"] == []
+
+
+def test_merge_order_merged_deps_satisfy_transitively():
+    chain = [
+        {"id": "A", "depends_on": []},
+        {"id": "B", "depends_on": ["A"]},
+        {"id": "C", "depends_on": ["B"]},
+    ]
+    # A and B merged in earlier waves → green C integrates on top of them.
+    res = compute_merge_order(chain, ["C"], merged_ids=["A", "B"])
+    assert res["order"] == ["C"]
+    assert res["blocked"] == []
+    assert res["skipped"] == []
+
+
+def test_merge_order_without_merged_ids_keeps_legacy_blocking_semantics():
+    # No merged_ids → identical to the pre-fix behavior (all-at-once callers).
+    res = compute_merge_order(SLICES, ["S-101", "S-102"])
+    assert res["order"] == []
+    assert res["blocked"] == ["S-101", "S-102"]
+
+
 # ── merge_gate (interpret the full-suite run after each merge) ────────────
 
 def test_merge_gate_advances_when_full_suite_is_green():

@@ -249,8 +249,12 @@ function checkBudget(where) {
 
 // Extra orchestration schemas (OPT-011 per-merge sequencer, OPT-013 seam gate).
 const MERGE_ORDER_SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['order'],
-  properties: { order: { type: 'array', items: { type: 'string' } } },
+  type: 'object', additionalProperties: false, required: ['order', 'blocked'],
+  properties: {
+    order: { type: 'array', items: { type: 'string' }, description: 'slice ids only, e.g. "S-001" — the tool JSON\'s order field verbatim' },
+    blocked: { type: 'array', items: { type: 'string' }, description: 'the tool JSON\'s blocked field verbatim' },
+    skipped: { type: 'array', items: { type: 'string' } },
+  },
 }
 const SEAM_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['test_files'],
@@ -528,12 +532,29 @@ async function integrateWave(waveGreen) {
   const orderRun = await agent(
     [
       'Compute the deterministic merge order for these green slice branches.',
-      `Run: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${waveGreen.join(',')}`,
-      'Return {order:[sliceId,...]} exactly as it prints.',
+      `Run: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${waveGreen.join(',')} --merged ${integration.merged.join(',') || '""'}`,
+      '(--merged = slices already integrated in earlier waves; their deps count as satisfied.)',
+      'The tool prints a JSON object {"order": [...], "blocked": [...], "skipped": [...]}. Parse it and return',
+      'those three fields VERBATIM — each entry is a bare slice id like "S-001", never a "key: value" string.',
     ].join('\n'),
     { label: 'merge-order', model: 'haiku', phase: 'Integrate', schema: MERGE_ORDER_SCHEMA },
   )
-  const order = (orderRun && Array.isArray(orderRun.order) && orderRun.order.length) ? orderRun.order : waveGreen
+  // Trust-but-verify the haiku adapter: only known green slice ids may enter the merge
+  // loop (re-smoke regression: the adapter once returned the tool's printed LINES as
+  // order entries, and the unknown-id skip silently dropped a whole green wave).
+  const knownGreen = new Set(waveGreen)
+  const rawOrder = (orderRun && Array.isArray(orderRun.order)) ? orderRun.order : []
+  const order = rawOrder.filter((id) => knownGreen.has(id))
+  const blocked = ((orderRun && Array.isArray(orderRun.blocked)) ? orderRun.blocked : []).filter((id) => knownGreen.has(id))
+  if (order.length !== rawOrder.length) log(`merge-order adapter returned ${rawOrder.length - order.length} malformed entrie(s) — filtered to known ids`)
+  // A green slice the tool neither ordered nor blocked (or a fully malformed adapter
+  // reply) must NOT vanish: everything unaccounted-for is treated as blocked.
+  for (const id of waveGreen) if (!order.includes(id) && !blocked.includes(id)) blocked.push(id)
+  for (const id of blocked) {
+    integration.failed.push({ id, reason: 'blocked: dependency not merged (merge-order) — slice was green but never integrated' })
+    await agent(['Tear down the blocked slice — run exactly:', worktreeCleanup(sliceById[id])].join('\n'),
+      { label: `blocked-cleanup:${id}`, model: 'haiku', phase: 'Integrate' })
+  }
   for (const id of order) {
     const slice = sliceById[id]
     if (!slice) continue
