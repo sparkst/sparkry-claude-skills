@@ -26,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools._loader import load_sibling
 
 finding_parser = load_sibling("finding-parser.py")
-loop_driver = load_sibling("loop-driver.py", "loop_driver")
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "prompts.json"
 
@@ -145,7 +144,7 @@ def build_corpus() -> dict:
                         "prior_findings": [],
                         "prior_resolutions": [],
                     },
-                    "expected": loop_driver.get_reviewer_prompt(state, 0, 1),
+                    "expected": finding_parser.get_reviewer_prompt(state, 0, 1),
                 },
                 {
                     "name": "round2_verification",
@@ -158,7 +157,7 @@ def build_corpus() -> dict:
                         "prior_findings": ROUND1_FINDINGS,
                         "prior_resolutions": ROUND1_RESOLUTIONS,
                     },
-                    "expected": loop_driver.get_reviewer_prompt(state, 0, 2),
+                    "expected": finding_parser.get_reviewer_prompt(state, 0, 2),
                 },
             ],
             "fixer_prompt": [
@@ -170,7 +169,7 @@ def build_corpus() -> dict:
                         "test_summary": TEST_SUMMARY_R1,
                         "findings": ROUND1_FINDINGS,
                     },
-                    "expected": loop_driver.get_fixer_prompt(state, 1),
+                    "expected": finding_parser.get_fixer_prompt(state, 1),
                 },
             ],
         }

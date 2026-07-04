@@ -321,3 +321,231 @@ def format_findings(
         lines.append("")
 
     return "\n".join(lines).rstrip()
+
+
+# ---------------------------------------------------------------------------
+# Fix-completeness gate
+# ---------------------------------------------------------------------------
+
+ALLOWED_STATUSES: set[str] = {"FIXED", "ESCALATED"}
+PROHIBITED_STATUSES: set[str] = {"WONTFIX", "DEFERRED", "OUT_OF_SCOPE"}
+
+
+def check_fix_completeness(
+    findings: list[dict[str, object]],
+    resolutions: list[dict[str, object]],
+) -> tuple[bool, list[str]]:
+    """Returns (complete, missing_or_invalid_finding_ids).
+
+    Every finding must have a corresponding resolution whose status is
+    FIXED or ESCALATED.  Prohibited statuses (WONTFIX, DEFERRED,
+    OUT_OF_SCOPE) are treated as invalid.
+    """
+    finding_ids: set[str] = {str(f["id"]) for f in findings if f.get("id")}
+
+    valid_resolved_ids: set[str] = set()
+    invalid_ids: list[str] = []
+    for r in resolutions:
+        fid = r.get("finding_id")
+        if not fid:
+            continue
+        status = str(r.get("status", ""))
+        if status not in ALLOWED_STATUSES:
+            invalid_ids.append(str(fid))
+        else:
+            evidence = r.get("evidence")
+            if not evidence or (isinstance(evidence, str) and not evidence.strip()):
+                invalid_ids.append(str(fid))
+            else:
+                valid_resolved_ids.add(str(fid))
+
+    missing = sorted((finding_ids - valid_resolved_ids) | (set(invalid_ids) - valid_resolved_ids))
+    return (not missing, missing)
+
+
+# ---------------------------------------------------------------------------
+# Reviewer / fixer prompt construction
+#
+# Oracle for the JS port (js/prompts.mjs), locked via gen-prompt-fixtures.py +
+# test_prompt_parity.py against fixtures/prompts.json. These read a loop-state
+# dict shaped like {team, artifact_path, requirements_path, rounds: [...]} --
+# the same shape review-loop.workflow.js keeps in-memory during a run.
+# ---------------------------------------------------------------------------
+
+def _get_round(state: dict[str, object], num: int) -> dict[str, object] | None:
+    """Return the round dict for the given round number, or None."""
+    for r in state.get("rounds", []):  # type: ignore[union-attr]
+        if r["round_num"] == num:
+            return r
+    return None
+
+
+def get_reviewer_prompt(
+    state: dict[str, object],
+    reviewer_index: int,
+    round_num: int,
+) -> str:
+    """Generate reviewer prompt. Round 2+ includes prior findings + diff summary."""
+    team = state.get("team", [])
+    if reviewer_index < 0 or reviewer_index >= len(team):  # type: ignore[arg-type]
+        raise ValueError(f"Reviewer index {reviewer_index} out of range (team size {len(team)}).")  # type: ignore[arg-type]
+
+    agent = team[reviewer_index]  # type: ignore[index]
+    artifact_path = state.get("artifact_path", "")
+    requirements_path = state.get("requirements_path", "")
+
+    try:
+        with open(artifact_path, "r", encoding="utf-8", errors="replace") as fh:  # type: ignore[arg-type]
+            artifact_content = fh.read()
+    except OSError:
+        artifact_content = f"[Could not read artifact at {artifact_path}]"
+
+    try:
+        with open(requirements_path, "r", encoding="utf-8", errors="replace") as fh:  # type: ignore[arg-type]
+            requirements_content = fh.read()
+    except OSError:
+        requirements_content = f"[Could not read requirements at {requirements_path}]"
+
+    current_round = _get_round(state, round_num)
+    test_summary = "No test results available."
+    if current_round:
+        tr = current_round.get("test_results", {})
+        if tr:
+            test_summary = tr.get("summary", "No test results available.")
+
+    reviewer_name = agent["name"]
+    review_lens = agent["review_lens"]
+
+    prompt_parts = [
+        f"You are a {reviewer_name} reviewing an artifact.",
+        "",
+        f"Your review lens: {review_lens}",
+        "",
+        "## Artifact",
+        "",
+        artifact_content,
+        "",
+        "## Requirements",
+        "",
+        requirements_content,
+        "",
+        "## Test Results",
+        "",
+        test_summary,
+    ]
+
+    # Round 2+ additions
+    if round_num > 1:
+        prev_round = _get_round(state, round_num - 1)
+        if prev_round:
+            prev_findings = prev_round.get("findings", [])
+            if prev_findings:
+                findings_text = format_findings(prev_findings, fmt="markdown")
+                prompt_parts.extend([
+                    "",
+                    f"## Prior Round Findings (Round {round_num - 1})",
+                    "",
+                    findings_text,
+                ])
+
+            prev_resolutions = prev_round.get("fix_resolutions", [])
+            if prev_resolutions:
+                res_lines = []
+                for res in prev_resolutions:
+                    fid = res.get("finding_id", "?")
+                    status = res.get("status", "?")
+                    desc = res.get("description", "")
+                    evidence = res.get("evidence", "")
+                    res_lines.append(f"- **{fid}**: {status} -- {desc}")
+                    if evidence:
+                        res_lines.append(f"  Evidence: {evidence}")
+                prompt_parts.extend([
+                    "",
+                    "## Fix Resolutions Applied",
+                    "",
+                    "\n".join(res_lines),
+                ])
+
+            prompt_parts.extend([
+                "",
+                "## Verification Instructions",
+                "",
+                f"The artifact content above is the POST-FIX version (after round {round_num - 1} fixes). "
+                "For each fix resolution listed above, navigate to the cited evidence location "
+                "in the artifact and verify the fix is correct. Also check for NEW issues "
+                "introduced by the fixes — regressions, broken logic, incomplete changes.",
+            ])
+
+    output_instructions = REVIEWER_OUTPUT_INSTRUCTIONS.format(reviewer_name=reviewer_name)
+    prompt_parts.extend([
+        "",
+        "## Instructions",
+        "",
+        f"Review the artifact against the requirements through your lens of {review_lens}.",
+        "",
+        output_instructions,
+    ])
+
+    return "\n".join(prompt_parts)
+
+
+def get_fixer_prompt(state: dict[str, object], round_num: int) -> str:
+    """Generate fixer prompt with all findings and recommendations."""
+    artifact_path = state.get("artifact_path", "")
+    requirements_path = state.get("requirements_path", "")
+
+    try:
+        with open(artifact_path, "r", encoding="utf-8", errors="replace") as fh:  # type: ignore[arg-type]
+            artifact_content = fh.read()
+    except OSError:
+        artifact_content = f"[Could not read artifact at {artifact_path}]"
+
+    try:
+        with open(requirements_path, "r", encoding="utf-8", errors="replace") as fh:  # type: ignore[arg-type]
+            requirements_content = fh.read()
+    except OSError:
+        requirements_content = f"[Could not read requirements at {requirements_path}]"
+
+    current_round = _get_round(state, round_num)
+    findings: list[dict[str, object]] = []
+    test_summary = ""
+    if current_round:
+        findings = current_round.get("findings", [])
+        tr = current_round.get("test_results", {})
+        test_summary = tr.get("summary", "") if tr else ""
+
+    findings_text = format_findings(findings, fmt="markdown")
+
+    prompt = f"""You are a fixer agent. Your job is to fix ALL findings from the review.
+
+## Artifact
+
+{artifact_content}
+
+## Requirements
+
+{requirements_content}
+
+## Test Results
+
+{test_summary}
+
+## Findings to Fix (ALL must be addressed)
+
+{findings_text}
+
+## Instructions
+
+Fix EVERY finding listed above. Every single one, regardless of severity (P0 through P3).
+
+For each finding, produce a resolution with these fields:
+- finding_id: the ID of the finding being resolved (e.g., P0-001)
+- status: MUST be "FIXED" with evidence of the fix. No WONTFIX, DEFERRED, or OUT_OF_SCOPE.
+- evidence: what changed and where (file:line for code, section:quote for content)
+- description: brief explanation of the fix
+
+If a finding is genuinely unfixable (requires external dependency, architectural constraint, or user decision), set status to "ESCALATED" with justification.
+
+Output a JSON array of resolution objects. No other text."""
+
+    return prompt

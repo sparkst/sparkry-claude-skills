@@ -3,7 +3,10 @@
 When to reach for `/qreview` vs `/qloop` vs `/qpipeline` (and when not to).
 
 > As of **1.2.0**, `/qreview` and `/qloop` run on the ultracode **Workflow** engine.
-> `/qpipeline` is unchanged (still a Python driver — its human gates can't pause inside an autonomous Workflow).
+> `/qpipeline`'s gated presets now invoke the same Workflow for their `review`/`review-loop`
+> phases (the Python drivers that used to hand-drive those rounds are retired) — but the
+> phase sequencing and human gates are still SKILL.md-driven step by step, not a single
+> autonomous Workflow.
 
 ## Pick a tool
 
@@ -50,7 +53,7 @@ start with `/qloop`. Use `/qreview` when you specifically want to look before to
 /qloop fix all findings in src/checkout/ against requirements/checkout.md until it converges
 ```
 
-## `/qpipeline` — composable multi-phase flow (unchanged)
+## `/qpipeline` — composable multi-phase flow (gated, phase-sequenced)
 
 - **The reviews and the loop are built into every preset — you don't add them.** The `review-loop` phase
   *is* the qloop convergence cycle (review → fix → re-review until zero P0/P1); `verify` (independent
@@ -85,8 +88,10 @@ start with `/qloop`. Use `/qreview` when you specifically want to look before to
 ```
 
 There's no global "auto-confirm all gates" flag — you go gate-free by choosing gate-free phases. Note
-`/qpipeline` is still the Python-driver (agent-driven step by step), not the autonomous Workflow that
-`/qloop` runs on. For unattended review+fix of a single artifact, prefer `/qloop`.
+`/qpipeline`'s phase sequencing is still agent-driven step by step (per its SKILL.md protocol), not a
+single autonomous Workflow like `/qpipeline auto` — but its `review`/`review-loop` phases now invoke the
+same `review-loop.workflow.js` engine `/qloop` runs on, so those phases get the same in-code convergence
+guarantees. For unattended review+fix of a single artifact, prefer `/qloop`.
 
 ## Operating notes (the things that bite)
 
@@ -100,8 +105,9 @@ There's no global "auto-confirm all gates" flag — you go gate-free by choosing
   or when the change is complex (>1 file, >2 tool-types, >20% of context). Bound `/qloop` cost with
   `maxRounds`. Every run prints a $ scorecard so you see the spend.
 - **Type-agnostic.** Point them at code *or* a `.md` spec/strategy doc (with a rubric) — same machinery.
-- **Prereq:** the machine's Claude Code must have the Workflow (ultracode) tool. Without it, the skills fall
-  back to the legacy Python-driver protocol (`skills/*/driver-fallback.md`).
+- **Prereq:** the machine's Claude Code must have the Workflow (ultracode) tool. There is no Python-driver
+  fallback anymore — if the Workflow tool or its script is unavailable, the skill stops and reports rather
+  than improvising a hand-rolled loop.
 
 ## Don't use these when…
 

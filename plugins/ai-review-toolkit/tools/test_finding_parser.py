@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 # Import via shared _loader.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools._loader import load_sibling
@@ -18,6 +20,9 @@ count_by_severity = finding_parser.count_by_severity
 check_convergence = finding_parser.check_convergence
 synthesize_findings = finding_parser.synthesize_findings
 format_findings = finding_parser.format_findings
+check_fix_completeness = finding_parser.check_fix_completeness
+get_reviewer_prompt = finding_parser.get_reviewer_prompt
+get_fixer_prompt = finding_parser.get_fixer_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -543,3 +548,219 @@ class TestFormatting:
         md = format_findings(findings, fmt="markdown")
         assert "r1" in md
         assert "r2" in md
+
+
+# ---------------------------------------------------------------------------
+# check_fix_completeness -- the fix-ALL gate (migrated from the retired
+# loop-driver.py; see CHANGELOG for the driver-retirement note)
+# ---------------------------------------------------------------------------
+
+def _make_findings(severities: list[str], prefix: str = "F") -> list[dict[str, object]]:
+    """Create minimal valid findings."""
+    findings = []
+    for i, sev in enumerate(severities, 1):
+        findings.append({
+            "id": f"{sev}-{i:03d}",
+            "severity": sev,
+            "title": f"{prefix} finding {i}",
+            "requirement": "REQ-001",
+            "finding": f"Issue {i} description",
+            "recommendation": f"Fix {i}",
+            "source": "test-reviewer",
+            "evidence": f"file.py:{i}",
+        })
+    return findings
+
+
+def _make_resolutions(
+    findings: list[dict[str, object]], status: str = "FIXED"
+) -> list[dict[str, object]]:
+    """Create resolutions for all findings."""
+    return [
+        {
+            "finding_id": f["id"],
+            "status": status,
+            "evidence": "file:1",
+            "description": f"Fixed {f['id']}",
+        }
+        for f in findings
+    ]
+
+
+class TestCheckFixCompleteness:
+    def test_all_fixed_returns_true(self) -> None:
+        findings = _make_findings(["P0", "P1", "P2"])
+        resolutions = _make_resolutions(findings)
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is True
+        assert missing == []
+
+    def test_missing_fix_returns_false_with_ids(self) -> None:
+        findings = _make_findings(["P0", "P1", "P2"])
+        # Only fix the first one
+        resolutions = [_make_resolutions(findings)[0]]
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is False
+        assert len(missing) == 2
+        assert findings[1]["id"] in missing
+        assert findings[2]["id"] in missing
+
+    def test_empty_findings_empty_resolutions(self) -> None:
+        complete, missing = check_fix_completeness([], [])
+        assert complete is True
+        assert missing == []
+
+
+class TestStatusValidation:
+    def test_wontfix_status_rejected(self) -> None:
+        """Resolution with status WONTFIX fails check_fix_completeness."""
+        findings = _make_findings(["P1"])
+        resolutions = _make_resolutions(findings, status="WONTFIX")
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is False
+        assert findings[0]["id"] in missing
+
+    def test_deferred_status_rejected(self) -> None:
+        """Resolution with status DEFERRED fails check_fix_completeness."""
+        findings = _make_findings(["P1"])
+        resolutions = _make_resolutions(findings, status="DEFERRED")
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is False
+        assert findings[0]["id"] in missing
+
+    def test_escalated_status_accepted(self) -> None:
+        """Resolution with status ESCALATED passes check_fix_completeness."""
+        findings = _make_findings(["P1"])
+        resolutions = _make_resolutions(findings, status="ESCALATED")
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is True
+        assert missing == []
+
+
+class TestFixCompletenessEvidence:
+    def test_fixed_without_evidence_is_incomplete(self) -> None:
+        findings = [{"id": "P1-001"}]
+        resolutions = [{"finding_id": "P1-001", "status": "FIXED", "evidence": ""}]
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is False
+        assert "P1-001" in missing
+
+    def test_fixed_with_evidence_is_complete(self) -> None:
+        findings = [{"id": "P1-001"}]
+        resolutions = [{"finding_id": "P1-001", "status": "FIXED", "evidence": "file.py:42 — added guard"}]
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is True
+
+    def test_escalated_without_evidence_is_incomplete(self) -> None:
+        findings = [{"id": "P1-001"}]
+        resolutions = [{"finding_id": "P1-001", "status": "ESCALATED", "evidence": ""}]
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is False
+        assert "P1-001" in missing
+
+    def test_escalated_with_evidence_is_complete(self) -> None:
+        findings = [{"id": "P1-001"}]
+        resolutions = [{"finding_id": "P1-001", "status": "ESCALATED", "evidence": "Requires external API change"}]
+        complete, missing = check_fix_completeness(findings, resolutions)
+        assert complete is True
+
+
+# ---------------------------------------------------------------------------
+# get_reviewer_prompt / get_fixer_prompt -- prompt construction (migrated
+# from the retired loop-driver.py)
+# ---------------------------------------------------------------------------
+
+AGENT = {
+    "name": "security-reviewer",
+    "domains": ["security"],
+    "model": "opus",
+    "description": "d",
+    "review_lens": "security",
+}
+
+
+def _prompt_state(artifact_path: Path, requirements_path: Path) -> dict[str, object]:
+    return {
+        "team": [AGENT],
+        "artifact_path": str(artifact_path),
+        "requirements_path": str(requirements_path),
+        "rounds": [{"round_num": 1, "test_results": {}, "findings": [], "fix_resolutions": []}],
+    }
+
+
+@pytest.fixture()
+def artifact_file(tmp_path: Path) -> Path:
+    f = tmp_path / "artifact.py"
+    f.write_text("def hello():\n    return 'world'\n", encoding="utf-8")
+    return f
+
+
+@pytest.fixture()
+def requirements_file(tmp_path: Path) -> Path:
+    f = tmp_path / "requirements.md"
+    f.write_text("# Requirements\n\n- REQ-001: Function must return 'world'\n", encoding="utf-8")
+    return f
+
+
+class TestRound2Prompts:
+    def test_round_2_reviewer_prompt_includes_prior_findings(
+        self, artifact_file: Path, requirements_file: Path
+    ) -> None:
+        state = _prompt_state(artifact_file, requirements_file)
+        findings = _make_findings(["P1", "P2"])
+        state["rounds"][0]["phase"] = "resolved"
+        state["rounds"][0]["findings"] = findings
+        state["rounds"][0]["fix_resolutions"] = _make_resolutions(findings)
+        state["rounds"].append({
+            "round_num": 2, "test_results": {"summary": "1/1 passed"},
+            "findings": [], "fix_resolutions": [],
+        })
+
+        prompt = get_reviewer_prompt(state, 0, 2)
+        assert "Prior Round Findings" in prompt
+        assert "Round 1" in prompt
+
+    def test_round_2_reviewer_prompt_includes_verification_instructions(
+        self, artifact_file: Path, requirements_file: Path
+    ) -> None:
+        state = _prompt_state(artifact_file, requirements_file)
+        findings = _make_findings(["P1"])
+        state["rounds"][0]["findings"] = findings
+        state["rounds"][0]["fix_resolutions"] = _make_resolutions(findings)
+        state["rounds"].append({
+            "round_num": 2, "test_results": {"summary": "1/1 passed"},
+            "findings": [], "fix_resolutions": [],
+        })
+
+        prompt = get_reviewer_prompt(state, 0, 2)
+        assert "Verification Instructions" in prompt
+        assert "POST-FIX version" in prompt
+        assert "verify the fix is correct" in prompt
+
+    def test_round_1_prompt_does_not_include_prior_findings(
+        self, artifact_file: Path, requirements_file: Path
+    ) -> None:
+        state = _prompt_state(artifact_file, requirements_file)
+        prompt = get_reviewer_prompt(state, 0, 1)
+        assert "Prior Round Findings" not in prompt
+        assert "Diff Summary" not in prompt
+
+    def test_negative_reviewer_index_rejected(
+        self, artifact_file: Path, requirements_file: Path
+    ) -> None:
+        state = _prompt_state(artifact_file, requirements_file)
+        with pytest.raises(ValueError, match="out of range"):
+            get_reviewer_prompt(state, -1, 1)
+
+
+class TestFixerPrompt:
+    def test_fixer_prompt_includes_all_findings(
+        self, artifact_file: Path, requirements_file: Path
+    ) -> None:
+        state = _prompt_state(artifact_file, requirements_file)
+        findings = _make_findings(["P0", "P2"])
+        state["rounds"][0]["findings"] = findings
+        prompt = get_fixer_prompt(state, 1)
+        assert "P0-001" in prompt
+        assert "P2-002" in prompt
+        assert "Fix EVERY finding" in prompt

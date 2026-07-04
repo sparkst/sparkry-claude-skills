@@ -1,6 +1,6 @@
 # AI Review Toolkit
 
-Multi-agent review plugin for Claude Code. 281 tests, Python 3.12+.
+Multi-agent review plugin for Claude Code. 252 tests, Python 3.12+.
 
 ## Commands
 
@@ -17,16 +17,25 @@ ruff check tools/
 
 ## Architecture
 
+`/qreview`, `/qloop`, and `/qpipeline`'s gated presets all run on the same
+**ultracode Workflow engine** (`js/review-loop.workflow.js`) rather than a
+hand-driven Python state machine -- see `js/README.md` for how it's built and
+drift-locked against the Python oracle below. `/qpipeline auto` runs the
+separate `js/pipeline-auto.workflow.js`. The Python drivers that used to own
+per-round/per-phase state (`review-driver.py`, `loop-driver.py`,
+`pipeline-driver.py`) have been retired; their pure oracle functions
+(`check_fix_completeness`, `get_reviewer_prompt`, `get_fixer_prompt`) now live
+in `finding-parser.py`.
+
 ```
 tools/           <- All Python modules (hyphenated filenames)
   _loader.py     <- Shared importer for hyphenated modules
-  finding-parser.py  <- P0-P3 finding validation, dedup, synthesis
-  review-driver.py   <- Single-round review state machine
-  loop-driver.py     <- Multi-round review-fix loop state machine
-  pipeline-driver.py <- Multi-phase pipeline orchestrator
-  team-selector.py   <- Domain classifier + reviewer team selection
+  finding-parser.py  <- P0-P3 finding validation, dedup, synthesis, prompt oracle
+  team-selector.py   <- Domain classifier + reviewer team selection + model tiering
   test-runner.py     <- Test discovery + execution
+  scorecard.py       <- Deterministic end-of-run scorecard
   test_*.py          <- Co-located tests (one per tool)
+js/              <- JS port of the deterministic hot-loop + the Workflow scripts
 skills/          <- SKILL.md files for /qreview, /qloop, /qpipeline
 agents/          <- Agent definitions (reviewer, fixer, verifier)
 commands/        <- Slash command descriptions
@@ -37,16 +46,14 @@ commands/        <- Slash command descriptions
 - Tool filenames are hyphenated (`finding-parser.py`); import via `_loader.load_sibling("finding-parser.py")`
 - Tests are co-located: `test_finding_parser.py` tests `finding-parser.py`
 - Type hints everywhere; `from __future__ import annotations`
-- State machines write to hidden dirs: `.qreview/`, `.qloop/`, `.qpipeline/`
 - Finding severity: P0 (blocks ship) > P1 (must fix) > P2 (should fix) > P3 (nice to have)
 - Convergence: P0==0 AND P1==0 AND (P2+P3) <= threshold
 
 ## Gotchas
 
 - `shell=False` for auto-discovered tests; `shell=True` only for explicit `--test-cmd` with pipe/chain operators
-- `record_phase_result` requires `phase_idx == current_idx` (strict current-phase-only)
-- Review-loop results must have `converged=True` OR `status='escalated'/'failed'` to advance pipeline
-- `project_id` validated against `^[0-9]{3}-[a-z0-9][a-z0-9-]{0,40}$`
 - Dedup merges by normalized title; updates id prefix when severity upgrades
-- Minimum 2 reviewers enforced at both tool and driver levels
-- Artifact files capped at 512KB in review-driver
+- Minimum 2 reviewers enforced by `team-selector.py`
+- Never hand-write a review/pipeline workflow script -- the only sanctioned paths are
+  `review-loop.workflow.js` and `pipeline-auto.workflow.js`; a hand-rolled script has
+  no `model:` tiering and silently inherits the invoking session's model
