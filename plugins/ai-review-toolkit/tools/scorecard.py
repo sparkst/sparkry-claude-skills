@@ -582,6 +582,12 @@ def build_scorecard(
     deploy = _deploy_section(state)
     if deploy is not None:
         report["deploy"] = deploy
+
+    # SMOKE-005: an incomplete pipeline run carries a blocker list; surface it so the
+    # scorecard can never present a dropped/escalated run as clean.
+    blockers = state.get("blockers")
+    if isinstance(blockers, list) and blockers:
+        report["blockers"] = list(blockers)
     return report
 
 
@@ -711,6 +717,14 @@ def render_markdown(report: dict[str, Any]) -> str:
                 if smoke.get("failed"):
                     line += f" — failed: {', '.join(str(f) for f in smoke['failed'])}"
                 lines.append(line)
+        lines.append("")
+
+    blockers = report.get("blockers")
+    if blockers:
+        lines.append("## Blockers\n")
+        lines.append(f"- Completion: **INCOMPLETE** ({len(blockers)} blocker(s) — this run is NOT verified)")
+        for b in blockers:
+            lines.append(f"  - {b}")
         lines.append("")
 
     return "\n".join(lines)

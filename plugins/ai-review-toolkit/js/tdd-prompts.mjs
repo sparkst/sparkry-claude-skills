@@ -65,6 +65,15 @@ export function worktreeSetup(slice, { create = false } = {}) {
     );
   }
   lines.push('cd "$SLICE_WT"', "```");
+  // SMOKE-007c containment: a slice agent must never manufacture an integration state.
+  // Add commits for your OWN declared files only — the tests run against whatever main
+  // was merged into this worktree at its branch point, nothing more.
+  lines.push(
+    "GIT HYGIENE (hard rule): inside this worktree do NOT `git merge`, `git cherry-pick`, `git rebase`,",
+    "`git reset`, or otherwise pull in / rewrite other branches' or commits' history. Only add commits",
+    "for your own declared files. Run the tests against the worktree's checked-out state as-is; if a",
+    "dependency isn't present, report it — do NOT fabricate it by merging sibling branches.",
+  );
   return lines.join("\n");
 }
 

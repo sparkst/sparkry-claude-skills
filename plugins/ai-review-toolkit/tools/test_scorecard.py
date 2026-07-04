@@ -483,6 +483,42 @@ class TestDeployGate:
 
 
 # ---------------------------------------------------------------------------
+# Blockers surfacing (SMOKE-005: an incomplete run can't read as clean)
+# ---------------------------------------------------------------------------
+
+class TestBlockers:
+    def test_no_blockers_key_when_state_is_clean(self):
+        report = build_scorecard(_qreview_state(), aggregate_transcript([]), load_pricing())
+        assert report.get("blockers") is None
+
+    def test_blockers_surface_from_state(self):
+        state = {**_qreview_state(), "blockers": [
+            "slice S-004 dropped: green gate failed",
+            "artifact integration_plan escalated unresolved: 1 P1 remains",
+        ]}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        assert report["blockers"] == state["blockers"]
+
+    def test_render_shows_blockers_and_marks_incomplete(self):
+        state = {**_qreview_state(), "blockers": ["slice S-004 dropped: green gate failed"]}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        md = render_markdown(report)
+        assert "Blockers" in md
+        assert "INCOMPLETE" in md
+        assert "S-004" in md
+
+    def test_render_no_blockers_section_when_clean(self):
+        report = build_scorecard(_qreview_state(), aggregate_transcript([]), load_pricing())
+        md = render_markdown(report)
+        assert "Blockers" not in md
+
+    def test_empty_blockers_list_is_not_surfaced(self):
+        state = {**_qreview_state(), "blockers": []}
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        assert report.get("blockers") is None
+
+
+# ---------------------------------------------------------------------------
 # OPT-025: per-lens unique-contribution tracking (deterministic — delegates
 # to finding-parser's deduplicate_findings, no LLM). Recovers lens identity
 # from data already on disk: reviewer_outputs/reviewer_findings["source"]

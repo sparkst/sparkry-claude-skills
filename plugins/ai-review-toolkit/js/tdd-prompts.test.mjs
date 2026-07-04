@@ -68,6 +68,18 @@ test("worktreeSetup(non-create) enters the existing worktree, never re-creates i
   assert.ok(!p.includes("git worktree add"), "gate/implementer must not create the worktree");
 });
 
+test("worktreeSetup forbids off-script git history manipulation (SMOKE-007c containment)", () => {
+  // The S-005 breach: a slice agent merged sibling branches + resurrected a dangling
+  // commit to green its tests. The prompt must forbid that in both modes.
+  for (const create of [true, false]) {
+    const p = worktreeSetup(SLICE, { create });
+    assert.match(p, /do NOT|never/i);
+    assert.match(p, /merge/i);
+    assert.match(p, /cherry-pick/i);
+    assert.match(p, /rebase|reset/i);
+  }
+});
+
 test("worktreeCleanup removes the worktree, branch, and frozen-tests tag", () => {
   const p = worktreeCleanup(SLICE);
   assert.match(p, /git worktree remove --force "\$\{ROOT\}\.pipeline-wt\/S-001"/);
