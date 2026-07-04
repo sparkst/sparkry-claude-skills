@@ -91,6 +91,12 @@ const GATE_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['ok', 'reason'],
   properties: { ok: { type: 'boolean' }, reason: { type: 'string' }, tests_collected: { type: 'integer' }, exit_code: { type: 'integer' } },
 }
+// The test-writer creates the slice's dedicated worktree and reports its ABSOLUTE
+// path, which the workflow threads into the red-gate / implementer / green-gate.
+const WORKTREE_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['worktree', 'branch'],
+  properties: { worktree: { type: 'string' }, branch: { type: 'string' }, tests_committed: { type: 'boolean' } },
+}
 // ── Prod-tail schemas (Phase F2) ──────────────────────────────────────────
 const SUITE_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['valid', 'checks', 'newChecksAdded'],
@@ -207,6 +213,8 @@ if (planOnly) {
       resolveEscalation: typeof resolveEscalation,
       buildTestWriterPrompt: typeof buildTestWriterPrompt,
       buildImplementerPrompt: typeof buildImplementerPrompt,
+      worktreeSetup: typeof worktreeSetup,
+      worktreeCleanup: typeof worktreeCleanup,
       buildConflictResolverPrompt: typeof buildConflictResolverPrompt,
       buildIntegrationTestWriterPrompt: typeof buildIntegrationTestWriterPrompt,
       buildDeployPlanPrompt: typeof buildDeployPlanPrompt,
@@ -305,12 +313,13 @@ const sliceById = {}
 for (const s of slices) sliceById[s.id] = s
 if (stopAfter === 'design') return { status: 'stopped', at: 'design', report }
 
-// ── Phase 3: separate-context TDD, per slice, one worktree each, by wave ──
+// ── Phase 3: separate-context TDD, per slice, one shared worktree each, by wave ──
 phase('TDD')
 const greenIds = []
 for (const wave of waves) {
-  // Slices in a wave are independent (disjoint files) → build them in parallel,
-  // capped by maxParallel, each in its own git worktree.
+  // Slices in a wave are independent (disjoint files + disjoint worktree dirs +
+  // branches) → build them in parallel, capped by maxParallel. No harness isolation
+  // is needed: each slice has ONE named worktree its four agents share.
   const batch = wave.map((id) => sliceById[id]).filter(Boolean)
   const results = await parallel(
     batch.slice(0, maxParallel).map((slice) => () => buildSlice(slice)),
@@ -324,54 +333,78 @@ for (const wave of waves) {
 }
 if (stopAfter === 'tdd') return { status: 'stopped', at: 'tdd', greenIds, report }
 
-// One slice: TEST-WRITER (red-gated) then IMPLEMENTER (tests read-only, tamper-checked, green-gated),
-// each converged. Runs in an isolated worktree so parallel slices never clobber each other.
+// Tear down a slice's worktree + branch + tests tag (on failure, so orphans never
+// accumulate; the integrator does the same after a successful merge).
+async function cleanupSlice(slice) {
+  await agent(
+    ['Clean up the slice\'s dedicated worktree, branch, and frozen-tests tag — run exactly:', worktreeCleanup(slice)].join('\n'),
+    { label: `cleanup:${slice.id}`, model: 'haiku', phase: `Slice ${slice.id}` },
+  )
+}
+
+// One slice: TEST-WRITER (red-gated) then IMPLEMENTER (tests read-only, tamper-checked, green-gated).
+// All four agents share ONE named worktree (the test-writer creates it and returns its ABSOLUTE
+// path); parallel slices never clobber each other because their worktree dirs + branches are disjoint.
 async function buildSlice(slice) {
-  // Context A — author failing tests.
-  await agent(buildTestWriterPrompt(slice, { requirementsPath, designPath }), {
-    label: `test-writer:${slice.id}`, model: 'sonnet', isolation: 'worktree',
-    phase: `Slice ${slice.id}`,
+  // Context A — create the shared worktree + author failing tests, committed + tagged.
+  const setup = await agent(buildTestWriterPrompt(slice, { requirementsPath, designPath }), {
+    label: `test-writer:${slice.id}`, model: 'sonnet', phase: `Slice ${slice.id}`, schema: WORKTREE_SCHEMA,
   })
+  const worktreePath = setup && setup.worktree
+  if (!worktreePath) {
+    await cleanupSlice(slice)
+    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason: 'Test-writer did not create/return the slice worktree' })
+    return { id: slice.id, green: false, decision }
+  }
   const red = await agent(
     [
-      `Run the tests for slice ${slice.id} and report the RED gate.`,
-      `  python3 ${toolsDir}/test-runner.py --json (or the project's test command) for: ${(slice.test_files || []).join(', ')}`,
+      `Run the tests for slice ${slice.id} and report the RED gate. Work in the slice worktree:`,
+      `  cd "${worktreePath}" && python3 ${toolsDir}/test-runner.py --json (or the project's test command) for: ${(slice.test_files || []).join(', ')}`,
       `Then interpret with: python3 ${toolsDir}/tdd-harness.py (red_gate semantics: must FAIL with ≥1 test collected).`,
       'Return {ok, reason, tests_collected, exit_code}. ok=true only if the tests fail pre-implementation.',
     ].join('\n'),
-    { label: `red-gate:${slice.id}`, model: 'haiku', isolation: 'worktree', phase: `Slice ${slice.id}`, schema: GATE_SCHEMA },
+    { label: `red-gate:${slice.id}`, model: 'haiku', phase: `Slice ${slice.id}`, schema: GATE_SCHEMA },
   )
   if (!red || !red.ok) {
+    await cleanupSlice(slice)
     const decision = await qdecide({ type: 'converge', artifact: slice.id, reason: `RED gate failed: ${(red && red.reason) || 'no result'}` })
     return { id: slice.id, green: false, decision }
   }
-  // Context B — make them green, tests frozen + tamper-checked.
-  await agent(buildImplementerPrompt(slice, { designPath, redSummary: red.reason }), {
-    label: `implementer:${slice.id}`, model: 'sonnet', isolation: 'worktree', phase: `Slice ${slice.id}`,
+  // Context B — make them green in the SAME worktree; tests frozen + tamper-checked via commits.
+  await agent(buildImplementerPrompt(slice, { designPath, redSummary: red.reason, worktreePath }), {
+    label: `implementer:${slice.id}`, model: 'sonnet', phase: `Slice ${slice.id}`,
   })
   const green = await agent(
     [
-      `Verify slice ${slice.id}: (1) TAMPER-CHECK — the frozen test files ${(slice.test_files || []).join(', ')} are`,
-      `unchanged and the diff touched only ${(slice.files || []).join(', ')} (tdd-harness.py check_tamper); (2) GREEN`,
-      'gate — the suite now PASSES with tests still collected. Return {ok, reason, tests_collected, exit_code}.',
+      `Verify slice ${slice.id} in its worktree "${worktreePath}" (cd there first). Diff COMMITS, not dirty state:`,
+      `  cd "${worktreePath}" && git diff --name-only pipeline-tests/${slice.id}..HEAD   # everything the implementer changed`,
+      `(1) TAMPER-CHECK — every changed path must be one of ${(slice.files || []).join(', ') || '(none)'}, NONE may be a`,
+      `test file (${(slice.test_files || []).join(', ') || '(none)'}), and \`git diff --name-only pipeline-tests/${slice.id}..HEAD -- ${(slice.test_files || []).join(' ')}\` MUST be empty`,
+      `(interpret with python3 ${toolsDir}/tdd-harness.py check_tamper). (2) GREEN gate — the suite now PASSES with tests`,
+      'still collected. Return {ok, reason, tests_collected, exit_code}.',
     ].join('\n'),
-    { label: `green-gate:${slice.id}`, model: 'haiku', isolation: 'worktree', phase: `Slice ${slice.id}`, schema: GATE_SCHEMA },
+    { label: `green-gate:${slice.id}`, model: 'haiku', phase: `Slice ${slice.id}`, schema: GATE_SCHEMA },
   )
   if (!green || !green.ok) {
+    await cleanupSlice(slice)
     const decision = await qdecide({ type: 'converge', artifact: slice.id, reason: `GREEN/tamper gate failed: ${(green && green.reason) || 'no result'}` })
     return { id: slice.id, green: false, decision }
   }
   return { id: slice.id, green: true }
 }
 
-// ── Phase 4/5: serialized integration of the green worktrees ─────────────
+// ── Phase 4/5: serialized integration of the green slice BRANCHES ────────
 phase('Integrate')
 const mergeRun = await agent(
   [
-    'Serially integrate the green slice worktrees, ONE AT A TIME, into the feature branch.',
+    'Serially integrate the green slice BRANCHES, ONE AT A TIME, into the current feature branch.',
+    'Each green slice committed its tests + impl on a branch `pipeline/<sliceId>` in its own worktree.',
     `Compute the order: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${greenIds.join(',') || '(none)'}`,
-    'For each id in `order`: merge its worktree, run the FULL suite, and interpret with integrator.py',
-    'merge_gate. On a failing suite, run an IMPL-ONLY conflict-resolver (the prompt below) — tests stay frozen.',
+    'For each id in `order` (run from the repo root, NOT a slice worktree): `git merge --no-ff pipeline/<id>`,',
+    'then run the FULL suite and interpret with integrator.py merge_gate. On a failing suite, run an IMPL-ONLY',
+    'conflict-resolver (the prompt below) — tests stay frozen. After a slice merges green, tear down its worktree:',
+    '`git worktree remove --force "${ROOT}.pipeline-wt/<id>" ; git branch -d pipeline/<id> ; git tag -d pipeline-tests/<id>`',
+    '(ROOT=$(git rev-parse --show-toplevel)), then `git worktree prune`. Leave failed slices\' branches for triage.',
     'Report {merged:[ids], resolved:[ids], failed:[{id,reason}]}.',
     '',
     'CONFLICT-RESOLVER PROMPT (per failing slice):',
