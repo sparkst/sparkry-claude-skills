@@ -500,9 +500,12 @@ async function buildSlice(slice) {
     [
       `Verify slice ${slice.id} in its worktree "${worktreePath}" (cd there first). Diff COMMITS, not dirty state:`,
       `  cd "${worktreePath}" && git diff --name-only pipeline-tests/${slice.id}..HEAD   # everything the implementer changed`,
-      `(1) TAMPER-CHECK — every changed path must be one of ${(slice.files || []).join(', ') || '(none)'}, NONE may be a`,
-      `test file (${(slice.test_files || []).join(', ') || '(none)'}), and \`git diff --name-only pipeline-tests/${slice.id}..HEAD -- ${(slice.test_files || []).join(' ')}\` MUST be empty`,
-      `(interpret with python3 ${toolsDir}/tdd-harness.py check_tamper).`,
+      `(1) TAMPER-CHECK — every changed path must be one of ${(slice.files || []).join(', ') || '(none)'}, OR`,
+      `incidental drift the test/build runner rewrites as a side effect (lockfiles, package/project`,
+      `manifests, caches: package-lock.json, *.lock, pnpm-lock.yaml, .project/manifest.yaml, __pycache__/,`,
+      `*.pyc, node_modules/) — such drift is NOT a violation, do NOT fail the slice for it. NO changed path`,
+      `may be a test file (${(slice.test_files || []).join(', ') || '(none)'}), and \`git diff --name-only pipeline-tests/${slice.id}..HEAD -- ${(slice.test_files || []).join(' ')}\` MUST be empty`,
+      `(these are tdd-harness.py::check_tamper's INCIDENTAL_DRIFT_GLOBS semantics; a test file is never excused).`,
       // SMOKE-007a: catch a slice that goes off-script by merging sibling branches or
       // resurrecting commits to manufacture a passing state.
       `(2) BRANCH-HISTORY SANITY — the slice branch may contain ONLY this slice's own commits since the`,

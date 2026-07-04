@@ -161,6 +161,61 @@ class TestCheckTamper:
         # caught both as out-of-scope change AND as a test-file hash change
         assert any("tests/shadow.py" in v for v in res["violations"])
 
+    def test_incidental_drift_tolerated_by_default(self):
+        # Files the test/build runner rewrites as a side effect (lockfiles,
+        # project manifests, caches) are NOT scope creep — tolerated by default.
+        res = h.check_tamper(
+            changed_files=[
+                "src/a.py",
+                ".project/manifest.yaml",
+                "package-lock.json",
+                "src/__pycache__/a.cpython-311.pyc",
+            ],
+            allowed_impl_files=["src/a.py"],
+            test_hashes_before={"tests/a.py": "h1"},
+            test_hashes_after={"tests/a.py": "h1"},
+        )
+        assert res["ok"] is True, res["violations"]
+        assert res["violations"] == []
+
+    def test_real_source_creep_still_flagged_with_allowlist(self):
+        # The allowlist only excuses incidental non-source files — a genuine
+        # out-of-scope SOURCE file is still a violation.
+        res = h.check_tamper(
+            changed_files=["src/a.py", "src/other.py", "package-lock.json"],
+            allowed_impl_files=["src/a.py"],
+            test_hashes_before={"tests/a.py": "h1"},
+            test_hashes_after={"tests/a.py": "h1"},
+        )
+        assert res["ok"] is False
+        assert any("src/other.py" in v for v in res["violations"])
+        assert not any("package-lock.json" in v for v in res["violations"])
+
+    def test_test_file_never_exempted_even_if_glob_would_match(self):
+        # A frozen test file must never be silently tolerated by the drift
+        # allowlist — mutation is always caught.
+        res = h.check_tamper(
+            changed_files=["src/a.py", "tests/a.lock.py"],
+            allowed_impl_files=["src/a.py"],
+            test_hashes_before={"tests/a.lock.py": "h1"},
+            test_hashes_after={"tests/a.lock.py": "MUTATED"},
+            ignore_globs=["*.lock.py"],  # even if the caller's glob would match it
+        )
+        assert res["ok"] is False
+        assert any("tests/a.lock.py" in v for v in res["violations"])
+
+    def test_empty_ignore_globs_restores_strict_behavior(self):
+        # Opting out of the allowlist makes even incidental drift a violation.
+        res = h.check_tamper(
+            changed_files=["src/a.py", "package-lock.json"],
+            allowed_impl_files=["src/a.py"],
+            test_hashes_before={"tests/a.py": "h1"},
+            test_hashes_after={"tests/a.py": "h1"},
+            ignore_globs=[],
+        )
+        assert res["ok"] is False
+        assert any("package-lock.json" in v for v in res["violations"])
+
 
 class TestCLI:
     def test_validate_slices_cli(self, tmp_path, capsys):

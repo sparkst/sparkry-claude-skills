@@ -1,5 +1,23 @@
 # Changelog — ai-review-toolkit
 
+## 1.5.2
+
+### Fixed
+- **`/qpipeline auto` TDD green gate no longer drops a slice for incidental
+  lockfile/manifest drift.** The pre-integration tamper check flagged ANY file
+  the implementer's worktree touched beyond the slice's declared files — but a
+  test/build runner routinely rewrites lockfiles, package/project manifests, and
+  caches (`package-lock.json`, `*.lock`, `pnpm-lock.yaml`, `.project/manifest.yaml`,
+  `__pycache__/`, `*.pyc`, `node_modules/`) as a side effect. A correctly
+  implemented, green, in-scope slice was being cleaned up and dropped purely on
+  that drift (observed: a CLI slice whose `src/cli.js` passed every gate was
+  discarded because running the suite rewrote a manifest). `tdd-harness.py`'s
+  `check_tamper` now tolerates an `INCIDENTAL_DRIFT_GLOBS` allowlist (overridable
+  via `ignore_globs`; a frozen **test** file is never excused), and the green-gate
+  agent prompt codifies the same rule. The integrator already reverted such drift
+  for slices that *reached* integration — this closes the gap for slices judged at
+  the green gate first.
+
 ## 1.5.1
 
 ### Fixed

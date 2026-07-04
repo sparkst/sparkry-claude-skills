@@ -184,25 +184,64 @@ def green_gate(exit_code: int, tests_collected: int) -> dict[str, Any]:
 # Tamper check (implementer must not touch the frozen test files)
 # ---------------------------------------------------------------------------
 
+# Files a test/build runner commonly rewrites as a SIDE EFFECT (never source):
+# dependency lockfiles, package/project manifests, and VCS-ignored caches.
+# Incidental drift in these is not scope creep, so the pre-integration tamper
+# check tolerates it — otherwise any repo whose test command touches a lockfile
+# or manifest would fail every slice's green gate on the drift alone.
+INCIDENTAL_DRIFT_GLOBS: tuple[str, ...] = (
+    "*package-lock.json",
+    "*pnpm-lock.yaml",
+    "*yarn.lock",
+    "*.lock",              # poetry.lock, Cargo.lock, Gemfile.lock, uv.lock, ...
+    "*.project/manifest.yaml",
+    "*__pycache__*",
+    "*.pyc",
+    "*.pytest_cache*",
+    "*node_modules*",
+)
+
+
+def _is_incidental(path: str, ignore_globs: tuple[str, ...] | list[str]) -> bool:
+    """True when *path* matches a known incidental-drift glob (fnmatch: `*` spans `/`)."""
+    import fnmatch
+    return any(fnmatch.fnmatch(path, g) for g in ignore_globs)
+
+
 def check_tamper(
     changed_files: list[str],
     allowed_impl_files: list[str],
     test_hashes_before: dict[str, str],
     test_hashes_after: dict[str, str],
+    ignore_globs: tuple[str, ...] | list[str] | None = None,
 ) -> dict[str, Any]:
     """Prove the implementer stayed in scope and never mutated the tests.
 
     Returns {ok, violations}. Violations:
-      - any changed file not in *allowed_impl_files* (scope creep / shadow tests);
+      - any changed file not in *allowed_impl_files* (scope creep / shadow tests),
+        EXCEPT incidental drift matching *ignore_globs* (defaults to
+        ``INCIDENTAL_DRIFT_GLOBS`` — lockfiles/manifests/caches a runner rewrites);
       - any test file whose hash changed (or vanished/appeared) between before
         and after (the implementer edited a frozen test).
+
+    A test file is NEVER exempted by the allowlist — a frozen-test mutation is
+    always caught, even if some ignore glob would otherwise match its path.
+    Pass ``ignore_globs=[]`` for the strict (allowlist-free) behavior.
     """
+    if ignore_globs is None:
+        ignore_globs = INCIDENTAL_DRIFT_GLOBS
     violations: list[str] = []
 
     allowed = set(allowed_impl_files)
+    test_paths = set(test_hashes_before) | set(test_hashes_after)
     for path in changed_files:
-        if path not in allowed:
-            violations.append(f"out-of-scope change: '{path}' (impl may only touch {sorted(allowed)})")
+        if path in allowed:
+            continue
+        # Incidental drift is tolerated — but a test file is never incidental
+        # (its mutation is caught by the frozen-test check below).
+        if path not in test_paths and _is_incidental(path, ignore_globs):
+            continue
+        violations.append(f"out-of-scope change: '{path}' (impl may only touch {sorted(allowed)})")
 
     for path in sorted(set(test_hashes_before) | set(test_hashes_after)):
         before = test_hashes_before.get(path)
