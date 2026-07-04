@@ -1,5 +1,24 @@
 # Changelog — ai-review-toolkit
 
+## 1.6.1
+
+### Added
+- **`tools/fork-sync.py` — the concrete "help me upgrade" path for manual
+  installs.** Copies the current marketplace source into a flat fork
+  (`~/.claude/ai-review-tools`): runtime `tools/*.py` → the fork root (excluding
+  tests, `gen-*` generators, and maintainer-only tools), `js/*.workflow.js` →
+  `<fork>/js/`, and each `skills/<name>/SKILL.md` → the installed skills dir with
+  `<plugin>` rewritten to the fork's absolute path (`<plugin>/tools` → the flat
+  root; the `<tools>` runtime placeholder is left intact). Supports `--dry-run`.
+  It also stamps a `VERSION` file into the fork so `version-check.py` can report
+  the installed version there (the flat fork has no `plugin.json`).
+
+### Fixed
+- **`version-check.py` now works in a flat fork.** It falls back to a sibling
+  `VERSION` file when there's no `.claude-plugin/plugin.json`, and the whole check
+  is wrapped fail-open so it can never raise or slow a run. The fork upgrade notice
+  now names `fork-sync.py` directly.
+
 ## 1.6.0
 
 ### Added
