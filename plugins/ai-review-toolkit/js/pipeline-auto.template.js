@@ -353,7 +353,7 @@ await agent(
 const reqRun = await converge(requirementsPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.requirements = reqRun.outcome
 if (halts(reqRun.decision)) return { status: 'halted', at: 'requirements', decision: reqRun.decision, report }
-await commitArtifact(requirementsPath, `docs(pipeline): requirements converged r${(reqRun.outcome && reqRun.outcome.round) || ''}`)
+await commitConverged(requirementsPath, reqRun, `docs(pipeline): requirements converged r${(reqRun.outcome && reqRun.outcome.round) || ''}`)
 if (stopAfter === 'requirements') return { status: 'stopped', at: 'requirements', report }
 
 // ── Phase 2: DESIGN (contracts + slice decomposition) → converge ─────────
@@ -373,7 +373,7 @@ await agent(
 const designRun = await converge(designPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.design = designRun.outcome
 if (halts(designRun.decision)) return { status: 'halted', at: 'design', decision: designRun.decision, report }
-await commitArtifact(designPath, `docs(pipeline): design converged r${(designRun.outcome && designRun.outcome.round) || ''}`)
+await commitConverged(designPath, designRun, `docs(pipeline): design converged r${(designRun.outcome && designRun.outcome.round) || ''}`)
 
 // Extract + validate the slice decomposition (partition/coverage/waves via tdd-harness.py).
 const sliceRun = await agent(
@@ -638,6 +638,19 @@ async function commitArtifact(paths, message) {
   )
 }
 
+// SMOKE-008: a converge's fixer may edit files BEYOND the artifact (e.g. a test file
+// while fixing an integration-plan finding). Commit those alongside the artifact —
+// through the SAME pathspec-scoped commit (never `git add -A`, which would sweep
+// leftover .pipeline-wt/ worktree state) — so the committed tree matches what `verify`
+// runs on. Without this, verify goes green on a working tree the committed branch lacks.
+async function commitConverged(artifactPath, run, message) {
+  const declared = run && Array.isArray(run.edited_files) ? run.edited_files : []
+  // Only shell-safe repo-relative paths, so a malformed declaration can neither break
+  // the commit command nor escape the pathspec.
+  const safe = declared.filter((p) => typeof p === 'string' && /^[\w./-]+$/.test(p))
+  await commitArtifact([...new Set([artifactPath, ...safe])].join(' '), message)
+}
+
 // Cross-slice seam tests from a fresh context, then GATE them (OPT-013): they must run
 // (≥1 collected, pass) and must not have mutated any pre-existing test file before they
 // silently ride into final verify.
@@ -680,7 +693,7 @@ await agent(
 const intPlanRun = await converge(integrationPlanPath, { rounds: 1 })
 report.artifacts.integration_plan = intPlanRun.outcome
 if (halts(intPlanRun.decision)) return { status: 'halted', at: 'integration-plan', decision: intPlanRun.decision, report }
-await commitArtifact(integrationPlanPath, `docs(pipeline): integration plan r${(intPlanRun.outcome && intPlanRun.outcome.round) || ''}`)
+await commitConverged(integrationPlanPath, intPlanRun, `docs(pipeline): integration plan r${(intPlanRun.outcome && intPlanRun.outcome.round) || ''}`)
 if (stopAfter === 'integration') return { status: 'stopped', at: 'integration', report }
 
 // ── Phase 6: unit + integration verify (hard gate), scorecard ────────────

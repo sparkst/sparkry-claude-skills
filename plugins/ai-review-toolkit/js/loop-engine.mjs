@@ -96,6 +96,10 @@ const RESOLUTIONS_SCHEMA = {
         },
       },
     },
+    // SMOKE-008: every repo-relative file path the fixer edited (beyond the artifact
+    // itself), so the pipeline commit step can pathspec-commit them and keep the
+    // committed tree in sync with what verify runs on.
+    edited_files: { type: 'array', items: { type: 'string' } },
   },
 }
 
@@ -216,6 +220,9 @@ function fixerPrompt(artifact, requirements, testSummary, findings) {
     '  WONTFIX/DEFERRED/OUT_OF_SCOPE.',
     '- evidence: what changed and where (file:line).',
     '- description: brief explanation of the fix.',
+    '',
+    'Also return `edited_files`: the list of EVERY repo-relative file path you edited (including files',
+    'beyond the artifact itself, e.g. test files) so the pipeline commits them. Omit unchanged files.',
   ].join('\n')
 }
 
@@ -434,6 +441,9 @@ export async function runLoop(config, ctx) {
   let prevAllTitles = new Set() // for recurrence-based significance promotion
   let outcome = null
 
+  // SMOKE-008: union of every file the fixer/spot-fixer declares it edited across all
+  // rounds, surfaced in the return so the pipeline commit step can capture them.
+  const editedFiles = new Set()
   // State for the waste-cutting optimizations.
   let fixerEverRan = false        // full re-review stays mandatory after any fix (OPT-009)
   let lastRoundConverged = false  // was the previous round clean (0 significant)?
@@ -559,6 +569,7 @@ export async function runLoop(config, ctx) {
         label: `spotfix:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: RESOLUTIONS_SCHEMA,
       })
       trivialResolutions = spot?.resolutions || []
+      for (const p of spot?.edited_files || []) editedFiles.add(p)
       if (trivialResolutions.length) {
         const check = await agent(spotCheckPrompt(artifact, trivialResolutions), {
           label: `spotcheck:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: SPOTCHECK_SCHEMA,
@@ -605,6 +616,7 @@ export async function runLoop(config, ctx) {
     })
     fixerEverRan = true
     const resolutions = fix?.resolutions || []
+    for (const p of fix?.edited_files || []) editedFiles.add(p)
 
     // Fix-ALL gate — every SIGNIFICANT finding needs a FIXED/ESCALATED resolution with evidence.
     const { complete, missing } = checkFixCompleteness(significant, resolutions)
@@ -640,6 +652,7 @@ export async function runLoop(config, ctx) {
   return {
     outcome,
     rounds: roundReports.length,
+    edited_files: [...editedFiles].sort(),
     final_findings: last.findings || [],
     final_counts: last.counts || countBySeverity([]),
     history: roundReports.map((rr) => ({
