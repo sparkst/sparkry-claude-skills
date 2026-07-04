@@ -1,10 +1,10 @@
-// Reviewer / fixer prompt construction — JS port of the loop-driver builders.
+// Reviewer / fixer prompt construction — JS port of the finding-parser builders.
 //
 // Part of the hot-loop but NOT in the adjudication corpus: these assemble the
 // prompt strings the review-loop.workflow.js (step 4) will send to reviewer and
 // fixer subagents. The workflow reads the artifact/requirements files itself and
 // passes their content in, so these stay pure (no I/O). Output matches
-// loop-driver.py / finding-parser.py byte-for-byte; locked by prompts.test.mjs
+// finding-parser.py byte-for-byte; locked by prompts.test.mjs
 // and tools/test_prompt_parity.py against tools/fixtures/prompts.json.
 
 // finding-parser.py::REVIEWER_OUTPUT_INSTRUCTIONS ({reviewer_name} is templated).
@@ -82,7 +82,7 @@ export function formatFindings(findings) {
 }
 
 // ---------------------------------------------------------------------------
-// Reviewer prompt (loop-driver.py::get_reviewer_prompt)
+// Reviewer prompt (finding-parser.py::get_reviewer_prompt)
 // ---------------------------------------------------------------------------
 
 /**
@@ -172,7 +172,7 @@ export function buildReviewerPrompt(agent, {
 }
 
 // ---------------------------------------------------------------------------
-// Fixer prompt (loop-driver.py::get_fixer_prompt)
+// Fixer prompt (finding-parser.py::get_fixer_prompt)
 // ---------------------------------------------------------------------------
 
 /** Build the fixer prompt listing every finding that must be resolved. */

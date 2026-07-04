@@ -1,8 +1,9 @@
 // Deterministic adjudication library — JS port of the Python hot-loop.
 //
 // Byte-for-byte equivalent (over the golden corpus) to the Python oracle in
-// tools/finding-parser.py, tools/team-selector.py, and tools/loop-driver.py.
-// The future review-loop.workflow.js imports these so orchestration stays
+// tools/finding-parser.py and tools/team-selector.py (the retired loop-driver.py's
+// oracle functions were folded into finding-parser.py — see CHANGELOG).
+// The review-loop.workflow.js scripts inline these so orchestration stays
 // deterministic in-code. Drift against Python is caught by adjudication.test.mjs
 // and tools/test_golden_parity.py, both asserting against the same fixtures.
 //
@@ -310,7 +311,7 @@ const ALLOWED_STATUSES = new Set(["FIXED", "ESCALATED"]);
  * Returns {complete, missing}. Every finding must have a resolution whose
  * status is FIXED or ESCALATED with non-empty evidence; prohibited statuses
  * count as invalid. `missing` is sorted. Mirrors
- * loop-driver.py::check_fix_completeness.
+ * finding-parser.py::check_fix_completeness.
  */
 export function checkFixCompleteness(findings, resolutions) {
   const findingIds = new Set();
