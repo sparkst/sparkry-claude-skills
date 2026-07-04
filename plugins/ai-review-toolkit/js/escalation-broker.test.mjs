@@ -67,6 +67,12 @@ test("classifyEvent: an unknown event type is treated as ambiguous, never silent
   assert.equal(c.category, "ambiguous");
 });
 
+test("classifyEvent: a budget breach is a spend-category hard stop (per-run ceiling, decision #6)", () => {
+  const c = classifyEvent({ type: "budget-exceeded" });
+  assert.equal(c.category, "spend");
+  assert.equal(mustHardStop({ type: "budget-exceeded" }), true);
+});
+
 // ── mustHardStop ─────────────────────────────────────────────────────────
 
 test("mustHardStop: true for the irreversible / external / spend triad", () => {

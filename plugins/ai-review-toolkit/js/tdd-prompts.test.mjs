@@ -7,6 +7,7 @@ import {
   sliceTestsRef,
   worktreeSetup,
   worktreeCleanup,
+  isSafeSliceId,
 } from "./tdd-prompts.mjs";
 
 const SLICE = {
@@ -103,4 +104,13 @@ test("worktree helpers tolerate a bare slice", () => {
   assert.doesNotThrow(() => worktreeSetup({ id: "S-000" }, {}));
   assert.doesNotThrow(() => worktreeCleanup({ id: "S-000" }));
   assert.doesNotThrow(() => buildImplementerPrompt({ id: "S-000" }, {}));
+});
+
+test("isSafeSliceId: only ids safe to embed in shell worktree/branch/tag names pass", () => {
+  for (const ok of ["S-000", "S-001", "kernel.core", "slice_42", "A-b_c.d"]) {
+    assert.equal(isSafeSliceId(ok), true, `${ok} should be safe`);
+  }
+  for (const bad of ["", "S 001", "S;rm -rf /", "$(whoami)", "a/b", "a`b`", "a&b", "slice*", undefined, null, 42]) {
+    assert.equal(isSafeSliceId(bad), false, `${JSON.stringify(bad)} must be rejected`);
+  }
 });
