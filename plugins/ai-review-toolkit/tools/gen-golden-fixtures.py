@@ -25,7 +25,6 @@ from tools._loader import load_sibling
 
 finding_parser = load_sibling("finding-parser.py")
 team_selector = load_sibling("team-selector.py")
-loop_driver = load_sibling("loop-driver.py", "loop_driver")
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "adjudication.json"
 
@@ -70,7 +69,7 @@ def run_case(fn: str, inp: dict) -> object:
         )
 
     if fn == "check_fix_completeness":
-        complete, missing = loop_driver.check_fix_completeness(
+        complete, missing = finding_parser.check_fix_completeness(
             inp["findings"], inp["resolutions"]
         )
         return {"complete": complete, "missing": missing}

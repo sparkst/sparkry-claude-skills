@@ -38,8 +38,9 @@ Design constraints the workflow works within:
   memory by the script) are still embedded via `formatFindings`.
 - **In-place fixer, no worktree isolation.** Fixes persist so the next round's
   reviewers see them.
-- Loop semantics mirror `loop-driver.py`: min-2-rounds floor, fix-ALL gate,
-  stuck detection, max-rounds escalation.
+- Loop semantics (min-2-rounds floor, fix-ALL gate, stuck detection, max-rounds
+  escalation) live in `loop-engine.mjs` itself now -- the Python `loop-driver.py`
+  state machine they used to mirror has been retired.
 
 ## Drift lock (Python is the oracle)
 

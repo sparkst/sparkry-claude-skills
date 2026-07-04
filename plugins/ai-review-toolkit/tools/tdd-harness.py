@@ -13,8 +13,9 @@ model:
                          never mutated the frozen test files.
 
 The judgment is deterministic here; the CLI wrappers gather git/test state and
-hand it to these functions. Mirrors pipeline-driver.py's compositional-integrity
-style. See ~/.claude/plans/qpipeline-auto-design.md (Phase B).
+hand it to these functions. Mirrors the same compositional-integrity discipline
+as the rest of the toolkit: enforce invariants in code, not prose. See
+~/.claude/plans/qpipeline-auto-design.md (Phase B).
 """
 
 from __future__ import annotations

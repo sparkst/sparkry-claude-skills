@@ -11,6 +11,15 @@ repeated until the artifact converges (zero P0, zero P1, low-severity within
 threshold) or the loop hard-stops. `/qloop` is `/qreview` plus a fixer and the
 enforcement gates.
 
+> **Hard rule: NEVER hand-write a review/pipeline workflow script.** The ONLY
+> sanctioned path for this skill is `scriptPath=review-loop.workflow.js`. If
+> that script file is missing, STOP and report — do not improvise a workflow.
+> A hand-rolled script has no `model:` tiering, so every agent it spawns
+> silently inherits the invoking session's model (including expensive
+> long-context variants) — this is the single largest source of runaway spend
+> observed across past runs. There is no acceptable workaround; a missing
+> script is a bug to report, not a gap to paper over.
+
 **This skill runs via the ai-review-toolkit ultracode Workflow**
 (`review-loop.workflow.js`, run until-converged). The Workflow — not prose — owns
 the state machine: parallel reviewers with resolved models, JS synthesis/dedup,
@@ -128,9 +137,3 @@ workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
   Generated from `js/adjudication.mjs` + `js/prompts.mjs`; do not hand-edit.
 - **`tools/team-selector.py`** — deterministic team selection + model tiering.
 - **`tools/scorecard.py`** — deterministic end-of-run scorecard.
-
-## Fallback
-
-If the Workflow tool is unavailable, use the legacy hand-driven Python-driver
-protocol in [`driver-fallback.md`](./driver-fallback.md) (retained for one
-release; removed when the drivers are deleted in step 7).

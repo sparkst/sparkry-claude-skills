@@ -8,15 +8,25 @@ version: 0.3.0
 
 ## Purpose
 
-Orchestrate end-to-end workflows by composing review primitives into phased pipelines. The pipeline driver (`tools/pipeline-driver.py`) IS the orchestrator -- it manages state, enforces phase ordering, validates compositional integrity, and controls transitions. This is NOT skill-to-skill composition. The driver owns the lifecycle.
+Orchestrate end-to-end workflows by composing review primitives into phased pipelines. **This SKILL.md's protocol IS the orchestrator** -- follow the steps below in order, executing each phase per its Phase Type description, gating on human approval where required. This is NOT skill-to-skill composition: phases that need deterministic, code-enforced state (review/review-loop convergence) invoke the same ultracode Workflow that powers `/qreview` and `/qloop`; phases that are single deterministic tool calls (test-gate) or a single fresh-context agent (verify) are just that.
 
-Ship with four presets. Accept custom phase lists. Checkpoint at every boundary. Gate on human approval where required. Never skip a phase.
+> **Hard rule: NEVER hand-write a review/pipeline workflow script.** The ONLY
+> sanctioned paths for this skill are `scriptPath=review-loop.workflow.js`
+> (the `review` / `review-loop` phase types) and `scriptPath=pipeline-auto.workflow.js`
+> (`/qpipeline auto`, below). If a phase's script file is missing, STOP and
+> report — do not improvise a workflow or hand-roll a review loop in prose. A
+> hand-rolled script has no `model:` tiering, so every agent it spawns
+> silently inherits the invoking session's model (including expensive
+> long-context variants) — this is the single largest source of runaway spend
+> observed across past runs.
 
-The presets above are the **gated, human-in-the-loop** pipeline (Python driver). `/qpipeline auto` is a **separate, autonomous** mode — see below.
+Ship with four presets. Accept custom phase lists. Gate on human approval where required. Never skip a phase.
+
+The presets above are the **gated, human-in-the-loop** pipeline. `/qpipeline auto` is a **separate, autonomous** mode — see below.
 
 ## Autonomous mode: `/qpipeline auto`
 
-When the user asks for `/qpipeline auto` (or "build this autonomously end-to-end"), run the **`pipeline-auto` ultracode Workflow** — NOT the Python driver. The driver exists to pause at human gates; `auto` is the opposite (no stopping). This mode drives a full SDLC from a one-line goal to a verified stop:
+When the user asks for `/qpipeline auto` (or "build this autonomously end-to-end"), run the **`pipeline-auto` ultracode Workflow**. The gated presets above exist to pause at human gates; `auto` is the opposite (no stopping). This mode drives a full SDLC from a one-line goal to a verified stop:
 
 `requirements → design → separate-context TDD (per-slice worktrees, by wave) → serialized integration → unit/integration verify → stop-at-verify`
 
@@ -123,23 +133,25 @@ Create an implementation plan. Produce `PLAN.md` with numbered tasks, dependenci
 
 ### `execute`
 
-Execute plan tasks. For each task in PLAN.md, perform the implementation. Record results per task. This phase MUST be followed by a review phase -- the driver enforces this via compositional integrity validation.
+Execute plan tasks. For each task in PLAN.md, perform the implementation. Record results per task. This phase MUST be followed by a review phase -- verify this before starting the pipeline (see Compositional Integrity).
 
 ### `review`
 
-Single-round multi-agent review. Execute the /qreview protocol as defined in `skills/qreview/SKILL.md`. Record the synthesis output as the phase result.
+Single-round multi-agent review — mechanically identical to `/qreview` steps 2-3 (`skills/qreview/SKILL.md`):
+
+1. Resolve the team: `python3 <tools>/team-selector.py "<short artifact description>" --artifact <artifact_path> --json --files <N> --tool-types <N> --context-window 200000`.
+2. Invoke the **Workflow** tool with `scriptPath` = `js/review-loop.workflow.js` (plugin) or `~/.claude/ai-review-tools/js/review-loop.workflow.js` (fork) and `{ artifact, requirements, team, rounds: 1, threshold: 0 }`.
+
+Record the returned `final_findings` / `final_counts` as the phase result. Never hand-write the review loop — see the hard rule above.
 
 ### `review-loop`
 
-Iterative review-fix cycle. This is the core phase. Execute rounds of: review -> fix -> re-review until convergence (zero P0, zero P1) or the round limit (default 5) is reached. Each round:
+Iterative review-fix cycle — mechanically identical to `/qloop` (`skills/qloop/SKILL.md`). This is the core phase:
 
-1. Run multi-agent review (same protocol as `review` phase).
-2. If converged, record convergence and advance.
-3. If not converged, fix all findings at all severity levels (P0 through P3).
-4. Re-review the fixed artifact.
-5. If round limit reached without convergence, escalate to user.
+1. Resolve the team (same `team-selector.py` call as `review`, above).
+2. Invoke the **Workflow** tool with `scriptPath` = `js/review-loop.workflow.js` and `{ artifact, requirements, team, threshold: 0, maxRounds: 5 }` (omit `rounds` so it runs until-converged).
 
-Use `tools/loop-driver.py` for each review round. Track round count and finding trends in the phase result.
+The Workflow owns round tracking, the fix-ALL gate, the min-2-rounds floor, stuck detection, and max-rounds escalation in code — do not reimplement any of this in prose, and do not hand-roll a review/fix loop yourself. Record the returned `outcome` (`converged` or `escalated`, plus `history`) as the phase result; an `escalated` outcome is a gate — present it to the user per Step 3 below.
 
 ### `test-gate`
 
@@ -147,7 +159,7 @@ Run deterministic tests via `tools/test-runner.py`. Discover co-located tests fo
 
 ### `verify`
 
-Fresh-context acceptance verification. Spawn a verifier agent with NO knowledge of the review history. The verifier receives only the artifact, requirements, and a clean review prompt. The verifier produces an independent pass/fail assessment. If the verifier fails the artifact, return to the review-loop or escalate.
+Fresh-context acceptance verification. Spawn the `verifier` agent (`agents/verifier.md`) with NO knowledge of the review history. The verifier receives only the artifact, requirements, and a clean review prompt. The verifier produces an independent pass/fail assessment. If the verifier fails the artifact, return to the review-loop or escalate.
 
 ### `demo`
 
@@ -169,119 +181,80 @@ Extract learnings from the completed pipeline. Record what worked, what surprise
 
 Follow these steps in order. Do not skip steps. Do not combine steps.
 
-### Step 1: Initialize the Pipeline
+### Step 1: Resolve the Phase List
 
-Run `tools/pipeline-driver.py init` with the chosen preset (or custom phases), artifact path, and requirements path. The driver:
-- Validates the phase list for compositional integrity
-- Generates a project ID (NNN-slug from artifact name)
-- Creates the state directory `.qpipeline/projects/{project_id}/`
-- Returns the initial state with phase list and first action
+Pick a preset (or accept a custom phase list) and validate it before doing any work (see Compositional Integrity, below). Present the resolved phase list to the user so the run is auditable from the start.
 
 ### Step 2: Execute Phases
 
-Call `tools/pipeline-driver.py next` to get the next action. The driver returns an action dict describing what to do:
+Walk the phase list in order. For each phase, execute exactly what its **Phase Type** entry above describes — no more, no less:
 
-- `{"action": "run_tests", "phase": "test-gate"}` -- Execute test-runner on the artifact.
-- `{"action": "spawn_reviewers", "phase": "review"}` -- Run a single-round review via qreview protocol.
-- `{"action": "run_loop", "phase": "review-loop"}` -- Run iterative review-fix cycles.
-- `{"action": "execute_plan", "phase": "execute"}` -- Execute implementation tasks.
-- `{"action": "spawn_verifier", "phase": "verify"}` -- Spawn a fresh-context verifier.
-- `{"action": "gate", "phase": "...", "message": "..."}` -- Present a gate to the user and wait.
-- `{"action": "complete", "summary": "..."}` -- Pipeline finished.
+- `test-gate` -- run `tools/test-runner.py` on the artifact.
+- `review` -- resolve the team, then invoke the Workflow (`scriptPath=js/review-loop.workflow.js`, `rounds: 1`).
+- `review-loop` -- resolve the team, then invoke the Workflow (`scriptPath=js/review-loop.workflow.js`, no `rounds`, until-converged).
+- `execute` -- perform the plan's implementation tasks directly.
+- `verify` -- spawn the `verifier` agent (`agents/verifier.md`).
+- `ideate` / `plan` / `demo` / `deploy` / `smoke` / `learn` -- per their Phase Type entries; these are gates, not driver-tracked state.
 
-After completing each action, call `tools/pipeline-driver.py record-result` with the phase outcome, then call `next` again.
+Record each phase's result (findings, convergence outcome, test results, or gate decision) before moving to the next phase — carry it forward in context, since there is no separate persisted pipeline state. Do not advance to the next phase until the current one has a recorded result.
 
 **Model tiering (Sonnet 5 by default).** Agent-spawning phases follow the same policy as `/qreview` and `/qloop`: default to **Sonnet 5**, escalate to **Opus** for high-stakes lenses (`security-reviewer`, `architecture-reviewer`) or complex work (change spans more than one file, needs more than two distinct tool-execution types, or exceeds ~20% of context).
-- `spawn_reviewers` / `run_loop` — pass the complexity flags (`--files`, `--tool-types`) into the underlying `review-driver.py` / `loop-driver.py init`, and spawn each reviewer with its resolved `model` (surfaced in the team composition / `models` array).
-- `spawn_verifier` — a fresh-context verifier is a reviewer: default Sonnet 5, escalate to Opus by the same rule.
-- `execute_plan` — implementation typically touches multiple files, so it usually runs on **Opus**; a single-file, low-tool task stays on Sonnet 5.
+- `review` / `review-loop` — pass the complexity flags (`--files`, `--tool-types`) into `team-selector.py`, and let the Workflow spawn each reviewer with its resolved `model` (already tiered in the `team` array) — never re-tier or override by hand.
+- `verify` — a fresh-context verifier is a reviewer: default Sonnet 5, escalate to Opus by the same rule.
+- `execute` — implementation typically touches multiple files, so it usually runs on **Opus**; a single-file, low-tool task stays on Sonnet 5.
 
 ### Step 3: Handle Gates
 
-Gates use a two-call protocol:
-1. `next` returns `{"action": "gate", ...}` -- present the gate message to the user.
-2. User responds with approval or feedback.
-3. Call `next --confirm` to advance past the gate.
+Gate phases (`ideate`, `plan`, `demo`, `deploy`) and an `escalated` `review-loop` outcome all work the same way:
+1. Present the gate message / findings to the user and stop.
+2. Wait for the user's approval or feedback.
+3. On approval, advance to the next phase. On feedback, handle per phase type (`demo` allows 2 revision cycles, others escalate rather than looping indefinitely).
 
-If the user rejects at a gate, record the feedback and handle per phase type (demo allows 2 revision cycles, others escalate).
+There is no auto-approve and no timeout — a gate blocks until the user responds.
 
 ### Step 4: Pipeline Completion
 
-When `next` returns `{"action": "complete"}`, the pipeline is done. Present the summary to the user.
+Once every phase has a recorded result, present the completion summary to the user.
 
-Then ALWAYS emit the deterministic scorecard as the final output (pure, reproducible, no LLM):
+Then ALWAYS emit the deterministic scorecard as the final output (pure, reproducible, no LLM), same as `/qloop` step 5:
 
 ```
-tools/scorecard.py --state <the review-loop's .qloop/state.json (or the phase state richest in findings)> --transcript <this session's transcript JSONL>
+python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
 ```
 
-Point `--state` at the sub-protocol state that carries the findings (usually the review-loop's `.qloop/state.json`; a single `review` phase writes `.qreview/state.json`). The scorecard reports **Process**, **Issues Found** (by severity), **Token Cost** (per-model tokens + USD, plus total), and **Model Execution Time** (sum of per-request durations — model execution time, **not** wall clock). Token/time cover this session's model activity; scope with `--since <ISO>` and override rates with `--pricing PATH`.
+Run it against the `review`/`review-loop` phase's Workflow run (the richest in findings). It reports **Process**, **Issues Found** (by severity), **Token Cost** (per-model USD), and **Model Execution Time** (per-agent wall-clock rolled per model + the workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
 
 ## Compositional Integrity
 
-The driver validates every phase list at init time. Rules:
+Validate the phase list as part of Step 1, before any phase executes:
 
-- Any pipeline containing `execute` or `fix` MUST also contain `review-loop`. Code changes without review are not permitted.
-- The driver rejects invalid compositions with an error message explaining what is missing.
-- There is no `--skip` flag. Phase skipping is not supported at any level.
-
-## Step-Skip Prevention
-
-The driver tracks phase execution in state. Every mandatory phase must record a result before the driver advances to the next phase. The AI cannot bypass a phase -- the driver controls transitions by checking state before returning the next action.
-
-## Checkpointing
-
-The driver auto-checkpoints at every phase transition. The checkpoint includes:
-- Current artifact state
-- All findings from all rounds
-- Fix history
-- Test results
-- Round count and convergence trend
-- Gate decisions
-
-Resume a checkpointed pipeline: `/qpipeline resume <project-id>`
-
-## Status
-
-Check pipeline status: `/qpipeline status`
-
-Returns current phase, phase index, total phases, findings summary, and convergence trend.
-
-## Reset
-
-Clear pipeline state: `/qpipeline reset`
-
-Removes all state for the current project.
+- Any pipeline containing `execute` MUST also contain `review-loop`. Code changes without review are not permitted. All four built-in presets already satisfy this by construction; a custom phase list that omits `review-loop` after `execute` must be rejected — tell the user what's missing rather than proceeding.
+- There is no `--skip` option. Phase skipping is not supported at any level; if a phase is in the list, it executes.
 
 ## Tools Reference
 
 All tools live in the `tools/` directory relative to the plugin root:
 
-- **`tools/pipeline-driver.py`** -- Pipeline state machine. Manages `.qpipeline/projects/`, validates phase composition, controls transitions, auto-checkpoints.
-- **`tools/review-driver.py`** -- Single-round review state machine for /qreview. Used by `review` phase.
-- **`tools/loop-driver.py`** -- Iterative review-fix loop state machine for /qloop. Used by `review-loop` phase.
-- **`tools/finding-parser.py`** -- Finding validation, deduplication, convergence, formatting. Pure functions.
-- **`tools/test-runner.py`** -- Test discovery and execution. Used by `test-gate` phase.
-- **`tools/team-selector.py`** -- Domain classification and team selection. Used during review phases.
+- **`js/review-loop.workflow.js`** -- the ultracode Workflow (the loop engine) used by the `review` and `review-loop` phase types. Generated from `js/adjudication.mjs` + `js/prompts.mjs`; do not hand-edit.
+- **`tools/team-selector.py`** -- deterministic domain classification + team selection + model tiering. Used before `review` / `review-loop` phases.
+- **`tools/test-runner.py`** -- test discovery and execution. Used by the `test-gate` phase.
+- **`tools/finding-parser.py`** -- finding validation, deduplication, convergence, formatting (the Python oracle backing the Workflow's JS port). Pure functions.
+- **`tools/scorecard.py`** -- deterministic end-of-run scorecard.
 
 ## Key Rules
 
 ### No Skip Flag
 
-There is no mechanism to skip a phase. The driver does not accept a `--skip` parameter. If a phase is in the pipeline, it executes.
+There is no mechanism to skip a phase. If a phase is in the pipeline, it executes.
 
-### Compositional Integrity is Enforced at Init
+### Compositional Integrity is Verified Before Execution Begins
 
-Invalid phase compositions are rejected before any work begins. The driver does not allow creation of a pipeline that violates integrity rules.
+Invalid phase compositions (an `execute` with no `review-loop`) must be caught and reported before any work starts, not discovered partway through.
 
 ### Gates Block Until Confirmed
 
-Gate phases return the gate action repeatedly until `--confirm` is passed. There is no timeout. There is no auto-approve.
+Gate phases stop and wait for the user. There is no timeout. There is no auto-approve.
 
-### Checkpoints are Automatic
+### No Cross-Session Checkpoint / Resume
 
-Every phase transition triggers a checkpoint write. The user does not need to request checkpoints. Resume always picks up from the last completed phase.
-
-### Phase Results are Required
-
-The driver will not advance to the next phase until the current phase has a recorded result. Calling `next` without recording a result for the current phase returns the same action again.
+Unlike the prior Python-driver implementation, this protocol does not persist state to disk between turns. A pipeline run lives in the current conversation's context; there is no `/qpipeline status`, `/qpipeline resume <project-id>`, or `/qpipeline reset`. If a run needs to span multiple sessions, checkpoint manually (write the phase results and resolved team/artifact paths to a file) before ending the session, and re-establish that context when resuming.
