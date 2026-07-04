@@ -20,6 +20,7 @@ aggregate_transcript = scorecard.aggregate_transcript
 aggregate_workflow = scorecard.aggregate_workflow
 build_scorecard = scorecard.build_scorecard
 render_markdown = scorecard.render_markdown
+lens_yield = scorecard.lens_yield
 main = scorecard.main
 
 
@@ -30,13 +31,24 @@ main = scorecard.main
 class TestNormalizeModel:
     def test_opus_family(self):
         assert normalize_model("claude-opus-4-8") == "opus"
-        assert normalize_model("claude-opus-4-8[1m]") == "opus"
+
+    def test_opus_1m_is_a_distinct_tier(self):
+        # OPT-004: the 1M-context variant is bucketed separately (matched
+        # BEFORE the plain-opus substring check) so it can be flagged as a
+        # defaultModel-inheritance signal, even though it bills at the same
+        # rate as plain opus (Opus 4.8 has no long-context premium).
+        assert normalize_model("claude-opus-4-8[1m]") == "opus_1m"
+        assert normalize_model("claude-opus-4-8[1m]") != "opus"
 
     def test_sonnet_family(self):
         assert normalize_model("claude-sonnet-5") == "sonnet"
 
     def test_haiku_family(self):
         assert normalize_model("claude-haiku-4-5-20251001") == "haiku"
+
+    def test_fable_family(self):
+        # OPT-003: fable must resolve before the sonnet/opus checks.
+        assert normalize_model("claude-fable-5") == "fable"
 
     def test_unknown_returns_raw(self):
         assert normalize_model("some-future-model") == "some-future-model"
@@ -68,6 +80,37 @@ class TestTokenCost:
         pricing = load_pricing()
         usage = {"input_tokens": 500, "output_tokens": 500}
         assert token_cost(usage, "mystery-model", pricing) == 0.0
+
+    def test_opus_rates_match_current_claude_opus_4_8_pricing(self):
+        # OPT-004: opus was priced at Opus-4.1-era rates ($15/$75). Verified
+        # current rates ($5/$25, cache 0.50/6.25) via the claude-api skill.
+        pricing = load_pricing()
+        usage = {
+            "input_tokens": 1_000_000, "cache_read_input_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000, "output_tokens": 1_000_000,
+        }
+        assert token_cost(usage, "opus", pricing) == pytest.approx(5.0 + 0.50 + 6.25 + 25.0)
+
+    def test_opus_1m_bills_at_the_same_rate_as_plain_opus(self):
+        # Opus 4.8's 1M context window carries no long-context premium; the
+        # [1m] bucket exists to flag potential defaultModel inheritance
+        # (OPT-001/OPT-004), not to charge a different rate.
+        pricing = load_pricing()
+        usage = {
+            "input_tokens": 1_000_000, "cache_read_input_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000, "output_tokens": 1_000_000,
+        }
+        assert token_cost(usage, "opus_1m", pricing) == token_cost(usage, "opus", pricing)
+
+    def test_fable_rates_are_priced_not_zero(self):
+        # OPT-003: fable agents previously fell through normalize_model's
+        # substring checks and cost $0.00 across the corpus.
+        pricing = load_pricing()
+        usage = {
+            "input_tokens": 1_000_000, "cache_read_input_tokens": 1_000_000,
+            "cache_creation_input_tokens": 1_000_000, "output_tokens": 1_000_000,
+        }
+        assert token_cost(usage, "fable", pricing) == pytest.approx(10.0 + 1.00 + 12.50 + 50.0)
 
     def test_custom_pricing_override(self, tmp_path):
         p = tmp_path / "pricing.json"
@@ -203,6 +246,38 @@ class TestAggregateWorkflow:
         # only phases with a durationMs are surfaced
         assert agg["workflow"]["phases"] == [{"title": "Profile", "duration_ms": 178000}]
 
+    # -- OPT-001(3): model-leak detection ---------------------------------
+
+    def test_model_leak_detected_when_agents_inherit_opus_default(self):
+        agents = {
+            "a1": [_agent_line("claude-opus-4-8[1m]", "2026-07-01T01:00:00Z", inp=1)],
+            "a2": [_agent_line("claude-opus-4-8[1m]", "2026-07-01T01:00:00Z", inp=1)],
+            "a3": [_agent_line("claude-haiku-4-5", "2026-07-01T01:00:00Z", inp=1)],
+        }
+        meta = {"runId": "wf_x", "defaultModel": "claude-opus-4-8[1m]"}
+        agg = aggregate_workflow(agents, meta)
+        leak = agg["workflow"]["model_leak"]
+        assert leak["default_model"] == "claude-opus-4-8[1m]"
+        assert leak["count"] == 2
+
+    def test_no_model_leak_when_default_is_not_opus(self):
+        agents = {"a1": [_agent_line("claude-sonnet-5", "2026-07-01T01:00:00Z", inp=1)]}
+        meta = {"runId": "wf_x", "defaultModel": "claude-sonnet-5"}
+        agg = aggregate_workflow(agents, meta)
+        assert "model_leak" not in agg["workflow"]
+
+    def test_no_model_leak_when_no_agent_matches_default(self):
+        agents = {"a1": [_agent_line("claude-sonnet-5", "2026-07-01T01:00:00Z", inp=1)]}
+        meta = {"runId": "wf_x", "defaultModel": "claude-opus-4-8"}
+        agg = aggregate_workflow(agents, meta)
+        assert "model_leak" not in agg["workflow"]
+
+    def test_no_model_leak_when_workflow_meta_has_no_default_model(self):
+        agents = {"a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1)]}
+        meta = {"runId": "wf_x"}
+        agg = aggregate_workflow(agents, meta)
+        assert "model_leak" not in agg["workflow"]
+
 
 class TestBuildScorecardWorkflow:
     def test_time_section_carries_workflow_wall_clock_and_agent_counts(self):
@@ -225,6 +300,25 @@ class TestBuildScorecardWorkflow:
         md = render_markdown(report)
         assert "workflow total (wall-clock)" in md.lower()
         assert "opus" in md
+
+    def test_render_shows_model_leak_banner(self):
+        agents = {
+            "a1": [_agent_line("claude-opus-4-8[1m]", "2026-07-01T01:00:00Z", inp=1)],
+            "a2": [_agent_line("claude-opus-4-8[1m]", "2026-07-01T01:00:00Z", inp=1)],
+        }
+        meta = {"runId": "wf_x", "durationMs": 1000, "defaultModel": "claude-opus-4-8[1m]"}
+        report = build_scorecard({}, aggregate_workflow(agents, meta), load_pricing())
+        md = render_markdown(report)
+        assert "MODEL LEAK" in md
+        assert "2" in md
+        assert "claude-opus-4-8[1m]" in md
+
+    def test_render_omits_model_leak_banner_when_absent(self):
+        agents = {"a1": [_agent_line("claude-sonnet-5", "2026-07-01T01:00:00Z", inp=1)]}
+        meta = {"runId": "wf_x", "durationMs": 1000}
+        report = build_scorecard({}, aggregate_workflow(agents, meta), load_pricing())
+        md = render_markdown(report)
+        assert "MODEL LEAK" not in md
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +371,38 @@ class TestBuildScorecard:
         assert report["time"]["total_ms"] == 1234
 
 
+# ---------------------------------------------------------------------------
+# OPT-003: unpriced models render loud instead of a silent $0.0000
+# ---------------------------------------------------------------------------
+
+class TestUnpricedModels:
+    def test_unpriced_model_flagged_in_tokens_by_model(self):
+        lines = [_line("some-future-model", "2026-06-30T10:00:00Z", 100, inp=1000, out=100)]
+        agg = aggregate_transcript(lines)
+        report = build_scorecard(_qreview_state(), agg, load_pricing())
+        row = report["tokens"]["by_model"]["some-future-model"]
+        assert row["unpriced"] is True
+        assert row["cost_usd"] == 0.0
+
+    def test_unpriced_models_excluded_from_total_cost_and_listed(self):
+        lines = [
+            _line("some-future-model", "2026-06-30T10:00:00Z", 100, inp=1_000_000, out=0),
+            _line("claude-sonnet-5", "2026-06-30T10:00:01Z", 100, inp=1_000_000, out=0),
+        ]
+        agg = aggregate_transcript(lines)
+        report = build_scorecard(_qreview_state(), agg, load_pricing())
+        assert report["tokens"]["unpriced_models"] == ["some-future-model"]
+        # total cost only reflects the priced (sonnet) row
+        assert report["tokens"]["total"]["cost_usd"] == pytest.approx(3.0)
+
+    def test_priced_model_not_listed_as_unpriced(self):
+        lines = [_line("claude-sonnet-5", "2026-06-30T10:00:00Z", 100, inp=1000, out=100)]
+        agg = aggregate_transcript(lines)
+        report = build_scorecard(_qreview_state(), agg, load_pricing())
+        assert report["tokens"]["by_model"]["sonnet"]["unpriced"] is False
+        assert "unpriced_models" not in report["tokens"] or not report["tokens"]["unpriced_models"]
+
+
 class TestRenderMarkdown:
     def test_contains_four_sections(self):
         agg = aggregate_transcript([])
@@ -288,6 +414,27 @@ class TestRenderMarkdown:
         assert "Model Execution Time" in md
         # honesty label about wall clock
         assert "not wall clock" in md.lower()
+
+    def test_unpriced_row_renders_loud_not_silent_zero(self):
+        lines = [
+            _line("some-future-model", "2026-06-30T10:00:00Z", 100, inp=1000, out=100),
+            _line("claude-sonnet-5", "2026-06-30T10:00:01Z", 100, inp=1000, out=100),
+        ]
+        agg = aggregate_transcript(lines)
+        report = build_scorecard(_qreview_state(), agg, load_pricing())
+        md = render_markdown(report)
+        assert "UNPRICED" in md
+        unpriced_row = next(l for l in md.splitlines() if l.startswith("| some-future-model"))
+        assert "$0.0000" not in unpriced_row
+        assert "n/a (UNPRICED)" in unpriced_row
+
+    def test_opus_1m_row_gets_a_defaultmodel_check_note(self):
+        lines = [_line("claude-opus-4-8[1m]", "2026-06-30T10:00:00Z", 100, inp=1000, out=100)]
+        agg = aggregate_transcript(lines)
+        report = build_scorecard(_qreview_state(), agg, load_pricing())
+        md = render_markdown(report)
+        assert "1M-context variant" in md
+        assert "defaultModel inheritance" in md
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +480,96 @@ class TestDeployGate:
         report = build_scorecard(_qreview_state(), aggregate_transcript([]), load_pricing())
         md = render_markdown(report)
         assert "Deploy Gate" not in md
+
+
+# ---------------------------------------------------------------------------
+# OPT-025: per-lens unique-contribution tracking (deterministic — delegates
+# to finding-parser's deduplicate_findings, no LLM). Recovers lens identity
+# from data already on disk: reviewer_outputs/reviewer_findings["source"]
+# (each finding's "source" field is the reviewer's stable team name per
+# REVIEWER_OUTPUT_INSTRUCTIONS) falling back to team[index].name when a
+# finding predates that convention.
+# ---------------------------------------------------------------------------
+
+def _finding(sev, title, source=None):
+    f = {"id": f"{sev}-{title[:3]}", "severity": sev, "title": title,
+         "requirement": "r", "finding": "f", "recommendation": "rec"}
+    if source is not None:
+        f["source"] = source
+    return f
+
+
+class TestLensYield:
+    def test_single_round_qreview_state_yields_raw_and_unique_counts(self):
+        state = {
+            "team": [
+                {"name": "security-reviewer", "review_lens": "security"},
+                {"name": "architecture-reviewer", "review_lens": "architecture"},
+            ],
+            "reviewer_outputs": {
+                "0": [_finding("P1", "SQL injection in login", "security-reviewer")],
+                "1": [
+                    _finding("P2", "SQL injection in login", "architecture-reviewer"),
+                    _finding("P2", "God object in UserService", "architecture-reviewer"),
+                ],
+            },
+        }
+        rows = lens_yield(state)
+        by_lens = {r["lens"]: r for r in rows}
+        # both reviewers raised "SQL injection..." -> merges to one finding
+        # with 2 sources, so neither lens gets unique credit for it.
+        assert by_lens["security-reviewer"]["raw"] == 1
+        assert by_lens["security-reviewer"]["unique"] == 0
+        assert by_lens["architecture-reviewer"]["raw"] == 2
+        assert by_lens["architecture-reviewer"]["unique"] == 1  # only the God-object finding
+
+    def test_falls_back_to_team_name_when_source_field_absent(self):
+        # Older/simplified findings (e.g. the shared _qreview_state fixture)
+        # don't carry "source" -- recover lens identity from team index.
+        state = _qreview_state()
+        rows = lens_yield(state)
+        lenses = {r["lens"] for r in rows}
+        assert lenses == {"requirements-reviewer", "security-reviewer"}
+
+    def test_multi_round_qloop_state_tracks_yield_per_round(self):
+        state = {
+            "team": [{"name": "security-reviewer", "review_lens": "security"}],
+            "rounds": [
+                {"round_num": 1, "reviewer_findings": [
+                    {"reviewer_index": 0, "findings": [_finding("P1", "issue A")]},
+                ]},
+                {"round_num": 2, "reviewer_findings": [
+                    {"reviewer_index": 0, "findings": [_finding("P1", "issue A"),
+                                                       _finding("P2", "issue B")]},
+                ]},
+            ],
+        }
+        rows = lens_yield(state)
+        assert [r["round"] for r in rows] == [1, 2]
+        assert rows[1]["raw"] == 2
+        assert rows[1]["unique"] == 2
+
+    def test_no_reviewer_data_returns_empty(self):
+        assert lens_yield({}) == []
+        assert lens_yield({"status": "initialized"}) == []
+
+
+class TestRenderPerLensYield:
+    def test_render_shows_per_lens_yield_table(self):
+        state = {
+            "team": [{"name": "security-reviewer", "review_lens": "security"}],
+            "reviewer_outputs": {"0": [_finding("P1", "issue A", "security-reviewer")]},
+        }
+        report = build_scorecard(state, aggregate_transcript([]), load_pricing())
+        md = render_markdown(report)
+        assert "Per-Lens Yield" in md
+        assert "security-reviewer" in md
+
+    def test_render_omits_per_lens_section_when_no_reviewer_data(self):
+        report = build_scorecard(_qreview_state() | {"reviewer_outputs": {}, "team": []},
+                                  aggregate_transcript([]), load_pricing())
+        md = render_markdown(report)
+        assert "Per-Lens Yield" not in md
 
 
 # ---------------------------------------------------------------------------
