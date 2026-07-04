@@ -1,6 +1,19 @@
 # Changelog — ai-review-toolkit
 
-## 1.5.0
+## 1.5.1
+
+### Fixed
+- **`/qpipeline auto` now commits the fixer's edits beyond the artifact
+  (SMOKE-008).** When a convergence loop's fixer edited files other than the
+  artifact itself (e.g. a test file, while fixing an integration-plan finding),
+  the pipeline's pathspec-scoped commit captured only the artifact — leaving those
+  edits uncommitted. Final `verify` then ran against a working tree the committed
+  branch lacked (green on N tests while `main` had fewer). The fixer now declares
+  every file it edited (`edited_files` in the resolutions schema); `runLoop`
+  surfaces the union across rounds, and each converge commit pathspec-adds those
+  paths alongside the artifact (still never `git add -A`, so leftover
+  `.pipeline-wt/` worktree state is never swept in). `/qreview` and `/qloop` are
+  unaffected — they don't commit, so the new field is returned and ignored.
 
 ### Added
 - **`/qpipeline auto prod` — the autonomous production tail (Phase F2).** After the

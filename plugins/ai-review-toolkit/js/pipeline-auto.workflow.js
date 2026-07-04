@@ -705,6 +705,10 @@ const RESOLUTIONS_SCHEMA = {
         },
       },
     },
+    // SMOKE-008: every repo-relative file path the fixer edited (beyond the artifact
+    // itself), so the pipeline commit step can pathspec-commit them and keep the
+    // committed tree in sync with what verify runs on.
+    edited_files: { type: 'array', items: { type: 'string' } },
   },
 }
 
@@ -825,6 +829,9 @@ function fixerPrompt(artifact, requirements, testSummary, findings) {
     '  WONTFIX/DEFERRED/OUT_OF_SCOPE.',
     '- evidence: what changed and where (file:line).',
     '- description: brief explanation of the fix.',
+    '',
+    'Also return `edited_files`: the list of EVERY repo-relative file path you edited (including files',
+    'beyond the artifact itself, e.g. test files) so the pipeline commits them. Omit unchanged files.',
   ].join('\n')
 }
 
@@ -1043,6 +1050,9 @@ async function runLoop(config, ctx) {
   let prevAllTitles = new Set() // for recurrence-based significance promotion
   let outcome = null
 
+  // SMOKE-008: union of every file the fixer/spot-fixer declares it edited across all
+  // rounds, surfaced in the return so the pipeline commit step can capture them.
+  const editedFiles = new Set()
   // State for the waste-cutting optimizations.
   let fixerEverRan = false        // full re-review stays mandatory after any fix (OPT-009)
   let lastRoundConverged = false  // was the previous round clean (0 significant)?
@@ -1168,6 +1178,7 @@ async function runLoop(config, ctx) {
         label: `spotfix:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: RESOLUTIONS_SCHEMA,
       })
       trivialResolutions = spot?.resolutions || []
+      for (const p of spot?.edited_files || []) editedFiles.add(p)
       if (trivialResolutions.length) {
         const check = await agent(spotCheckPrompt(artifact, trivialResolutions), {
           label: `spotcheck:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: SPOTCHECK_SCHEMA,
@@ -1214,6 +1225,7 @@ async function runLoop(config, ctx) {
     })
     fixerEverRan = true
     const resolutions = fix?.resolutions || []
+    for (const p of fix?.edited_files || []) editedFiles.add(p)
 
     // Fix-ALL gate — every SIGNIFICANT finding needs a FIXED/ESCALATED resolution with evidence.
     const { complete, missing } = checkFixCompleteness(significant, resolutions)
@@ -1249,6 +1261,7 @@ async function runLoop(config, ctx) {
   return {
     outcome,
     rounds: roundReports.length,
+    edited_files: [...editedFiles].sort(),
     final_findings: last.findings || [],
     final_counts: last.counts || countBySeverity([]),
     history: roundReports.map((rr) => ({
@@ -2190,7 +2203,7 @@ await agent(
 const reqRun = await converge(requirementsPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.requirements = reqRun.outcome
 if (halts(reqRun.decision)) return { status: 'halted', at: 'requirements', decision: reqRun.decision, report }
-await commitArtifact(requirementsPath, `docs(pipeline): requirements converged r${(reqRun.outcome && reqRun.outcome.round) || ''}`)
+await commitConverged(requirementsPath, reqRun, `docs(pipeline): requirements converged r${(reqRun.outcome && reqRun.outcome.round) || ''}`)
 if (stopAfter === 'requirements') return { status: 'stopped', at: 'requirements', report }
 
 // ── Phase 2: DESIGN (contracts + slice decomposition) → converge ─────────
@@ -2210,7 +2223,7 @@ await agent(
 const designRun = await converge(designPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.design = designRun.outcome
 if (halts(designRun.decision)) return { status: 'halted', at: 'design', decision: designRun.decision, report }
-await commitArtifact(designPath, `docs(pipeline): design converged r${(designRun.outcome && designRun.outcome.round) || ''}`)
+await commitConverged(designPath, designRun, `docs(pipeline): design converged r${(designRun.outcome && designRun.outcome.round) || ''}`)
 
 // Extract + validate the slice decomposition (partition/coverage/waves via tdd-harness.py).
 const sliceRun = await agent(
@@ -2475,6 +2488,19 @@ async function commitArtifact(paths, message) {
   )
 }
 
+// SMOKE-008: a converge's fixer may edit files BEYOND the artifact (e.g. a test file
+// while fixing an integration-plan finding). Commit those alongside the artifact —
+// through the SAME pathspec-scoped commit (never `git add -A`, which would sweep
+// leftover .pipeline-wt/ worktree state) — so the committed tree matches what `verify`
+// runs on. Without this, verify goes green on a working tree the committed branch lacks.
+async function commitConverged(artifactPath, run, message) {
+  const declared = run && Array.isArray(run.edited_files) ? run.edited_files : []
+  // Only shell-safe repo-relative paths, so a malformed declaration can neither break
+  // the commit command nor escape the pathspec.
+  const safe = declared.filter((p) => typeof p === 'string' && /^[\w./-]+$/.test(p))
+  await commitArtifact([...new Set([artifactPath, ...safe])].join(' '), message)
+}
+
 // Cross-slice seam tests from a fresh context, then GATE them (OPT-013): they must run
 // (≥1 collected, pass) and must not have mutated any pre-existing test file before they
 // silently ride into final verify.
@@ -2517,7 +2543,7 @@ await agent(
 const intPlanRun = await converge(integrationPlanPath, { rounds: 1 })
 report.artifacts.integration_plan = intPlanRun.outcome
 if (halts(intPlanRun.decision)) return { status: 'halted', at: 'integration-plan', decision: intPlanRun.decision, report }
-await commitArtifact(integrationPlanPath, `docs(pipeline): integration plan r${(intPlanRun.outcome && intPlanRun.outcome.round) || ''}`)
+await commitConverged(integrationPlanPath, intPlanRun, `docs(pipeline): integration plan r${(intPlanRun.outcome && intPlanRun.outcome.round) || ''}`)
 if (stopAfter === 'integration') return { status: 'stopped', at: 'integration', report }
 
 // ── Phase 6: unit + integration verify (hard gate), scorecard ────────────

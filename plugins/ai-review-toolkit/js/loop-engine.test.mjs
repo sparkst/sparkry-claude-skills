@@ -42,9 +42,9 @@ function makeCtx(rounds, opts = {}) {
       if (label.startsWith("verify:")) return { findings: plan.verifyFindings ?? plan.findings ?? [] };
       if (label.startsWith("history:")) return { wrote: opts.historyWriteFails ? false : true };
       if (label === "cleanup") return { wrote: true };
-      if (label.startsWith("spotfix:")) return { resolutions: plan.spotResolutions ?? [R("spot")] };
+      if (label.startsWith("spotfix:")) return { resolutions: plan.spotResolutions ?? [R("spot")], edited_files: plan.spotEditedFiles ?? [] };
       if (label.startsWith("spotcheck:")) return { all_applied: true, not_applied: [] };
-      if (label.startsWith("fix:")) return { resolutions: plan.resolutions ?? [] };
+      if (label.startsWith("fix:")) return { resolutions: plan.resolutions ?? [], edited_files: plan.editedFiles ?? [] };
       throw new Error("unexpected agent label: " + label);
     },
     parallel: (thunks) => Promise.all(thunks.map((t) => t())),
@@ -283,4 +283,32 @@ test("OPT-015: if the history write fails, round 2 falls back to embedding (zero
   const r2prompt = ctx.promptByLabel["review:r1:r2"];
   assert.match(r2prompt, /## Prior Round Findings/, "falls back to the embedded block");
   assert.doesNotMatch(r2prompt, /review-r1\.md/, "no path reference when the write failed");
+});
+
+// ── SMOKE-008: surface fixer-declared edited files so the pipeline commit step can
+// capture them (a converge's fixer may edit test files beyond the artifact; if the
+// commit only pathspec-scopes the artifact, verify runs on an uncommitted tree). ──
+test("SMOKE-008: runLoop aggregates the fixer's declared edited_files (deduped + sorted)", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug"), F("P2-001", "P2", "Nit")], resolutions: [R("P0-001")], editedFiles: ["src/b.md", "tests/a.test.py"], spotEditedFiles: ["src/b.md"] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "src/b.md", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.deepEqual(out.edited_files, ["src/b.md", "tests/a.test.py"], "fixer + spot-fixer edits, deduped and sorted");
+});
+
+test("SMOKE-008: edited_files is an empty array when no fixer runs (clean first round)", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.deepEqual(out.edited_files, [], "no edits declared → empty array, never undefined");
+});
+
+test("SMOKE-008: the fixer prompt instructs declaring edited_files", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug")], resolutions: [R("P0-001")], editedFiles: ["x.py"] },
+    { findings: [] },
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.match(ctx.promptByLabel["fix:r1"], /edited_files/, "fixer is told to declare every file it edited");
 });
