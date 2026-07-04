@@ -29,6 +29,39 @@
   subcommand (exit-coded so the workflow branches deterministically). All safety
   verdicts (`deploy_gate`, `rollback_decision`) stay single-source in `prod-tail.py`.
 
+### Fixed
+- **`/qpipeline auto` TDD worktree isolation (P0, #27).** Each slice's red/green
+  gates and the integrator now share ONE named sibling worktree
+  (`${ROOT}.pipeline-wt/<id>` + `pipeline/<id>` branch) instead of four anonymous
+  per-agent worktrees — previously the red gate never saw the authored tests.
+  Tamper checks are commit-based; the integrator merges the slice branches.
+- **Wave-by-wave integration (P0, #33).** Each wave integrates before the next
+  branches (a later wave can depend on an already-merged one); artifacts are
+  committed on the working branch as they converge; a branch-history sanity gate
+  plus full sweep guard against tests smuggled in via merge/resurrected commits.
+  `collectBlockers` reports honest status.
+- **Merge-order honors merged waves (#34).** `compute_merge_order` accepts
+  `merged_ids` so already-integrated waves count as satisfied dependencies;
+  blocked slices surface as `integration.failed` blockers, never silently dropped.
+
+### Changed
+- **Cost right-sizing — model tiering across the board (OPT batch, #28–#32).**
+  Reviewers/fixer/TDD-writer/implementer/conflict-resolver run on `sonnet`,
+  mechanical gates/spot-fix/smoke fan-out/CLI adapters on `haiku`, and `opus` is
+  capped at 1–2 domain-scored seats (security + design-author). `scorecard.py`
+  gains real fable/opus pricing, the `[1m]` tier, a model-leak banner, and
+  per-lens yield; reviewer policy adds per-reviewer escalation with an N=3 team
+  default; `loop-engine` does in-engine tiering, doc-artifact test-gate skips,
+  proportional single-verifier rounds, and findings-history keyed by path;
+  `pipeline-auto` decomposes the integrator (per-merge haiku gates + on-failure
+  sonnet conflict-resolver + tamper re-gate), wires a runtime `budget` ceiling,
+  adds a seam-test gate, and hardens the fallback team.
+- **Hand-rolled Workflow scripts are banned in all SKILLs (#30).** `/qreview`,
+  `/qloop`, and `/qpipeline` presets route through the canonical Workflow engine
+  so agents inherit correct model tiering (no more session-opus leak). The Python
+  drivers are retired — their oracle functions moved into `finding-parser.py`;
+  cross-session checkpoint/resume is dropped (documented, accepted).
+
 ## 1.3.0
 
 ### Changed

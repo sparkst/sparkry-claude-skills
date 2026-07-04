@@ -387,7 +387,7 @@ function isSignificant(f, prevTitles, flaggedTitles) {
 }
 
 // ---------------------------------------------------------------------------
-// The convergence loop — mirrors loop-driver.py's state machine.
+// The convergence loop — the canonical state machine (formerly loop-driver.py).
 // ---------------------------------------------------------------------------
 
 /**
