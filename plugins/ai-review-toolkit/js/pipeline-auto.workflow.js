@@ -1325,6 +1325,15 @@ function worktreeSetup(slice, { create = false } = {}) {
     );
   }
   lines.push('cd "$SLICE_WT"', "```");
+  // SMOKE-007c containment: a slice agent must never manufacture an integration state.
+  // Add commits for your OWN declared files only — the tests run against whatever main
+  // was merged into this worktree at its branch point, nothing more.
+  lines.push(
+    "GIT HYGIENE (hard rule): inside this worktree do NOT `git merge`, `git cherry-pick`, `git rebase`,",
+    "`git reset`, or otherwise pull in / rewrite other branches' or commits' history. Only add commits",
+    "for your own declared files. Run the tests against the worktree's checked-out state as-is; if a",
+    "dependency isn't present, report it — do NOT fabricate it by merging sibling branches.",
+  );
   return lines.join("\n");
 }
 
@@ -1554,6 +1563,31 @@ function resolveEscalation(event, exitCode) {
   if (rec.recommendation === "decline") return { ...base, action: "hard-stop" };
   if (c.category === "reversible-internal") return { ...base, action: rec.action };
   return { ...base, action: "human-gate" };
+}
+
+/**
+ * SMOKE-005 status honesty: a run may NOT report a clean "verified"/"staged"/"promoted"
+ * result while anything was left unfinished. Summarize every reason completion is not
+ * clean — dropped slices (build/gate failures), failed integrations, and artifacts that
+ * escalated unresolved even if qdecide let the run proceed-and-stage (draft). A non-empty
+ * result forces the caller to a `halted` verdict carrying these blockers. Pure.
+ */
+function collectBlockers({ droppedSlices = [], integrationFailed = [], artifacts = {} } = {}) {
+  const blockers = [];
+  for (const d of droppedSlices || []) {
+    blockers.push(`slice ${d && d.id} dropped: ${(d && d.reason) || "failed its gate"}`);
+  }
+  for (const f of integrationFailed || []) {
+    blockers.push(`slice ${f && f.id} failed integration: ${(f && f.reason) || "merge/gate failed"}`);
+  }
+  const arts = artifacts || {};
+  for (const name of Object.keys(arts)) {
+    const outcome = arts[name];
+    if (outcome && outcome.status === "escalated") {
+      blockers.push(`artifact ${name} escalated unresolved: ${outcome.reason || outcome.message || "unresolved findings"}`);
+    }
+  }
+  return blockers;
 }
 
 // ===== inlined from integrator-prompts.mjs (generated; edit integrator-prompts.mjs, then rebuild) =====
@@ -2082,6 +2116,7 @@ if (planOnly) {
       runLoop: typeof runLoop,
       buildProposal: typeof buildProposal,
       resolveEscalation: typeof resolveEscalation,
+      collectBlockers: typeof collectBlockers,
       buildTestWriterPrompt: typeof buildTestWriterPrompt,
       buildImplementerPrompt: typeof buildImplementerPrompt,
       worktreeSetup: typeof worktreeSetup,
@@ -2150,6 +2185,7 @@ await agent(
 const reqRun = await converge(requirementsPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.requirements = reqRun.outcome
 if (halts(reqRun.decision)) return { status: 'halted', at: 'requirements', decision: reqRun.decision, report }
+await commitArtifact(requirementsPath, `docs(pipeline): requirements converged r${(reqRun.outcome && reqRun.outcome.round) || ''}`)
 if (stopAfter === 'requirements') return { status: 'stopped', at: 'requirements', report }
 
 // ── Phase 2: DESIGN (contracts + slice decomposition) → converge ─────────
@@ -2169,6 +2205,7 @@ await agent(
 const designRun = await converge(designPath, { rounds: undefined, maxRounds: 4 })
 report.artifacts.design = designRun.outcome
 if (halts(designRun.decision)) return { status: 'halted', at: 'design', decision: designRun.decision, report }
+await commitArtifact(designPath, `docs(pipeline): design converged r${(designRun.outcome && designRun.outcome.round) || ''}`)
 
 // Extract + validate the slice decomposition (partition/coverage/waves via tdd-harness.py).
 const sliceRun = await agent(
@@ -2202,30 +2239,51 @@ if (unsafeIds.length) {
 }
 const sliceById = {}
 for (const s of slices) sliceById[s.id] = s
+await commitArtifact(slicesPath, 'docs(pipeline): slice decomposition validated')
 if (stopAfter === 'design') return { status: 'stopped', at: 'design', report }
 
-// ── Phase 3: separate-context TDD, per slice, one shared worktree each, by wave ──
+// ── Phase 3+4: per-wave TDD then IMMEDIATE integration (SMOKE-004) ─────────
+// The defining smoke defect: ALL slice worktrees branched from PRE-merge main and
+// integration happened after every wave, so a wiring slice (depends_on earlier slices)
+// could NEVER green in isolation — it was deleted and the pipeline shipped main without
+// it while claiming "verified". Fix: integrate each wave's green slices IMMEDIATELY, so
+// the next wave's worktrees branch from a main that already contains the prior merges.
+// Waves are dependency-ordered by the slice planner; merge-order within a wave still
+// comes from integrator.py. Seam tests + final verify stay after all waves.
 phase('TDD')
-const greenIds = []
+const integration = { merged: [], resolved: [], failed: [] }
+const droppedSlices = []
 for (const wave of waves) {
   // OPT-012: a full-SDLC × CONVERGE × slices fan-out is where spend concentrates —
   // check the ceiling before each wave.
   { const b = checkBudget('tdd-wave'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
   // Slices in a wave are independent (disjoint files + disjoint worktree dirs +
-  // branches) → build them in parallel, capped by maxParallel. No harness isolation
-  // is needed: each slice has ONE named worktree its four agents share.
+  // branches) → build them in parallel, capped by maxParallel. Each worktree branches
+  // from the CURRENT main (includes prior waves' merges), so wiring slices can green.
   const batch = wave.map((id) => sliceById[id]).filter(Boolean)
+  const built = []
   const results = await parallel(
     batch.slice(0, maxParallel).map((slice) => () => buildSlice(slice)),
   )
-  for (const r of results.filter(Boolean)) if (r.green) greenIds.push(r.id)
+  for (const r of results.filter(Boolean)) built.push(r)
   // Any overflow beyond maxParallel builds in a follow-on pass (rare; waves are usually small).
   for (const slice of batch.slice(maxParallel)) {
     const r = await buildSlice(slice)
-    if (r && r.green) greenIds.push(r.id)
+    if (r) built.push(r)
   }
+  const waveGreen = []
+  for (const r of built) {
+    if (r.green) waveGreen.push(r.id)
+    else droppedSlices.push({ id: r.id, reason: r.reason || 'slice failed its gate' })
+  }
+  // Integrate THIS wave now so later waves see its merges on main.
+  await integrateWave(waveGreen)
 }
-if (stopAfter === 'tdd') return { status: 'stopped', at: 'tdd', greenIds, report }
+report.integration = integration
+// SMOKE-007b: force-sweep every pipeline worktree/branch/tag, even ones never merged
+// (the smoke left an orphaned pipeline/S-005 worktree that survived per-merge teardown).
+await sweepPipelineArtifacts()
+if (stopAfter === 'tdd') return { status: 'stopped', at: 'tdd', report }
 
 // Tear down a slice's worktree + branch + tests tag (on failure, so orphans never
 // accumulate; the integrator does the same after a successful merge).
@@ -2247,8 +2305,9 @@ async function buildSlice(slice) {
   const worktreePath = setup && setup.worktree
   if (!worktreePath) {
     await cleanupSlice(slice)
-    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason: 'Test-writer did not create/return the slice worktree' })
-    return { id: slice.id, green: false, decision }
+    const reason = 'test-writer did not create/return the slice worktree'
+    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason })
+    return { id: slice.id, green: false, reason, decision }
   }
   const red = await agent(
     [
@@ -2261,8 +2320,9 @@ async function buildSlice(slice) {
   )
   if (!red || !red.ok) {
     await cleanupSlice(slice)
-    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason: `RED gate failed: ${(red && red.reason) || 'no result'}` })
-    return { id: slice.id, green: false, decision }
+    const reason = `RED gate failed: ${(red && red.reason) || 'no result'}`
+    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason })
+    return { id: slice.id, green: false, reason, decision }
   }
   // Context B — make them green in the SAME worktree; tests frozen + tamper-checked via commits.
   await agent(buildImplementerPrompt(slice, { designPath, redSummary: red.reason, worktreePath }), {
@@ -2274,43 +2334,46 @@ async function buildSlice(slice) {
       `  cd "${worktreePath}" && git diff --name-only pipeline-tests/${slice.id}..HEAD   # everything the implementer changed`,
       `(1) TAMPER-CHECK — every changed path must be one of ${(slice.files || []).join(', ') || '(none)'}, NONE may be a`,
       `test file (${(slice.test_files || []).join(', ') || '(none)'}), and \`git diff --name-only pipeline-tests/${slice.id}..HEAD -- ${(slice.test_files || []).join(' ')}\` MUST be empty`,
-      `(interpret with python3 ${toolsDir}/tdd-harness.py check_tamper). (2) GREEN gate — the suite now PASSES with tests`,
-      'still collected. Return {ok, reason, tests_collected, exit_code}.',
+      `(interpret with python3 ${toolsDir}/tdd-harness.py check_tamper).`,
+      // SMOKE-007a: catch a slice that goes off-script by merging sibling branches or
+      // resurrecting commits to manufacture a passing state.
+      `(2) BRANCH-HISTORY SANITY — the slice branch may contain ONLY this slice's own commits since the`,
+      `frozen-tests tag: \`cd "${worktreePath}" && git rev-list --merges pipeline-tests/${slice.id}..HEAD\` MUST be EMPTY`,
+      `(no merge commits — the slice must NOT merge other branches), and \`git merge-base --is-ancestor pipeline-tests/${slice.id} HEAD\``,
+      'MUST succeed (linear history). If either fails, the slice went off-script → return ok:false.',
+      '(3) GREEN gate — the suite now PASSES with tests still collected. Return {ok, reason, tests_collected, exit_code}.',
     ].join('\n'),
     { label: `green-gate:${slice.id}`, model: 'haiku', phase: `Slice ${slice.id}`, schema: GATE_SCHEMA },
   )
   if (!green || !green.ok) {
     await cleanupSlice(slice)
-    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason: `GREEN/tamper gate failed: ${(green && green.reason) || 'no result'}` })
-    return { id: slice.id, green: false, decision }
+    const reason = `GREEN/tamper/history gate failed: ${(green && green.reason) || 'no result'}`
+    const decision = await qdecide({ type: 'converge', artifact: slice.id, reason })
+    return { id: slice.id, green: false, reason, decision }
   }
   return { id: slice.id, green: true }
 }
 
-// ── Phase 4/5: serialized, per-merge integration of the green slice branches ──
-// OPT-011: a single mega-agent that merged every branch AND role-played the conflict
-// resolver held N merge logs + N suite outputs in one context (later merges degrade)
-// and only prompt-enforced the frozen-tests invariant. Decomposed into the sequencer:
-// a deterministic merge order, then per slice a haiku merge+suite gate, a sonnet
+// Serialized, per-merge integration of ONE wave's green slice branches (OPT-011):
+// deterministic merge order, then per slice a haiku merge+suite gate, a sonnet
 // conflict-resolver ONLY on failure, and an INDEPENDENT haiku tamper+green re-gate —
-// so the two-context/tamper separation is structural here too, not prompt-level.
-phase('Integrate')
-{ const b = checkBudget('integrate'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
-const integration = { merged: [], resolved: [], failed: [] }
-if (greenIds.length) {
+// the two-context/tamper separation is structural here too. Mutates `integration`.
+async function integrateWave(waveGreen) {
+  if (!waveGreen.length) return
+  { const b = checkBudget('integrate'); if (b) { integration.failed.push({ id: '(wave)', reason: b.reason }); return } }
   const orderRun = await agent(
     [
-      'Compute the deterministic merge order for the green slice branches.',
-      `Run: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${greenIds.join(',')}`,
+      'Compute the deterministic merge order for these green slice branches.',
+      `Run: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${waveGreen.join(',')}`,
       'Return {order:[sliceId,...]} exactly as it prints.',
     ].join('\n'),
     { label: 'merge-order', model: 'haiku', phase: 'Integrate', schema: MERGE_ORDER_SCHEMA },
   )
-  const order = (orderRun && Array.isArray(orderRun.order) && orderRun.order.length) ? orderRun.order : greenIds
+  const order = (orderRun && Array.isArray(orderRun.order) && orderRun.order.length) ? orderRun.order : waveGreen
   for (const id of order) {
     const slice = sliceById[id]
     if (!slice) continue
-    // 1) haiku: merge this branch into the feature branch + run the FULL suite.
+    // 1) haiku: merge this branch into main + run the FULL suite.
     const merge = await agent(
       [
         `Integrate slice ${id}. From the repo root (git rev-parse --show-toplevel; NOT a slice worktree):`,
@@ -2351,10 +2414,43 @@ if (greenIds.length) {
     }
   }
 }
-report.integration = integration
-if (integration.failed.length) {
-  const decision = await qdecide({ type: 'integration-fail', reason: `Integration failed for: ${integration.failed.map((f) => f.id).join(', ')}` })
-  if (halts(decision)) return { status: 'halted', at: 'integration', decision, report }
+
+// SMOKE-007b end-of-run sweep: force-remove EVERY pipeline worktree/branch/tag, even
+// ones the merge-order never touched (an off-script slice can leave an orphan that the
+// per-merge teardown misses).
+async function sweepPipelineArtifacts() {
+  await agent(
+    [
+      'End-of-run sweep — force-remove ALL pipeline worktrees, branches, and tags regardless of merge',
+      'status. From the repo root run exactly:',
+      '```bash',
+      'ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"',
+      'for wt in "${ROOT}".pipeline-wt/*; do [ -d "$wt" ] && git worktree remove --force "$wt" 2>/dev/null || true; done',
+      'rm -rf "${ROOT}".pipeline-wt 2>/dev/null || true',
+      'git worktree prune 2>/dev/null || true',
+      'git branch --list "pipeline/*" | sed "s/^[* ]*//" | while read -r b; do [ -n "$b" ] && git branch -D "$b" 2>/dev/null || true; done',
+      'git tag -l "pipeline-tests/*" | while read -r t; do [ -n "$t" ] && git tag -d "$t" 2>/dev/null || true; done',
+      '```',
+    ].join('\n'),
+    { label: 'sweep-pipeline-artifacts', model: 'haiku', phase: 'Verify' },
+  )
+}
+
+// SMOKE-006: commit each authored artifact on the current branch when it converges, so
+// the working tree isn't left full of untracked docs/tests that final verify silently
+// counts. Skips cleanly when nothing changed; pathspec-scoped so it commits only itself.
+async function commitArtifact(paths, message) {
+  await agent(
+    [
+      `Commit pipeline artifact(s) ${paths} on the current branch (from the repo root; no-op if unchanged):`,
+      '```bash',
+      'ROOT="$(git rev-parse --show-toplevel)"; cd "$ROOT"',
+      `git add -- ${paths} 2>/dev/null || true`,
+      `git commit -m ${JSON.stringify(message)} -- ${paths} 2>/dev/null || echo "nothing to commit: ${paths}"`,
+      '```',
+    ].join('\n'),
+    { label: 'commit-artifact', model: 'haiku', phase: 'Commit' },
+  )
 }
 
 // Cross-slice seam tests from a fresh context, then GATE them (OPT-013): they must run
@@ -2365,6 +2461,9 @@ const seam = await agent(buildIntegrationTestWriterPrompt(slices, { designPath, 
 })
 const seamFiles = (seam && Array.isArray(seam.test_files)) ? seam.test_files : []
 if (seamFiles.length) {
+  // SMOKE-006: commit the seam tests before the gate/verify so they aren't counted as
+  // untracked working-tree files.
+  await commitArtifact(seamFiles.join(' '), 'test(pipeline): cross-slice seam tests')
   const seamGate = await agent(
     [
       `Gate the NEW seam tests just written: ${seamFiles.join(', ')}. From the repo root:`,
@@ -2396,6 +2495,7 @@ await agent(
 const intPlanRun = await converge(integrationPlanPath, { rounds: 1 })
 report.artifacts.integration_plan = intPlanRun.outcome
 if (halts(intPlanRun.decision)) return { status: 'halted', at: 'integration-plan', decision: intPlanRun.decision, report }
+await commitArtifact(integrationPlanPath, `docs(pipeline): integration plan r${(intPlanRun.outcome && intPlanRun.outcome.round) || ''}`)
 if (stopAfter === 'integration') return { status: 'stopped', at: 'integration', report }
 
 // ── Phase 6: unit + integration verify (hard gate), scorecard ────────────
@@ -2416,7 +2516,18 @@ if (!verify || !verify.ok) {
   return { status: 'halted', at: 'verify', decision, report }
 }
 
-// deployTarget null → stop at the verified point (plain `/qpipeline auto`, no deploy).
+// SMOKE-005 status honesty: even with a green suite, "verified" is IMPOSSIBLE if any
+// slice was dropped, any integration failed, or any artifact escalated unresolved (a
+// draft-proceed is still unresolved). Surface every such blocker and halt instead — the
+// smoke shipped a CLI-less main as "verified" precisely because this gate was missing.
+const blockers = collectBlockers({ droppedSlices, integrationFailed: integration.failed, artifacts: report.artifacts })
+if (blockers.length) {
+  report.blockers = blockers
+  log(`Pipeline INCOMPLETE — ${blockers.length} blocker(s): ${blockers.join(' | ')}`)
+  return { status: 'halted', at: 'verify', blockers, report }
+}
+
+// deployTarget null → stop at the verified point (only reachable when the run is clean).
 if (!deployTarget) {
   log('Pipeline complete to verified stop. deployTarget=null (stop-at-verify).')
   return { status: 'verified', report }
@@ -2539,7 +2650,10 @@ if (deployTarget.rollbackCmd) {
 const gateState = buildGateState({
   artifacts: convergedArtifacts(),
   unitGreen: !!verify.ok,
-  integrationGreen: !!verify.ok,
+  // SMOKE-005: a dropped slice or unresolved escalation means integration is NOT clean,
+  // so the guardrail gate can never pass (defense in depth — the verify-stage blocker
+  // check already halts before here when blockers exist).
+  integrationGreen: !!verify.ok && !(report.blockers && report.blockers.length),
   stagingSmoke,
   deployTarget,
   rollbackDryOk,

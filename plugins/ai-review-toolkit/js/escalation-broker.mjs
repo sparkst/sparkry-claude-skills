@@ -116,3 +116,28 @@ export function resolveEscalation(event, exitCode) {
   if (c.category === "reversible-internal") return { ...base, action: rec.action };
   return { ...base, action: "human-gate" };
 }
+
+/**
+ * SMOKE-005 status honesty: a run may NOT report a clean "verified"/"staged"/"promoted"
+ * result while anything was left unfinished. Summarize every reason completion is not
+ * clean — dropped slices (build/gate failures), failed integrations, and artifacts that
+ * escalated unresolved even if qdecide let the run proceed-and-stage (draft). A non-empty
+ * result forces the caller to a `halted` verdict carrying these blockers. Pure.
+ */
+export function collectBlockers({ droppedSlices = [], integrationFailed = [], artifacts = {} } = {}) {
+  const blockers = [];
+  for (const d of droppedSlices || []) {
+    blockers.push(`slice ${d && d.id} dropped: ${(d && d.reason) || "failed its gate"}`);
+  }
+  for (const f of integrationFailed || []) {
+    blockers.push(`slice ${f && f.id} failed integration: ${(f && f.reason) || "merge/gate failed"}`);
+  }
+  const arts = artifacts || {};
+  for (const name of Object.keys(arts)) {
+    const outcome = arts[name];
+    if (outcome && outcome.status === "escalated") {
+      blockers.push(`artifact ${name} escalated unresolved: ${outcome.reason || outcome.message || "unresolved findings"}`);
+    }
+  }
+  return blockers;
+}

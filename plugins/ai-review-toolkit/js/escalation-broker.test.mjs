@@ -6,6 +6,7 @@ import {
   buildProposal,
   mapRecommendation,
   resolveEscalation,
+  collectBlockers,
 } from "./escalation-broker.mjs";
 
 // A convergence escalation as loop-engine.mjs actually emits it.
@@ -71,6 +72,56 @@ test("classifyEvent: a budget breach is a spend-category hard stop (per-run ceil
   const c = classifyEvent({ type: "budget-exceeded" });
   assert.equal(c.category, "spend");
   assert.equal(mustHardStop({ type: "budget-exceeded" }), true);
+});
+
+// ── collectBlockers (SMOKE-005 status honesty) ────────────────────────────
+
+test("collectBlockers: clean run (no drops, no failures, all converged) → empty", () => {
+  const b = collectBlockers({
+    droppedSlices: [],
+    integrationFailed: [],
+    artifacts: { requirements: { status: "converged" }, design: { status: "converged" } },
+  });
+  assert.deepEqual(b, []);
+});
+
+test("collectBlockers: a dropped slice is a blocker", () => {
+  const b = collectBlockers({ droppedSlices: [{ id: "S-004", reason: "green gate failed" }] });
+  assert.equal(b.length, 1);
+  assert.match(b[0], /S-004/);
+  assert.match(b[0], /green gate failed/);
+});
+
+test("collectBlockers: a failed integration is a blocker", () => {
+  const b = collectBlockers({ integrationFailed: [{ id: "S-002", reason: "merge conflict unresolved" }] });
+  assert.equal(b.length, 1);
+  assert.match(b[0], /S-002/);
+});
+
+test("collectBlockers: an escalated artifact is a blocker even if the pipeline proceeded (drafted)", () => {
+  const b = collectBlockers({
+    artifacts: {
+      requirements: { status: "converged" },
+      integration_plan: { status: "escalated", reason: "1 P1 remains" },
+    },
+  });
+  assert.equal(b.length, 1);
+  assert.match(b[0], /integration_plan/);
+  assert.match(b[0], /escalated/);
+});
+
+test("collectBlockers: the exact smoke failure (S-004 dropped + integration_plan escalated) yields 2 blockers", () => {
+  const b = collectBlockers({
+    droppedSlices: [{ id: "S-004", reason: "depends_on modules absent in isolated worktree" }],
+    integrationFailed: [],
+    artifacts: { integration_plan: { status: "escalated", reason: "max rounds, 1 P1" } },
+  });
+  assert.equal(b.length, 2);
+});
+
+test("collectBlockers tolerates missing/empty input", () => {
+  assert.deepEqual(collectBlockers(), []);
+  assert.deepEqual(collectBlockers({}), []);
 });
 
 // ── mustHardStop ─────────────────────────────────────────────────────────
