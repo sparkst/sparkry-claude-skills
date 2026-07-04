@@ -68,6 +68,25 @@ class TestCacheFreshness:
         assert v.cache_is_fresh(stamp_epoch=None, now_epoch=1000, ttl=86400) is False
 
 
+class TestLocalVersionFallback:
+    def test_reads_marketplace_plugin_json(self, tmp_path):
+        # tools/version-check.py → ../.claude-plugin/plugin.json
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        pj = tmp_path / ".claude-plugin"
+        pj.mkdir()
+        (pj / "plugin.json").write_text('{"version": "1.6.1"}')
+        assert v._local_version(str(tools / "version-check.py")) == "1.6.1"
+
+    def test_reads_flat_fork_VERSION_file(self, tmp_path):
+        # flat fork: no plugin.json, a sibling VERSION file instead
+        (tmp_path / "VERSION").write_text("1.6.1\n")
+        assert v._local_version(str(tmp_path / "version-check.py")) == "1.6.1"
+
+    def test_returns_empty_when_neither_present(self, tmp_path):
+        assert v._local_version(str(tmp_path / "version-check.py")) == ""
+
+
 class TestDetectInstallKind:
     def test_fork_path_detected(self):
         assert v.detect_install_kind("/Users/x/.claude/ai-review-tools/version-check.py") == "fork"

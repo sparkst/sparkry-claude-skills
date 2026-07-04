@@ -55,8 +55,9 @@ def upgrade_notice(local: str, remote: str, install_kind: str) -> str | None:
     head = f"ai-review-toolkit {remote} is available (you have {local})."
     if install_kind == "fork":
         return (
-            f"{head} Your install is a manual fork-sync — re-run your fork-sync "
-            f"(copy the latest workflow + tools from the marketplace) to upgrade."
+            f"{head} Your install is a manual fork — upgrade by running "
+            f"`python3 <marketplace>/plugins/ai-review-toolkit/tools/fork-sync.py` "
+            f"(add --dry-run first to preview)."
         )
     return f"{head} Run `/plugin marketplace update` then update ai-review-toolkit to upgrade."
 
@@ -78,11 +79,20 @@ def detect_install_kind(tool_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _local_version(tool_path: str) -> str:
-    # tools/version-check.py → ../.claude-plugin/plugin.json
-    base = os.path.dirname(os.path.dirname(os.path.abspath(tool_path)))
-    plugin_json = os.path.join(base, ".claude-plugin", "plugin.json")
-    with open(plugin_json, "r", encoding="utf-8") as fh:
-        return str(json.load(fh).get("version", ""))
+    """Installed version. Marketplace layout: tools/ → ../.claude-plugin/plugin.json.
+    Flat fork layout: a sibling VERSION file (stamped by fork-sync). '' if neither."""
+    tool_dir = os.path.dirname(os.path.abspath(tool_path))
+    plugin_json = os.path.join(os.path.dirname(tool_dir), ".claude-plugin", "plugin.json")
+    try:
+        with open(plugin_json, "r", encoding="utf-8") as fh:
+            return str(json.load(fh).get("version", ""))
+    except Exception:
+        pass
+    try:  # flat fork: sibling VERSION file
+        with open(os.path.join(tool_dir, "VERSION"), "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except Exception:
+        return ""
 
 
 def _remote_version(timeout: float = 3.0) -> str | None:
@@ -119,23 +129,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="Ignore the 24h cache and re-check now")
     args = parser.parse_args(argv)
 
-    now = time.time()
-    local = _local_version(__file__)
-    install_kind = detect_install_kind(os.path.abspath(__file__))
+    try:
+        now = time.time()
+        local = _local_version(__file__)
+        if not local:
+            return 0  # can't determine local version → say nothing
+        install_kind = detect_install_kind(os.path.abspath(__file__))
 
-    stamp = _read_stamp()
-    if not args.force and cache_is_fresh(stamp.get("checked_at"), now):
-        remote = stamp.get("remote")  # reuse the cached remote; no network
-    else:
-        remote = _remote_version()
-        _write_stamp(now, remote)
+        stamp = _read_stamp()
+        if not args.force and cache_is_fresh(stamp.get("checked_at"), now):
+            remote = stamp.get("remote")  # reuse the cached remote; no network
+        else:
+            remote = _remote_version()
+            _write_stamp(now, remote)
 
-    if not remote:
-        return 0  # unknown remote → say nothing (fail-open)
+        if not remote:
+            return 0  # unknown remote → say nothing (fail-open)
 
-    notice = upgrade_notice(local, remote, install_kind)
-    if notice:
-        print(notice)
+        notice = upgrade_notice(local, remote, install_kind)
+        if notice:
+            print(notice)
+    except Exception:
+        return 0  # best-effort: never let the check break or slow a real run
     return 0
 
 
