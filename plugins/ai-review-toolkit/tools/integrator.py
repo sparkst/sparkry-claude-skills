@@ -40,6 +40,7 @@ compute_waves = _tdd_harness.compute_waves
 def compute_merge_order(
     slices: list[dict[str, Any]],
     green_ids: list[str],
+    merged_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Serialized merge order over the green slices.
 
@@ -49,20 +50,28 @@ def compute_merge_order(
                  integrable. Kernel (no deps) merges first.
       - blocked: green slices that cannot integrate because a dependency never
                  went green (directly or transitively).
-      - skipped: slices that are not green at all.
+      - skipped: slices that are not green at all (already-merged slices are
+                 neither skipped nor re-ordered).
+
+    `merged_ids` are slices already integrated in earlier waves — their
+    dependencies count as satisfied. Wave-by-wave callers pass the accumulated
+    merged set; all-at-once callers omit it for the legacy semantics.
 
     The workflow merges `order` one worktree at a time; `blocked`/`skipped`
     surface to the escalation broker.
     """
     green = set(green_ids)
+    merged = set(merged_ids or [])
     deps = {str(s["id"]): set(s.get("depends_on", [])) for s in slices}
 
     order: list[str] = []
     blocked: list[str] = []
-    integrable: set[str] = set()
+    integrable: set[str] = set(merged)
 
     for wave in compute_waves(slices):
         for sid in wave:  # already sorted within a wave for determinism
+            if sid in merged:
+                continue  # already on main → nothing to order
             if sid not in green:
                 continue  # not green → skipped, not blocked
             if deps[sid] <= integrable:
@@ -71,7 +80,7 @@ def compute_merge_order(
             else:
                 blocked.append(sid)
 
-    skipped = sorted(set(deps) - green)
+    skipped = sorted(set(deps) - green - merged)
     return {"order": order, "blocked": sorted(blocked), "skipped": skipped}
 
 
@@ -147,13 +156,15 @@ def main(argv: list[str] | None = None) -> int:
     mo = sub.add_parser("merge-order", help="Serialized merge order over green slices")
     mo.add_argument("--slices", required=True, help="Path to slices JSON (or - for stdin)")
     mo.add_argument("--green", required=True, help="Comma-separated ids of slices that passed the green gate")
+    mo.add_argument("--merged", default="", help="Comma-separated ids of slices already integrated in earlier waves (their deps count as satisfied)")
 
     args = parser.parse_args(argv)
 
     if args.command == "merge-order":
         slices = _load(args.slices)
         green = [g.strip() for g in args.green.split(",") if g.strip()]
-        res = compute_merge_order(slices, green)
+        merged = [m.strip() for m in args.merged.split(",") if m.strip()]
+        res = compute_merge_order(slices, green, merged_ids=merged)
         print(json.dumps(res, indent=2))
         return 0
 
