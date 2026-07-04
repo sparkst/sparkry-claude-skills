@@ -30,6 +30,8 @@ const EVENT_TYPES = {
   "external-comms": { category: "external", domain: "communication", audience: "client-facing", irreversibility: "sticky" },
   // Real-money spend — human-gated.
   "spend": { category: "spend", domain: "finance", audience: "internal", irreversibility: "sticky" },
+  // Per-run budget ceiling reached (settled decision #6) — a spend-category hard stop.
+  "budget-exceeded": { category: "spend", domain: "engineering", audience: "internal", irreversibility: "reversible" },
   // Genuinely ambiguous — routes to the qescalate council / human, never auto-acts.
   "ambiguous-requirements": { category: "ambiguous", domain: "engineering", audience: "internal", irreversibility: "reversible" },
 };

@@ -20,6 +20,16 @@
 // impl; the green-gate tamper-checks by diffing COMMITS (`pipeline-tests/<id>..HEAD`),
 // not dirty state; the integrator merges the `pipeline/<id>` BRANCHES in merge-order.
 
+// Slice ids flow verbatim into shell commands (worktree dirs, branch + tag names),
+// so they must be constrained to a shell-safe charset. Anything else is rejected
+// loudly rather than interpolated into bash.
+const SAFE_SLICE_ID = /^[A-Za-z0-9._-]+$/;
+
+/** True iff `id` is safe to embed in a worktree path / branch / tag name. */
+export function isSafeSliceId(id) {
+  return typeof id === "string" && SAFE_SLICE_ID.test(id);
+}
+
 /** Per-slice branch that carries the slice's tests + impl commits. */
 export function sliceBranch(sliceId) {
   return `pipeline/${sliceId}`;

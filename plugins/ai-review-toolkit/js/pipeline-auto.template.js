@@ -25,7 +25,9 @@ const designPath = A.design || 'DESIGN.md'
 const slicesPath = A.slices || 'slices.json'
 const integrationPlanPath = A.integrationPlan || 'INTEGRATION-PLAN.md'
 // Fork-synced runtime tools (team-selector.py, tdd-harness.py, integrator.py, scorecard.py).
-const toolsDir = A.toolsDir || '/Users/travis/.claude/ai-review-tools/tools'
+// Default targets the FLAT live fork (py at the root, no /tools subdir); plugin callers
+// pass their own `<plugin>/tools`. (OPT-008: a /tools default silently misses on the fork.)
+const toolsDir = A.toolsDir || '/Users/travis/.claude/ai-review-tools'
 const QDECIDE_VALIDATOR = '/Users/travis/.claude/skills/qdecide/tools/validate-proposal.py'
 
 const threshold = A.threshold ?? 0
@@ -41,6 +43,22 @@ const deployPlanPath = A.deployPlan || 'DEPLOY-PLAN.md'
 const smokeSuitePath = A.smokeContract || 'smoke/prod.suite.json'
 const smokeBatchSize = A.smokeBatchSize ?? 25
 const humanConfirmed = A.humanConfirmed === true
+// OPT-002: optional CLI-time complexity signal {files, toolTypes, contextFraction}.
+// Threaded into runLoop config (loop-engine tiers reviewers off it) and into the
+// team-resolve flags (OPT-020) so model escalation is deterministic, not defaulted.
+const complexity = A.complexity ?? null
+// A full-SDLC build is definitionally multi-file / multi-tool → floor the complexity
+// (OPT-020) so escalation engages. `resolvedComplexity` is what actually reaches
+// in-engine tiering (OPT-002): the args-provided signal, else the floor — never null.
+const cxFiles = Math.max(2, (complexity && Number(complexity.files)) || 5)
+const cxToolTypes = Math.max(2, (complexity && Number(complexity.toolTypes)) || 3)
+const resolvedComplexity = complexity || { files: cxFiles, toolTypes: cxToolTypes }
+// OPT-012 / design decision #6: a graceful per-run spend stop. The Workflow runtime
+// injects a shared `budget` global (budget.total, budget.spent(), budget.remaining())
+// pooled across the main loop and every agent. `budgetReserve` is the fraction of the
+// run's total to keep in reserve so the graceful stop fires BEFORE the runtime's hard
+// throw, leaving room for the tail (integration cleanup + scorecard).
+const budgetReserve = A.budgetReserve ?? 0.05
 const planOnly = A.planOnly === true
 // Optional bound: halt after a named phase ('requirements'|'design'|'tdd'|'integration').
 // Used for staged runs and for a cost-capped behavioral smoke that stops before the
@@ -172,6 +190,14 @@ async function converge(artifact, opts = {}) {
       threshold: opts.threshold ?? threshold,
       rounds: opts.rounds,
       maxRounds: opts.maxRounds ?? maxRounds,
+      // OPT-002: forward the resolved complexity so runLoop tiers reviewer models via
+      // resolveReviewerModel instead of trusting the team's declared model.
+      complexity: resolvedComplexity,
+      // OPT-007: every converge() in pipeline-auto gates a DOCUMENT (requirements,
+      // design, integration-plan, deploy-plan) with no test surface — the code
+      // artifacts go through the TDD red/green gates, not converge — so skip the
+      // per-round test gate by default. Overridable via opts.skipTests.
+      skipTests: opts.skipTests ?? true,
     },
     { agent, parallel, phase, log },
   )
@@ -186,6 +212,49 @@ async function converge(artifact, opts = {}) {
 // is surfaced to the caller. `proceed-and-stage` and `proceed` both continue.
 function halts(decision) {
   return decision && (decision.action === 'hard-stop' || decision.action === 'human-gate')
+}
+
+// ── Budget ceiling (OPT-012 / design decision #6) ─────────────────────────
+// The Workflow runtime injects a shared `budget` global — `budget.total` (null when no
+// target is set), `budget.spent()`, `budget.remaining()` — pooled across the main loop
+// and every agent, and agent() itself throws once `total` is reached. checkBudget stops
+// GRACEFULLY before that hard throw (leaving a `budgetReserve` fraction of total so the
+// tail still runs). `budget.remaining()` is authoritative; typeof-guarded so an absent
+// global never throws. Units are the runtime's own (total/remaining share them), so the
+// reserve is a fraction, not a hardcoded dollar figure.
+const report = { goal, artifacts: {}, slices: null, integration: null, warnings: [] }
+let budgetAdvisoryLogged = false
+// Call before each converge() and each TDD wave. On breach, returns a broker-classified
+// spend hard-stop (budget-exceeded ∈ mustHardStop); the caller returns {status:'halted'}.
+function checkBudget(where) {
+  const hasTarget = typeof budget !== 'undefined' && budget && typeof budget.total === 'number' && budget.total > 0
+  if (!hasTarget) {
+    // No target set → remaining() is unbounded; nothing to gracefully stop before.
+    if (!budgetAdvisoryLogged) {
+      budgetAdvisoryLogged = true
+      const warn = 'BUDGET CEILING ADVISORY — no budget target set for this run; the graceful pre-throw stop is inactive.'
+      report.warnings.push(warn)
+      log(warn)
+    }
+    return null
+  }
+  const remaining = typeof budget.remaining === 'function' ? budget.remaining() : null
+  if (typeof remaining === 'number' && remaining <= budget.total * budgetReserve && mustHardStop({ type: 'budget-exceeded' })) {
+    const spent = typeof budget.spent === 'function' ? budget.spent() : (budget.total - remaining)
+    log(`BUDGET CEILING REACHED at ${where}: remaining ${remaining} of ${budget.total} (spent ${spent}) ≤ ${budgetReserve} reserve — graceful hard stop.`)
+    return { action: 'hard-stop', recommendation: 'decline', category: 'spend', reason: `budget reserve reached at ${where}: remaining ${remaining} of ${budget.total}` }
+  }
+  return null
+}
+
+// Extra orchestration schemas (OPT-011 per-merge sequencer, OPT-013 seam gate).
+const MERGE_ORDER_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['order'],
+  properties: { order: { type: 'array', items: { type: 'string' } } },
+}
+const SEAM_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['test_files'],
+  properties: { test_files: { type: 'array', items: { type: 'string' } }, summary: { type: 'string' } },
 }
 
 // Authoring agents each produce exactly ONE document; the product itself is built
@@ -206,7 +275,7 @@ if (planOnly) {
     goal,
     deployTarget: deployTarget ? (deployTarget.kind || 'declared') : null,
     prodAutonomous,
-    config: { threshold, maxRounds, maxParallel },
+    config: { threshold, maxRounds, maxParallel, budgetReserve, complexity: complexity || null },
     engines: {
       runLoop: typeof runLoop,
       buildProposal: typeof buildProposal,
@@ -229,15 +298,18 @@ if (planOnly) {
   }
 }
 
-const report = { goal, artifacts: {}, slices: null, integration: null }
-
 // ── Phase 0: resolve the reviewer team ───────────────────────────────────
+// OPT-020: a full-SDLC build is definitionally multi-file / multi-tool, so the
+// complexity posture is EXPLICIT — the CLI gets real --files/--tool-types (cxFiles /
+// cxToolTypes, resolved up top) so model escalation engages deterministically rather
+// than defaulting to files=1 at a haiku agent's discretion.
 if (team.length < 2) {
   phase('Resolve')
   const t = await agent(
     [
       'Resolve the reviewer team best suited to this goal.',
-      `Run: python3 ${toolsDir}/team-selector.py --json (consult its --help for the exact flags to pass the goal).`,
+      `Run: python3 ${toolsDir}/team-selector.py --json --files ${cxFiles} --tool-types ${cxToolTypes} (pass the goal per --help).`,
+      'The --files/--tool-types flags are REQUIRED (do not omit them) — they drive model tiering for this multi-file build.',
       `Goal: ${JSON.stringify(goal)}`,
       'Return {team:[{name, review_lens, model}, ...]} with at least 2 reviewers.',
     ].join('\n'),
@@ -246,15 +318,22 @@ if (team.length < 2) {
   team = (t && Array.isArray(t.team) ? t.team : []).filter(Boolean)
 }
 if (team.length < 2) {
-  // Deterministic fallback so the loop's ≥2-reviewer invariant always holds.
+  // OPT-016: team-selector unavailable → do NOT silently proceed with two generic
+  // sonnet lenses. Mirror the catalog floor (add a security lens at the HIGH_STAKES
+  // tier) and log the degradation loudly into the workflow log + final report.
+  const warn = 'TEAM RESOLUTION DEGRADED — team-selector unavailable; using the hardcoded catalog-floor fallback (incl. a security lens at opus). Check toolsDir + model tiering.'
+  report.warnings.push(warn)
+  log(warn)
   team = [
     { name: 'correctness-reviewer', review_lens: 'correctness, requirements coverage, contracts', model: 'sonnet' },
-    { name: 'robustness-reviewer', review_lens: 'edge cases, security, failure modes, tests', model: 'sonnet' },
+    { name: 'robustness-reviewer', review_lens: 'edge cases, failure modes, tests', model: 'sonnet' },
+    { name: 'security-reviewer', review_lens: 'authz, secrets, injection, SSRF, path traversal, unsafe deserialization', model: 'opus' },
   ]
 }
 log(`Team resolved: ${team.map((m) => m.name).join(', ')}`)
 
 // ── Phase 1: REQUIREMENTS → converge ─────────────────────────────────────
+{ const b = checkBudget('requirements'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
 phase('Requirements')
 await agent(
   [
@@ -272,6 +351,7 @@ if (halts(reqRun.decision)) return { status: 'halted', at: 'requirements', decis
 if (stopAfter === 'requirements') return { status: 'stopped', at: 'requirements', report }
 
 // ── Phase 2: DESIGN (contracts + slice decomposition) → converge ─────────
+{ const b = checkBudget('design'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
 phase('Design')
 await agent(
   [
@@ -309,6 +389,15 @@ if (!sliceRun || !sliceRun.valid || !slices.length) {
   const decision = await qdecide({ type: 'ambiguous-requirements', reason: `Slice decomposition invalid: ${(sliceRun && sliceRun.errors || []).join('; ') || 'no slices'}` })
   return { status: 'halted', at: 'slice-plan', decision, report }
 }
+// Shell-safety: slice ids flow verbatim into worktree dirs + branch + tag names.
+// Reject anything outside [A-Za-z0-9._-] loudly rather than interpolate it into bash.
+const unsafeIds = slices.map((s) => s.id).filter((id) => !isSafeSliceId(id))
+if (unsafeIds.length) {
+  const msg = `Unsafe slice id(s) ${JSON.stringify(unsafeIds)} — ids feed shell worktree/branch/tag names and must match [A-Za-z0-9._-]+.`
+  log(msg)
+  const decision = await qdecide({ type: 'ambiguous-requirements', reason: msg })
+  return { status: 'halted', at: 'slice-plan', decision, report }
+}
 const sliceById = {}
 for (const s of slices) sliceById[s.id] = s
 if (stopAfter === 'design') return { status: 'stopped', at: 'design', report }
@@ -317,6 +406,9 @@ if (stopAfter === 'design') return { status: 'stopped', at: 'design', report }
 phase('TDD')
 const greenIds = []
 for (const wave of waves) {
+  // OPT-012: a full-SDLC × CONVERGE × slices fan-out is where spend concentrates —
+  // check the ceiling before each wave.
+  { const b = checkBudget('tdd-wave'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
   // Slices in a wave are independent (disjoint files + disjoint worktree dirs +
   // branches) → build them in parallel, capped by maxParallel. No harness isolation
   // is needed: each slice has ONE named worktree its four agents share.
@@ -393,42 +485,101 @@ async function buildSlice(slice) {
   return { id: slice.id, green: true }
 }
 
-// ── Phase 4/5: serialized integration of the green slice BRANCHES ────────
+// ── Phase 4/5: serialized, per-merge integration of the green slice branches ──
+// OPT-011: a single mega-agent that merged every branch AND role-played the conflict
+// resolver held N merge logs + N suite outputs in one context (later merges degrade)
+// and only prompt-enforced the frozen-tests invariant. Decomposed into the sequencer:
+// a deterministic merge order, then per slice a haiku merge+suite gate, a sonnet
+// conflict-resolver ONLY on failure, and an INDEPENDENT haiku tamper+green re-gate —
+// so the two-context/tamper separation is structural here too, not prompt-level.
 phase('Integrate')
-const mergeRun = await agent(
-  [
-    'Serially integrate the green slice BRANCHES, ONE AT A TIME, into the current feature branch.',
-    'Each green slice committed its tests + impl on a branch `pipeline/<sliceId>` in its own worktree.',
-    `Compute the order: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${greenIds.join(',') || '(none)'}`,
-    'For each id in `order` (run from the repo root, NOT a slice worktree): `git merge --no-ff pipeline/<id>`,',
-    'then run the FULL suite and interpret with integrator.py merge_gate. On a failing suite, run an IMPL-ONLY',
-    'conflict-resolver (the prompt below) — tests stay frozen. After a slice merges green, tear down its worktree:',
-    '`git worktree remove --force "${ROOT}.pipeline-wt/<id>" ; git branch -d pipeline/<id> ; git tag -d pipeline-tests/<id>`',
-    '(ROOT=$(git rev-parse --show-toplevel)), then `git worktree prune`. Leave failed slices\' branches for triage.',
-    'Report {merged:[ids], resolved:[ids], failed:[{id,reason}]}.',
-    '',
-    'CONFLICT-RESOLVER PROMPT (per failing slice):',
-    buildConflictResolverPrompt({ id: '<SLICE>', summary: '<summary>', files: ['<impl files>'], test_files: ['<test files>'], public_contract: '<contract>' }, { suiteFailure: '<the failure>' }),
-  ].join('\n'),
-  { label: 'integrate', model: 'sonnet', schema: {
-      type: 'object', additionalProperties: false, required: ['merged', 'failed'],
-      properties: {
-        merged: { type: 'array', items: { type: 'string' } },
-        resolved: { type: 'array', items: { type: 'string' } },
-        failed: { type: 'array', items: { type: 'object', additionalProperties: true, required: ['id'], properties: { id: { type: 'string' }, reason: { type: 'string' } } } },
-      },
-    } },
-)
-report.integration = mergeRun || { merged: [], failed: [] }
-if (mergeRun && Array.isArray(mergeRun.failed) && mergeRun.failed.length) {
-  const decision = await qdecide({ type: 'integration-fail', reason: `Integration failed for: ${mergeRun.failed.map((f) => f.id).join(', ')}` })
+{ const b = checkBudget('integrate'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
+const integration = { merged: [], resolved: [], failed: [] }
+if (greenIds.length) {
+  const orderRun = await agent(
+    [
+      'Compute the deterministic merge order for the green slice branches.',
+      `Run: python3 ${toolsDir}/integrator.py merge-order --slices ${slicesPath} --green ${greenIds.join(',')}`,
+      'Return {order:[sliceId,...]} exactly as it prints.',
+    ].join('\n'),
+    { label: 'merge-order', model: 'haiku', phase: 'Integrate', schema: MERGE_ORDER_SCHEMA },
+  )
+  const order = (orderRun && Array.isArray(orderRun.order) && orderRun.order.length) ? orderRun.order : greenIds
+  for (const id of order) {
+    const slice = sliceById[id]
+    if (!slice) continue
+    // 1) haiku: merge this branch into the feature branch + run the FULL suite.
+    const merge = await agent(
+      [
+        `Integrate slice ${id}. From the repo root (git rev-parse --show-toplevel; NOT a slice worktree):`,
+        `  git merge --no-ff pipeline/${id}`,
+        `Then run the FULL test suite (python3 ${toolsDir}/test-runner.py --json, or the project command) and`,
+        `interpret with python3 ${toolsDir}/integrator.py merge_gate.`,
+        'Return {ok, reason, tests_collected, exit_code}. ok=true iff the merge is clean AND the suite is green.',
+      ].join('\n'),
+      { label: `merge:${id}`, model: 'haiku', phase: 'Integrate', schema: GATE_SCHEMA },
+    )
+    let ok = !!(merge && merge.ok)
+    // 2) on failure → sonnet conflict-resolver (impl-only) using the REAL slice fields.
+    if (!ok) {
+      await agent(
+        buildConflictResolverPrompt(slice, { suiteFailure: (merge && merge.reason) || 'full suite failing after merge' }),
+        { label: `conflict-resolver:${id}`, model: 'sonnet', phase: 'Integrate' },
+      )
+      // 3) INDEPENDENT haiku tamper + green re-gate — the resolver may not touch tests.
+      const regate = await agent(
+        [
+          `Re-verify slice ${id} after the conflict-resolver, from the repo root. Diff the resolver's changes:`,
+          `  git diff --name-only pipeline-tests/${id}..HEAD`,
+          `(1) TAMPER-CHECK — NO test file (${(slice.test_files || []).join(', ') || '(none)'}) changed vs the frozen tag`,
+          `(python3 ${toolsDir}/tdd-harness.py check_tamper); the resolver may edit ONLY ${(slice.files || []).join(', ') || '(none)'}.`,
+          '(2) GREEN — the FULL suite now passes with tests still collected. Return {ok, reason, tests_collected, exit_code}.',
+        ].join('\n'),
+        { label: `merge-regate:${id}`, model: 'haiku', phase: 'Integrate', schema: GATE_SCHEMA },
+      )
+      ok = !!(regate && regate.ok)
+      if (ok) integration.resolved.push(id)
+    }
+    if (ok) {
+      integration.merged.push(id)
+      await agent(['Tear down the merged slice — run exactly:', worktreeCleanup(slice)].join('\n'),
+        { label: `merge-cleanup:${id}`, model: 'haiku', phase: 'Integrate' })
+    } else {
+      integration.failed.push({ id, reason: (merge && merge.reason) || 'merge/tamper/green gate failed' })
+    }
+  }
+}
+report.integration = integration
+if (integration.failed.length) {
+  const decision = await qdecide({ type: 'integration-fail', reason: `Integration failed for: ${integration.failed.map((f) => f.id).join(', ')}` })
   if (halts(decision)) return { status: 'halted', at: 'integration', decision, report }
 }
 
-// Cross-slice seam tests from a fresh context, then converge the integration plan.
-await agent(buildIntegrationTestWriterPrompt(slices, { designPath, requirementsPath }), {
-  label: 'integration-test-writer', model: 'sonnet',
+// Cross-slice seam tests from a fresh context, then GATE them (OPT-013): they must run
+// (≥1 collected, pass) and must not have mutated any pre-existing test file before they
+// silently ride into final verify.
+const seam = await agent(buildIntegrationTestWriterPrompt(slices, { designPath, requirementsPath }), {
+  label: 'integration-test-writer', model: 'sonnet', schema: SEAM_SCHEMA,
 })
+const seamFiles = (seam && Array.isArray(seam.test_files)) ? seam.test_files : []
+if (seamFiles.length) {
+  const seamGate = await agent(
+    [
+      `Gate the NEW seam tests just written: ${seamFiles.join(', ')}. From the repo root:`,
+      `run ONLY those files (python3 ${toolsDir}/test-runner.py --json, or the project command).`,
+      '(1) they MUST pass with tests_collected ≥ 1 (no vacuous seam test);',
+      '(2) DIFF-SCOPE — they must not have modified any pre-existing test file (git diff --name-only;',
+      `interpret with python3 ${toolsDir}/tdd-harness.py check_tamper — only the new seam files may be added).`,
+      'Return {ok, reason, tests_collected, exit_code}.',
+    ].join('\n'),
+    { label: 'seam-gate', model: 'haiku', phase: 'Integrate', schema: GATE_SCHEMA },
+  )
+  report.seam_gate = seamGate || { ok: false, reason: 'no result' }
+  if (!seamGate || !seamGate.ok) {
+    const decision = await qdecide({ type: 'integration-fail', reason: `Seam-test gate failed: ${(seamGate && seamGate.reason) || 'no result'}` })
+    if (halts(decision)) return { status: 'halted', at: 'seam-gate', decision, report }
+  }
+}
 await agent(
   [
     `Author ${integrationPlanPath}: how the slices compose, the seams under test, and the deploy/verify checklist. Read ${designPath}.`,
@@ -437,7 +588,10 @@ await agent(
   ].join('\n'),
   { label: 'integration-plan-author', model: 'sonnet' },
 )
-const intPlanRun = await converge(integrationPlanPath, { rounds: undefined, maxRounds: 3 })
+// OPT-018: INTEGRATION-PLAN.md is a compose/verify checklist — the lowest-stakes
+// artifact in the run. A single-pass diagnose (rounds:1) replaces the full
+// requirements/design-grade fan-out (min 2 rounds × maxRounds 3 ≈ 9-12 calls).
+const intPlanRun = await converge(integrationPlanPath, { rounds: 1 })
 report.artifacts.integration_plan = intPlanRun.outcome
 if (halts(intPlanRun.decision)) return { status: 'halted', at: 'integration-plan', decision: intPlanRun.decision, report }
 if (stopAfter === 'integration') return { status: 'stopped', at: 'integration', report }
@@ -450,7 +604,9 @@ const verify = await agent(
     `  python3 ${toolsDir}/test-runner.py --json (or the project's test command).`,
     'Return {ok, reason, tests_collected, exit_code} — ok=true only if everything passes.',
   ].join('\n'),
-  { label: 'verify', model: 'sonnet', schema: GATE_SCHEMA },
+  // OPT-010: mechanical suite-runner — shell the runner, interpret an exit code, fill a
+  // schema — exactly what the red/green gates already do reliably on haiku.
+  { label: 'verify', model: 'haiku', schema: GATE_SCHEMA },
 )
 report.verify = verify || { ok: false, reason: 'no result' }
 if (!verify || !verify.ok) {
@@ -467,6 +623,7 @@ if (!deployTarget) {
 // ── Phase 7: the production tail (DEPLOY-PLAN → staging deploy → staging smoke) ──
 // A deployTarget is DECLARED, so run the reversible staging tail. The prod tail
 // (phase 8) only runs under prodAutonomous (`/qpipeline auto prod`).
+{ const b = checkBudget('deploy'); if (b) return { status: 'halted', at: 'budget', decision: b, report } }
 phase('Deploy')
 
 // DEPLOY-PLAN: declared commands + smoke assertions + rollback criteria, reviewed up
