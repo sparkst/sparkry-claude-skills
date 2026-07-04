@@ -1,5 +1,25 @@
 # Changelog — ai-review-toolkit
 
+## 1.6.0
+
+### Added
+- **Version-bump enforcement (`tools/check-version-bump.py`).** Any change to
+  shippable plugin source now requires a version bump in BOTH
+  `.claude-plugin/plugin.json` AND the `ai-review-toolkit` entry of the root
+  `.claude-plugin/marketplace.json`, and the two must agree (a stale
+  `marketplace.json` makes `/plugin marketplace update` silently no-op). Enforced
+  two ways: a CI step (`tests.yml`, on PRs — unbypassable) and a local
+  `.githooks/pre-push` hook for the same catch seconds earlier
+  (`git config core.hooksPath .githooks` to enable; `git push --no-verify` to
+  bypass intentional WIP). CHANGELOG-only changes don't trigger it.
+- **Skill self-version-check (`tools/version-check.py`).** `/qreview`, `/qloop`,
+  and `/qpipeline` run a best-effort check at start: it compares the installed
+  version against the latest published on the marketplace `main` and, when behind,
+  prints a one-line upgrade notice with the right command for the install kind
+  (`/plugin marketplace update` for a marketplace install; a fork-sync for a
+  manual fork). Rate-limited to ~once/day via a cache stamp and fails
+  silent-and-open, so it never blocks or slows a run.
+
 ## 1.5.2
 
 ### Fixed

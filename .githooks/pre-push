@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Pre-push version-bump gate. Blocks a push whose ai-review-toolkit source changed
+# (vs origin/main) without a matching version bump in BOTH plugin.json and
+# marketplace.json. CI re-checks this on the PR (the unbypassable gate); this hook
+# just gives you the catch seconds earlier, locally.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Intentional bypass (WIP): git push --no-verify
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+GATE="$ROOT/plugins/ai-review-toolkit/tools/check-version-bump.py"
+[ -f "$GATE" ] || exit 0  # gate absent (e.g. old checkout) → don't block
+
+# Make sure we have a base to diff against; fail-open if the remote is unreachable.
+git fetch --no-tags --quiet origin main 2>/dev/null || true
+
+if ! python3 "$GATE" --base origin/main; then
+  echo "" >&2
+  echo "pre-push blocked: bump the ai-review-toolkit version (plugin.json + marketplace.json)" >&2
+  echo "or, for intentional WIP, push with: git push --no-verify" >&2
+  exit 1
+fi
