@@ -26,15 +26,24 @@ from typing import Any, Iterable
 
 
 # ---------------------------------------------------------------------------
-# Pricing (USD per 1,000,000 tokens). Rates as of 2026-06; override with
-# --pricing PATH (JSON: {"sonnet": {"input":.., "output":.., "cache_read":..,
+# Pricing (USD per 1,000,000 tokens). Rates as of 2026-07 (verified via the
+# claude-api skill / platform.claude.com pricing); override with --pricing
+# PATH (JSON: {"sonnet": {"input":.., "output":.., "cache_read":..,
 # "cache_write":..}, ...}).
+#
+# "opus_1m" is a distinct bucket for the "claude-opus-4-8[1m]" long-context
+# variant. It bills at the SAME rate as plain opus -- Opus 4.8's 1M context
+# window carries no long-context premium -- but it is priced separately (and
+# rendered with its own row) because a [1m] agent is the strongest available
+# signal of a defaultModel-inheritance leak (see MODEL LEAK below / OPT-001).
 # ---------------------------------------------------------------------------
 
 _DEFAULT_PRICING: dict[str, dict[str, float]] = {
-    "opus":   {"input": 15.0, "cache_read": 1.50, "cache_write": 18.75, "output": 75.0},
-    "sonnet": {"input": 3.0,  "cache_read": 0.30, "cache_write": 3.75,  "output": 15.0},
-    "haiku":  {"input": 1.0,  "cache_read": 0.10, "cache_write": 1.25,  "output": 5.0},
+    "opus":    {"input": 5.0,  "cache_read": 0.50, "cache_write": 6.25,  "output": 25.0},
+    "opus_1m": {"input": 5.0,  "cache_read": 0.50, "cache_write": 6.25,  "output": 25.0},
+    "sonnet":  {"input": 3.0,  "cache_read": 0.30, "cache_write": 3.75,  "output": 15.0},
+    "haiku":   {"input": 1.0,  "cache_read": 0.10, "cache_write": 1.25,  "output": 5.0},
+    "fable":   {"input": 10.0, "cache_read": 1.00, "cache_write": 12.50, "output": 50.0},
 }
 
 _MILLION = 1_000_000
@@ -54,11 +63,19 @@ def load_pricing(path: str | None = None) -> dict[str, dict[str, float]]:
 def normalize_model(raw: str) -> str:
     """Map a concrete model id to a pricing tier key.
 
-    Unknown ids are returned unchanged so nothing is silently lost.
+    Unknown ids are returned unchanged so nothing is silently lost (they are
+    then flagged as "unpriced" downstream instead of silently costing $0.00).
+    Order matters: "fable" and the "[1m]" long-context suffix are checked
+    before the plain opus/sonnet/haiku substrings so they land in their own
+    buckets rather than being absorbed into "opus".
     """
     if not raw:
         return "unknown"
     low = raw.lower()
+    if "fable" in low:
+        return "fable"
+    if "opus" in low and "[1m]" in low:
+        return "opus_1m"
     if "opus" in low:
         return "opus"
     if "sonnet" in low:
@@ -177,9 +194,11 @@ def aggregate_workflow(
     """
     by_model: dict[str, dict[str, Any]] = {}
     total = _empty_bucket()
+    agent_raw_models: dict[str, str] = {}
 
-    for lines in agent_transcripts.values():
+    for agent_id, lines in agent_transcripts.items():
         agent_model: str | None = None
+        raw_model: str | None = None
         min_ms: int | None = None
         max_ms: int | None = None
 
@@ -196,6 +215,7 @@ def aggregate_workflow(
             if not isinstance(usage, dict):
                 continue
 
+            raw_model = msg.get("model", "") or raw_model
             model = normalize_model(msg.get("model", ""))
             agent_model = model
             bucket = by_model.setdefault(model, _empty_bucket())
@@ -217,6 +237,8 @@ def aggregate_workflow(
             by_model[agent_model]["agents"] += 1
             total["duration_ms"] += delta
             total["agents"] += 1
+        if raw_model:
+            agent_raw_models[agent_id] = raw_model
 
     workflow: dict[str, Any] = {}
     if workflow_meta:
@@ -235,7 +257,39 @@ def aggregate_workflow(
             "phases": phases,
         }
 
+    leak = _detect_model_leak(agent_raw_models, workflow_meta)
+    if leak is not None:
+        workflow["model_leak"] = leak
+
     return {"by_model": by_model, "total": total, "workflow": workflow}
+
+
+def _detect_model_leak(
+    agent_raw_models: dict[str, str],
+    workflow_meta: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Flag a defaultModel-inheritance leak (OPT-001).
+
+    100/169 empirically-audited workflow runs had NO explicit ``model:`` on
+    any agent() call, so 1,039/1,539 agents silently inherited the invoking
+    session's model via the Workflow's ``defaultModel``. That is only a
+    problem when the inherited model is opus-tier (the expensive default);
+    sonnet/haiku inheritance is not flagged. Returns None when there is no
+    ``defaultModel`` recorded, or when nothing matches it.
+    """
+    if not workflow_meta:
+        return None
+    default_model = workflow_meta.get("defaultModel")
+    if not default_model or normalize_model(default_model) not in ("opus", "opus_1m"):
+        return None
+    inherited = [aid for aid, m in agent_raw_models.items() if m == default_model]
+    if not inherited:
+        return None
+    return {
+        "default_model": default_model,
+        "count": len(inherited),
+        "agent_ids": sorted(inherited),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +351,114 @@ def _process_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
+# ---------------------------------------------------------------------------
+# Per-lens yield (OPT-025): findings by lens by round, unique-after-dedup
+# counts. Deterministic -- delegates to finding-parser's deduplicate_findings
+# (pure, no LLM), the same function the review loop itself uses. Feeds the
+# reviewer_count_policy's drop-dead-lenses rule with live per-run data
+# instead of one-off manual mining across the run corpus.
+# ---------------------------------------------------------------------------
+
+_finding_parser_mod: Any = None
+
+
+def _get_finding_parser() -> Any:
+    global _finding_parser_mod
+    if _finding_parser_mod is None:
+        try:
+            from tools._loader import load_sibling as _load_sibling
+        except ImportError:
+            from _loader import load_sibling as _load_sibling
+        _finding_parser_mod = _load_sibling("finding-parser.py")
+    return _finding_parser_mod
+
+
+def _lens_for_index(team: list[dict[str, Any]], index: int) -> str:
+    """Stable lens identifier for a team slot: name, else review_lens, else #N."""
+    if 0 <= index < len(team):
+        member = team[index]
+        return member.get("name") or member.get("review_lens") or f"#{index}"
+    return f"#{index}"
+
+
+def _round_reviewer_findings(
+    state: dict[str, Any],
+) -> list[tuple[int, list[tuple[int, list[Any]]]]]:
+    """Return [(round_num, [(reviewer_index, findings), ...]), ...].
+
+    Supports both schemas findings can come from: the qloop multi-round
+    schema (``rounds[].reviewer_findings``) and the single-round qreview
+    schema (``reviewer_outputs`` keyed by team index).
+    """
+    rounds = state.get("rounds")
+    if isinstance(rounds, list) and rounds:
+        out: list[tuple[int, list[tuple[int, list[Any]]]]] = []
+        for i, r in enumerate(rounds):
+            per_reviewer = [
+                (rf["reviewer_index"], rf.get("findings", []))
+                for rf in r.get("reviewer_findings", [])
+                if isinstance(rf, dict) and rf.get("reviewer_index") is not None
+            ]
+            out.append((r.get("round_num", i + 1), per_reviewer))
+        return out
+
+    outputs = state.get("reviewer_outputs", {})
+    if outputs:
+        per_reviewer = [(int(idx), findings) for idx, findings in outputs.items()]
+        return [(1, per_reviewer)]
+    return []
+
+
+def lens_yield(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Per-lens, per-round finding yield: raw submitted count + unique-after-dedup.
+
+    "Unique" means the finding survived deduplicate_findings with exactly one
+    contributing source -- no other lens independently converged on it that
+    round. Returns [] when the state has no reviewer output to mine (e.g. a
+    workflow-only run with no on-disk qreview/qloop state).
+    """
+    team = state.get("team", [])
+    rounds = _round_reviewer_findings(state)
+    if not rounds:
+        return []
+
+    fp = _get_finding_parser()
+    result: list[dict[str, Any]] = []
+    for round_num, per_reviewer in rounds:
+        if not per_reviewer:
+            continue
+        raw_by_lens: dict[str, int] = {}
+        tagged: list[dict[str, Any]] = []
+        for reviewer_index, findings in per_reviewer:
+            lens = _lens_for_index(team, reviewer_index)
+            raw_by_lens[lens] = raw_by_lens.get(lens, 0) + len(findings)
+            for i, f in enumerate(findings):
+                if not isinstance(f, dict):
+                    continue
+                safe = dict(f)
+                safe.setdefault("id", f"{safe.get('severity', 'P3')}-r{round_num}-{lens}-{i}")
+                safe.setdefault("title", "")
+                safe["source"] = f.get("source") or lens
+                tagged.append(safe)
+
+        deduped = fp.deduplicate_findings(tagged)
+        unique_by_lens: dict[str, int] = {lens: 0 for lens in raw_by_lens}
+        for merged in deduped:
+            sources = merged.get("sources") or []
+            if len(sources) == 1 and sources[0] in unique_by_lens:
+                unique_by_lens[sources[0]] += 1
+
+        for lens, raw in sorted(raw_by_lens.items()):
+            result.append({
+                "round": round_num,
+                "lens": lens,
+                "raw": raw,
+                "unique": unique_by_lens.get(lens, 0),
+            })
+
+    return result
+
+
 def _deploy_section(state: dict[str, Any]) -> dict[str, Any] | None:
     """Surface the prod GUARDRAIL GATE verdict (Phase F2) when a run produced one.
 
@@ -332,9 +494,12 @@ def build_scorecard(
     syn = _latest_synthesis(state)
     counts = syn.get("counts", {}) if syn else {}
 
-    # Tokens: attach USD cost per model + total.
+    # Tokens: attach USD cost per model + total. A model missing from the
+    # pricing table is "unpriced" -- rendered loud (n/a) rather than as a
+    # normal-looking $0.0000, and excluded from the total (OPT-003).
     tokens_by_model: dict[str, Any] = {}
     total_cost = 0.0
+    unpriced_models: list[str] = []
     for model, b in transcript_agg.get("by_model", {}).items():
         usage = {
             "input_tokens": b["input"],
@@ -342,12 +507,17 @@ def build_scorecard(
             "cache_creation_input_tokens": b["cache_write"],
             "output_tokens": b["output"],
         }
+        priced = model in pricing
         cost = token_cost(usage, model, pricing)
-        total_cost += cost
+        if priced:
+            total_cost += cost
+        else:
+            unpriced_models.append(model)
         tokens_by_model[model] = {
             "input": b["input"], "cache_read": b["cache_read"],
             "cache_write": b["cache_write"], "output": b["output"],
             "requests": b["requests"], "cost_usd": round(cost, 4),
+            "unpriced": not priced,
         }
 
     tot = transcript_agg.get("total", _empty_bucket())
@@ -396,9 +566,18 @@ def build_scorecard(
                 "requests": tot["requests"], "cost_usd": round(total_cost, 4),
             },
             "available": tot["requests"] > 0,
+            **({"unpriced_models": sorted(unpriced_models)} if unpriced_models else {}),
         },
         "time": time_section,
     }
+
+    leak = wf.get("model_leak") if wf else None
+    if leak is not None:
+        report["model_leak"] = leak
+
+    lenses = lens_yield(state)
+    if lenses:
+        report["lens_yield"] = lenses
 
     deploy = _deploy_section(state)
     if deploy is not None:
@@ -426,6 +605,13 @@ def render_markdown(report: dict[str, Any]) -> str:
     proc = report["process"]
     lines.append("# Review Scorecard\n")
 
+    leak = report.get("model_leak")
+    if leak is not None:
+        lines.append(
+            f"> ⚠️ **MODEL LEAK: {leak['count']} agent(s) inherited "
+            f"`{leak['default_model']}`** (no explicit `model:` in agent() call)\n"
+        )
+
     lines.append("## Process\n")
     lines.append(f"- Status: **{proc.get('status')}**")
     conv = proc.get("converged")
@@ -446,6 +632,17 @@ def render_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Dropped (schema-invalid): {iss['dropped']}")
     lines.append("")
 
+    lenses = report.get("lens_yield")
+    if lenses:
+        lines.append("## Per-Lens Yield\n")
+        lines.append("_raw = findings submitted by that lens this round; unique = survived "
+                     "dedup with no other lens independently converging on the same issue._\n")
+        lines.append("| Round | Lens | Raw | Unique |")
+        lines.append("|---|---|--:|--:|")
+        for row in lenses:
+            lines.append(f"| {row['round']} | {row['lens']} | {row['raw']} | {row['unique']} |")
+        lines.append("")
+
     tok = report["tokens"]
     lines.append("## Token Cost\n")
     if not tok.get("available"):
@@ -453,14 +650,26 @@ def render_markdown(report: dict[str, Any]) -> str:
     else:
         lines.append("| Model | Input | Cache rd | Cache wr | Output | Reqs | Cost (USD) |")
         lines.append("|---|--:|--:|--:|--:|--:|--:|")
+        footnotes: list[str] = []
         for model, b in sorted(tok["by_model"].items()):
+            cost_str = "n/a (UNPRICED)" if b.get("unpriced") else f"${b['cost_usd']:.4f}"
             lines.append(f"| {model} | {_fmt_tokens(b['input'])} | {_fmt_tokens(b['cache_read'])} "
                          f"| {_fmt_tokens(b['cache_write'])} | {_fmt_tokens(b['output'])} "
-                         f"| {b['requests']} | ${b['cost_usd']:.4f} |")
+                         f"| {b['requests']} | {cost_str} |")
+            if model == "opus_1m":
+                footnotes.append(
+                    "- ⚠️ `opus_1m`: 1M-context variant — check for defaultModel inheritance"
+                )
         t = tok["total"]
         lines.append(f"| **total** | {_fmt_tokens(t['input'])} | {_fmt_tokens(t['cache_read'])} "
                      f"| {_fmt_tokens(t['cache_write'])} | {_fmt_tokens(t['output'])} "
                      f"| {t['requests']} | **${t['cost_usd']:.4f}** |")
+        if tok.get("unpriced_models"):
+            footnotes.append(
+                "- ⚠️ **UNPRICED (excluded from total):** "
+                + ", ".join(tok["unpriced_models"])
+            )
+        lines.extend(footnotes)
     lines.append("")
 
     tm = report["time"]
