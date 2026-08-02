@@ -1,5 +1,35 @@
 # Changelog — ai-review-toolkit
 
+## 1.7.0
+
+### Added
+- **Adjudicated-findings ledger — `/qloop` stops re-litigating settled findings.**
+  Motivated by a production run (2026-08-01) in which a bugfix went through 5
+  review rounds: every round's clean-context reviewer started blind, re-argued
+  geometry an earlier round had already settled, and every round's fix introduced
+  a new P1. Reviewers are clean-context BY DESIGN — the defect was that only round
+  N-1's findings ever reached round N (`historyPath` was overwritten each round),
+  so by round 3 the earlier rounds were simply gone and "clean context" had
+  degraded into amnesia.
+  `runLoop` now accumulates a CUMULATIVE ledger of findings whose resolution is
+  SETTLED and injects it into every later round's reviewer/verifier prompts (and
+  into the OPT-015 history file the reviewers Read). Admission requires BOTH a
+  `FIXED` resolution from the fixer AND the next round's reviewers not re-raising
+  the same finding — so a claimed fix that did not hold is never presented as
+  settled, and adjudication necessarily lags one round. **Open and `ESCALATED`
+  findings are deliberately excluded**: injecting an unresolved finding primes a
+  fresh reviewer to confirm it, which is the exact bias clean context exists to
+  prevent. The injected section tells reviewers not to re-litigate ledger entries,
+  to verify each listed fix actually held at its cited evidence, and to report any
+  regression of one as a NEW finding at its proper severity. A standing-rule
+  paragraph is always in the prompt itself so it does not depend on the reviewer
+  opening the history file.
+  New pure helpers in `js/workflow-helpers.mjs` (`adjudicateRound`, `mergeLedger`,
+  `renderLedger`) keep the policy out of the drift-locked adjudication corpus.
+  `runLoop` additionally returns `ledger` for the caller. Convergence, round
+  counting, the min-2-rounds floor, stuck detection and the fix-ALL gate are
+  unchanged — 13 new node tests, existing 137 node + 338 pytest still green.
+
 ## 1.6.1
 
 ### Added

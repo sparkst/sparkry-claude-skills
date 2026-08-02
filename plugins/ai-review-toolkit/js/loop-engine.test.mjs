@@ -312,3 +312,71 @@ test("SMOKE-008: the fixer prompt instructs declaring edited_files", async () =>
   await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
   assert.match(ctx.promptByLabel["fix:r1"], /edited_files/, "fixer is told to declare every file it edited");
 });
+
+// ── LEDGER-007..011: cross-round adjudicated-findings ledger ─────────────────
+//
+// Production incident (2026-08-01): 5 review rounds, each reviewer blind to
+// everything before round N-1, re-litigating settled decisions while every fix
+// introduced a new P1. The engine now carries a CUMULATIVE ledger of adjudicated
+// findings (fixed-and-verified, or dismissed) into every later round's prompts.
+// Open findings are deliberately excluded — injecting them biases reviewers.
+
+test("LEDGER-007: round 3's history carries a round-1 finding, not just round 2's", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Round one bug")], resolutions: [R("P0-001")] },
+    { findings: [F("P1-002", "P1", "Round two bug")], resolutions: [R("P1-002")] },
+    { findings: [] },
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r2history = ctx.promptByLabel["history:r2"];
+  assert.match(r2history, /Round one bug/, "the round-1 finding must survive into the round-2 history file");
+  assert.match(r2history, /Round two bug/, "the round-2 finding is there too");
+  assert.match(r2history, /ADJUDICATED-FINDINGS LEDGER/);
+});
+
+test("LEDGER-008: a fix that did not hold is NOT presented as adjudicated", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Persistent bug")], resolutions: [R("P0-001")] },
+    { findings: [F("P0-001", "P0", "Persistent bug")], resolutions: [R("P0-001")] }, // recurs → stuck
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r1history = ctx.promptByLabel["history:r1"] || "";
+  assert.doesNotMatch(
+    r1history,
+    /LEDGER[\s\S]*Persistent bug/,
+    "a fix contradicted by the next round must not be labelled adjudicated",
+  );
+});
+
+test("LEDGER-009: the reviewer prompt carries the do-not-re-litigate instruction", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [] },
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r2prompt = ctx.promptByLabel["review:r1:r2"];
+  assert.match(r2prompt, /do not re-litigate/i);
+  assert.match(r2prompt, /regression/i, "a regression of a ledger entry is a NEW finding");
+});
+
+test("LEDGER-010: convergence, round counting and the min-2 floor are unchanged", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.outcome.round, 2);
+  assert.equal(out.rounds, 2);
+});
+
+test("LEDGER-011: runLoop returns the accumulated ledger for the caller", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.ok(Array.isArray(out.ledger), "ledger is always an array");
+  assert.deepEqual(out.ledger.map((e) => e.title), ["Bug X"]);
+  assert.equal(out.ledger[0].resolution, "fixed");
+});
