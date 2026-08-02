@@ -145,8 +145,8 @@ workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
   away), but the engine carries a CUMULATIVE ledger of *settled* findings into
   every later round, so round 5 still knows what round 1 decided. A finding is
   admitted only when the fixer marked it `FIXED` **and** the next round's
-  reviewers did not re-raise it — a claimed fix that did not hold is never
-  presented as settled. **Open and `ESCALATED` findings are deliberately
+  reviewers did not re-raise it — a claimed fix that did not hold (including one
+  the trivial spot-check reports did not land) is never presented as settled. **Open and `ESCALATED` findings are deliberately
   excluded**: telling a fresh reviewer "the last round thinks X is broken" primes
   them to confirm X, which is the exact bias clean context exists to prevent. The
   ledger instructs reviewers not to re-litigate its entries, to verify each fix

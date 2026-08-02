@@ -184,14 +184,18 @@ function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary,
     )
     // LEDGER: everything settled in rounds 1..r-1, not just the previous round.
     // The body goes inline, or lives in the history file the reviewer is required
-    // to Read (OPT-015). The STANDING RULE below is always in the prompt itself —
-    // it must not depend on the reviewer having opened the file.
+    // to Read (OPT-015). The STANDING RULE is in the prompt itself so it never
+    // depends on the reviewer having opened the file — but it is emitted ONLY
+    // when the ledger is non-empty. Adjudication lags a round, so round 2's
+    // ledger is always empty; announcing a section that isn't there is a false
+    // pointer that costs the reviewer a fruitless search.
+    if ((ledger ?? []).length) {
     parts.push(
       '',
       '## Adjudicated Findings — Standing Rule',
       '',
-      'Some findings from earlier rounds are already ADJUDICATED (fixed and since verified, or ' +
-        'dismissed with evidence); they are listed under "ADJUDICATED-FINDINGS LEDGER" ' +
+      'Some findings from earlier rounds are already ADJUDICATED (fixed, and a later round ' +
+        'confirmed the fix held); they are listed under "ADJUDICATED-FINDINGS LEDGER" ' +
         (historyPath ? 'in the summary file above.' : 'below.') +
         ' Do NOT re-litigate them. DO verify each listed fix actually held at its cited evidence, ' +
         'and if one has regressed or been undone, report that as a NEW finding at its proper severity. ' +
@@ -200,6 +204,7 @@ function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary,
     )
     const ledgerBlock = historyPath ? '' : renderLedger(ledger ?? [])
     if (ledgerBlock) parts.push('', ledgerBlock)
+    }
   }
 
   parts.push(
@@ -618,6 +623,11 @@ export async function runLoop(config, ctx) {
         })
         if (check && check.all_applied === false && check.not_applied?.length) {
           log(`Round ${r}: spot-check flagged ${check.not_applied.length} trivial fix(es) not applied: ${check.not_applied.join(', ')}`)
+          // LEDGER: the spot-check is affirmative evidence the fix did NOT land,
+          // so drop those resolutions — never ledger a fix as settled while
+          // holding proof it is still open. They stay in the round's log above.
+          const rejected = new Set(check.not_applied.map(String))
+          trivialResolutions = trivialResolutions.filter((res) => !rejected.has(String(res.finding_id ?? '')))
         }
       }
     }

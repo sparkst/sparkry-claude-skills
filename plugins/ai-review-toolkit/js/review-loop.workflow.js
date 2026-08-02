@@ -645,6 +645,11 @@ function ledgerKey(x) {
  * `nextRoundFindings` is what makes (2) checkable, so a round is adjudicated one
  * round LATE — round r's entries are admitted when round r+1's findings are known.
  *
+ * `resolution` is currently always "fixed" — the only adjudication the engine can
+ * make automatically. The field is a string (not a boolean) so a future
+ * dismissed-with-evidence path (a reviewer finding ruled invalid rather than
+ * repaired) can emit "dismissed" without changing the ledger shape or renderer.
+ *
  * @returns ledger entries: {id, round, severity, title, summary, file, resolution, resolved_by, evidence}
  */
 function adjudicateRound({
@@ -715,8 +720,8 @@ function renderLedger(ledger = []) {
     "## ADJUDICATED-FINDINGS LEDGER",
     "",
     "These findings were raised in PRIOR rounds and are already adjudicated —",
-    "each was either fixed and then verified by a later round, or dismissed with",
-    "evidence. Treat them as settled:",
+    "each was fixed, and a later round confirmed the fix held. Treat them as",
+    "settled:",
     "",
     "- **Do NOT re-litigate them.** Re-raising a settled finding as though it were",
     "  new is the failure mode this ledger exists to prevent.",
@@ -921,14 +926,18 @@ function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary,
     )
     // LEDGER: everything settled in rounds 1..r-1, not just the previous round.
     // The body goes inline, or lives in the history file the reviewer is required
-    // to Read (OPT-015). The STANDING RULE below is always in the prompt itself —
-    // it must not depend on the reviewer having opened the file.
+    // to Read (OPT-015). The STANDING RULE is in the prompt itself so it never
+    // depends on the reviewer having opened the file — but it is emitted ONLY
+    // when the ledger is non-empty. Adjudication lags a round, so round 2's
+    // ledger is always empty; announcing a section that isn't there is a false
+    // pointer that costs the reviewer a fruitless search.
+    if ((ledger ?? []).length) {
     parts.push(
       '',
       '## Adjudicated Findings — Standing Rule',
       '',
-      'Some findings from earlier rounds are already ADJUDICATED (fixed and since verified, or ' +
-        'dismissed with evidence); they are listed under "ADJUDICATED-FINDINGS LEDGER" ' +
+      'Some findings from earlier rounds are already ADJUDICATED (fixed, and a later round ' +
+        'confirmed the fix held); they are listed under "ADJUDICATED-FINDINGS LEDGER" ' +
         (historyPath ? 'in the summary file above.' : 'below.') +
         ' Do NOT re-litigate them. DO verify each listed fix actually held at its cited evidence, ' +
         'and if one has regressed or been undone, report that as a NEW finding at its proper severity. ' +
@@ -937,6 +946,7 @@ function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary,
     )
     const ledgerBlock = historyPath ? '' : renderLedger(ledger ?? [])
     if (ledgerBlock) parts.push('', ledgerBlock)
+    }
   }
 
   parts.push(
@@ -1355,6 +1365,11 @@ async function runLoop(config, ctx) {
         })
         if (check && check.all_applied === false && check.not_applied?.length) {
           log(`Round ${r}: spot-check flagged ${check.not_applied.length} trivial fix(es) not applied: ${check.not_applied.join(', ')}`)
+          // LEDGER: the spot-check is affirmative evidence the fix did NOT land,
+          // so drop those resolutions — never ledger a fix as settled while
+          // holding proof it is still open. They stay in the round's log above.
+          const rejected = new Set(check.not_applied.map(String))
+          trivialResolutions = trivialResolutions.filter((res) => !rejected.has(String(res.finding_id ?? '')))
         }
       }
     }

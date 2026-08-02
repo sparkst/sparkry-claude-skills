@@ -28,7 +28,16 @@
   `renderLedger`) keep the policy out of the drift-locked adjudication corpus.
   `runLoop` additionally returns `ledger` for the caller. Convergence, round
   counting, the min-2-rounds floor, stuck detection and the fix-ALL gate are
-  unchanged — 13 new node tests, existing 137 node + 338 pytest still green.
+  unchanged — 17 new node tests, existing 137 node + 338 pytest still green.
+
+  Review hardening (PR #40): a trivial spot-fix that the spot-check reports did
+  NOT land is now dropped before adjudication, so the engine can never ledger a
+  fix as settled while holding affirmative evidence it is still open. The
+  standing-rule paragraph is emitted only when the ledger is actually non-empty —
+  adjudication lags a round, so round 2's ledger is always empty and announcing
+  the section there pointed reviewers at nothing. The inline-embed fallback (used
+  when the haiku history-writer fails) is now pinned by its own test, since it is
+  the sole ledger carrier on that path.
 
 ## 1.6.1
 

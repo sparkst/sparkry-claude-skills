@@ -141,6 +141,9 @@ test("LEDGER-005b: re-adjudicating the same title replaces rather than duplicate
   assert.strictEqual(merged[0].round, 3, "newest adjudication wins");
 });
 
+// The second fixture row uses resolution:"dismissed" deliberately. The engine
+// only ever emits "fixed" today; this pins that the renderer stays generic over
+// the reserved value, so a future dismissal path needs no renderer change.
 test("LEDGER-006: renderLedger emits the do-not-re-litigate framing and every entry", () => {
   const ledger = [
     { id: "P0-001", round: 1, severity: "P0", title: "Bug A", summary: "off-by-one in the offset", file: "a.py", resolution: "fixed", resolved_by: "round 1 fixer", evidence: "a.py:1" },

@@ -63,6 +63,11 @@ function ledgerKey(x) {
  * `nextRoundFindings` is what makes (2) checkable, so a round is adjudicated one
  * round LATE — round r's entries are admitted when round r+1's findings are known.
  *
+ * `resolution` is currently always "fixed" — the only adjudication the engine can
+ * make automatically. The field is a string (not a boolean) so a future
+ * dismissed-with-evidence path (a reviewer finding ruled invalid rather than
+ * repaired) can emit "dismissed" without changing the ledger shape or renderer.
+ *
  * @returns ledger entries: {id, round, severity, title, summary, file, resolution, resolved_by, evidence}
  */
 export function adjudicateRound({
@@ -133,8 +138,8 @@ export function renderLedger(ledger = []) {
     "## ADJUDICATED-FINDINGS LEDGER",
     "",
     "These findings were raised in PRIOR rounds and are already adjudicated —",
-    "each was either fixed and then verified by a later round, or dismissed with",
-    "evidence. Treat them as settled:",
+    "each was fixed, and a later round confirmed the fix held. Treat them as",
+    "settled:",
     "",
     "- **Do NOT re-litigate them.** Re-raising a settled finding as though it were",
     "  new is the failure mode this ledger exists to prevent.",
