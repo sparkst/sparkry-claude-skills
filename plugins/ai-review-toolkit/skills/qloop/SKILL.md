@@ -93,7 +93,8 @@ run `/qloop` on an artifact whose current state you are willing to have modified
 
 ### 4. Present the outcome
 
-The Workflow returns `{ outcome, rounds, final_findings, final_counts, history }`:
+The Workflow returns
+`{ outcome, rounds, final_findings, final_counts, history, ledger }`:
 - `outcome.status === "converged"` — present the convergence summary and round count.
 - `outcome.status === "escalated"` — present `outcome.reason` and `outcome.unresolved`
   (P0/P1 findings), then ask the user to choose: continue (raise `maxRounds` and
@@ -101,6 +102,9 @@ The Workflow returns `{ outcome, rounds, final_findings, final_counts, history }
   stuck detection (identical P0/P1 across two rounds), or a failed fix-ALL gate.
 
 Show `history` (findings-per-round) so the convergence trajectory is visible.
+`ledger` (returned alongside it) lists the findings adjudicated across the whole
+run — each with the round that settled it — and is what later rounds' reviewers
+were told not to re-litigate.
 
 ### 5. Scorecard (mandatory final step)
 
@@ -136,6 +140,17 @@ workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
 - **Max-severity wins / clean context per reviewer per round / pre-existing
   issues are in-scope** — same as `/qreview`, enforced by the shared JS
   adjudication (drift-locked against the Python oracle in CI).
+- **Adjudicated-findings ledger — clean context, not amnesia.** Reviewers stay
+  clean-context every round (fresh eyes catch what a primed reviewer rationalizes
+  away), but the engine carries a CUMULATIVE ledger of *settled* findings into
+  every later round, so round 5 still knows what round 1 decided. A finding is
+  admitted only when the fixer marked it `FIXED` **and** the next round's
+  reviewers did not re-raise it — a claimed fix that did not hold (including one
+  the trivial spot-check reports did not land) is never presented as settled. **Open and `ESCALATED` findings are deliberately
+  excluded**: telling a fresh reviewer "the last round thinks X is broken" primes
+  them to confirm X, which is the exact bias clean context exists to prevent. The
+  ledger instructs reviewers not to re-litigate its entries, to verify each fix
+  actually held, and to report any regression of one as a NEW finding.
 
 ## Tools
 

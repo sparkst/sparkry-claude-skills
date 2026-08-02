@@ -43,7 +43,7 @@ function makeCtx(rounds, opts = {}) {
       if (label.startsWith("history:")) return { wrote: opts.historyWriteFails ? false : true };
       if (label === "cleanup") return { wrote: true };
       if (label.startsWith("spotfix:")) return { resolutions: plan.spotResolutions ?? [R("spot")], edited_files: plan.spotEditedFiles ?? [] };
-      if (label.startsWith("spotcheck:")) return { all_applied: true, not_applied: [] };
+      if (label.startsWith("spotcheck:")) return { all_applied: !opts.notApplied, not_applied: opts.notApplied ?? [] };
       if (label.startsWith("fix:")) return { resolutions: plan.resolutions ?? [], edited_files: plan.editedFiles ?? [] };
       throw new Error("unexpected agent label: " + label);
     },
@@ -311,4 +311,140 @@ test("SMOKE-008: the fixer prompt instructs declaring edited_files", async () =>
   ]);
   await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
   assert.match(ctx.promptByLabel["fix:r1"], /edited_files/, "fixer is told to declare every file it edited");
+});
+
+// ── LEDGER-007..011: cross-round adjudicated-findings ledger ─────────────────
+//
+// Production incident (2026-08-01): 5 review rounds, each reviewer blind to
+// everything before round N-1, re-litigating settled decisions while every fix
+// introduced a new P1. The engine now carries a CUMULATIVE ledger of adjudicated
+// findings (fixed-and-verified, or dismissed) into every later round's prompts.
+// Open findings are deliberately excluded — injecting them biases reviewers.
+
+test("LEDGER-007: round 3's history carries a round-1 finding, not just round 2's", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Round one bug")], resolutions: [R("P0-001")] },
+    { findings: [F("P1-002", "P1", "Round two bug")], resolutions: [R("P1-002")] },
+    { findings: [] },
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r2history = ctx.promptByLabel["history:r2"];
+  assert.match(r2history, /Round one bug/, "the round-1 finding must survive into the round-2 history file");
+  assert.match(r2history, /Round two bug/, "the round-2 finding is there too");
+  assert.match(r2history, /ADJUDICATED-FINDINGS LEDGER/);
+});
+
+test("LEDGER-008: a fix that did not hold is NOT presented as adjudicated", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Persistent bug")], resolutions: [R("P0-001")] },
+    { findings: [F("P0-001", "P0", "Persistent bug")], resolutions: [R("P0-001")] }, // recurs → stuck
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r1history = ctx.promptByLabel["history:r1"] || "";
+  assert.doesNotMatch(
+    r1history,
+    /LEDGER[\s\S]*Persistent bug/,
+    "a fix contradicted by the next round must not be labelled adjudicated",
+  );
+});
+
+test("LEDGER-009: the reviewer prompt carries the do-not-re-litigate instruction", async () => {
+  // Round 3 is the first round with a non-empty ledger (adjudication lags one
+  // round), so it is the first round that carries the standing rule.
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [F("P1-002", "P1", "Bug Y")], resolutions: [R("P1-002")] },
+    { findings: [] },
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r3prompt = ctx.promptByLabel["review:r1:r3"];
+  assert.match(r3prompt, /do not re-litigate/i);
+  assert.match(r3prompt, /regression/i, "a regression of a ledger entry is a NEW finding");
+});
+
+test("LEDGER-010: convergence, round counting and the min-2 floor are unchanged", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.outcome.round, 2);
+  assert.equal(out.rounds, 2);
+});
+
+test("LEDGER-011: runLoop returns the accumulated ledger for the caller", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.ok(Array.isArray(out.ledger), "ledger is always an array");
+  assert.deepEqual(out.ledger.map((e) => e.title), ["Bug X"]);
+  assert.equal(out.ledger[0].resolution, "fixed");
+});
+
+// ── LEDGER-012..014: review hardening (PR #40) ──────────────────────────────
+
+test("LEDGER-012: when the history write fails, the ledger is embedded INLINE in the prompt", async () => {
+  // The inline embed is the ONLY ledger carrier on the fallback path. Without
+  // this test it survives deletion in mutation testing: the standing rule would
+  // still point reviewers at a ledger that silently vanished.
+  const ctx = makeCtx(
+    [
+      { findings: [F("P0-001", "P0", "Round one bug")], resolutions: [R("P0-001")] },
+      { findings: [F("P1-002", "P1", "Round two bug")], resolutions: [R("P1-002")] },
+      { findings: [] },
+    ],
+    { historyWriteFails: true },
+  );
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  const r3prompt = ctx.promptByLabel["review:r1:r3"];
+  assert.match(r3prompt, /ADJUDICATED-FINDINGS LEDGER/, "ledger body must be embedded inline");
+  assert.match(r3prompt, /Round one bug/, "the round-1 adjudicated finding is carried inline");
+});
+
+test("LEDGER-013: a spot-fix the spot-check says did NOT land is kept out of the ledger", async () => {
+  // The engine must never ledger a fix as 'fixed' while holding affirmative
+  // evidence it did not land.
+  const ctx = makeCtx(
+    [
+      { findings: [F("P2-001", "P2", "Cosmetic nit")], spotResolutions: [R("P2-001")] },
+      { findings: [] },
+    ],
+    { notApplied: ["P2-001"] },
+  );
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.deepEqual(out.ledger, [], "a fix contradicted by the spot-check is not adjudicated");
+});
+
+test("LEDGER-013b: a spot-fix the spot-check confirms DOES reach the ledger", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P2-001", "P2", "Cosmetic nit")], spotResolutions: [R("P2-001")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.deepEqual(out.ledger.map((e) => e.title), ["Cosmetic nit"]);
+});
+
+test("LEDGER-014: round 2 gets NO standing rule — its ledger is always empty", async () => {
+  // Adjudication lags one round, so at round 2 there is nothing settled yet.
+  // Announcing a LEDGER section that does not exist is a false pointer.
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [F("P1-002", "P1", "Bug Y")], resolutions: [R("P1-002")] },
+    { findings: [] },
+  ]);
+  await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.doesNotMatch(
+    ctx.promptByLabel["review:r1:r2"],
+    /ADJUDICATED-FINDINGS LEDGER/,
+    "round 2 must not advertise a ledger it does not have",
+  );
+  assert.match(
+    ctx.promptByLabel["review:r1:r3"],
+    /ADJUDICATED-FINDINGS LEDGER/,
+    "round 3 does have one, so the rule appears",
+  );
 });

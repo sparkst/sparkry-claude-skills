@@ -608,6 +608,143 @@ function ensureUniqueIds(findings) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Adjudicated-findings ledger
+//
+// Reviewers are clean-context BY DESIGN — fresh eyes catch bugs a primed
+// reviewer rationalizes away. But before this, only round N-1's findings reached
+// round N, so by round 3 the earlier rounds were simply gone. A production run
+// (2026-08-01) spent 5 rounds re-litigating geometry round 1 had already settled
+// while each new fix introduced a new P1: "clean context" had degraded into
+// amnesia.
+//
+// The ledger is the narrow fix: a CUMULATIVE record of findings whose resolution
+// is SETTLED, carried into every later round. It deliberately excludes anything
+// open — telling a fresh reviewer "the previous round thinks X is broken" primes
+// them to confirm X, which is exactly the bias clean context exists to avoid.
+// ---------------------------------------------------------------------------
+
+/** Normalized title — the identity key for a finding across rounds. */
+function ledgerKey(x) {
+  return String(x.title ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * Decide which of a round's findings are SETTLED and belong in the ledger.
+ *
+ * A finding is admitted only when BOTH hold:
+ *   1. the fixer returned a `FIXED` resolution for its id (an `ESCALATED` one is
+ *      an open question, not a settled decision), and
+ *   2. the NEXT round's reviewers did not re-raise the same normalized title —
+ *      i.e. the fix demonstrably held. A claimed-but-contradicted fix must never
+ *      be labelled "do not re-litigate".
+ *
+ * `nextRoundFindings` is what makes (2) checkable, so a round is adjudicated one
+ * round LATE — round r's entries are admitted when round r+1's findings are known.
+ *
+ * `resolution` is currently always "fixed" — the only adjudication the engine can
+ * make automatically. The field is a string (not a boolean) so a future
+ * dismissed-with-evidence path (a reviewer finding ruled invalid rather than
+ * repaired) can emit "dismissed" without changing the ledger shape or renderer.
+ *
+ * @returns ledger entries: {id, round, severity, title, summary, file, resolution, resolved_by, evidence}
+ */
+function adjudicateRound({
+  round,
+  findings = [],
+  resolutions = [],
+  nextRoundFindings = [],
+}) {
+  const fixedById = new Map();
+  for (const res of resolutions) {
+    if (String(res?.status ?? "").toUpperCase() === "FIXED") {
+      fixedById.set(String(res.finding_id ?? ""), res);
+    }
+  }
+
+  const stillLive = new Set(nextRoundFindings.map(ledgerKey));
+
+  const entries = [];
+  for (const f of findings) {
+    const res = fixedById.get(String(f.id ?? ""));
+    if (!res) continue; // open, or escalated → not settled
+    if (stillLive.has(ledgerKey(f))) continue; // the fix did not hold
+    entries.push({
+      id: String(f.id ?? ""),
+      round,
+      severity: String(f.severity ?? ""),
+      title: String(f.title ?? ""),
+      summary: String(res.description ?? f.finding ?? ""),
+      file: String(f.evidence ?? res.evidence ?? ""),
+      resolution: "fixed",
+      resolved_by: `round ${round} fixer`,
+      evidence: String(res.evidence ?? ""),
+    });
+  }
+  return entries;
+}
+
+/**
+ * Accumulate new entries onto the running ledger, keyed by normalized title so
+ * the same issue adjudicated twice collapses to its NEWEST adjudication rather
+ * than appearing twice. Order follows first appearance; a replaced entry keeps
+ * its original slot so the ledger reads chronologically.
+ */
+function mergeLedger(ledger = [], entries = []) {
+  const out = [...ledger];
+  const indexByKey = new Map(out.map((e, i) => [ledgerKey(e), i]));
+  for (const e of entries) {
+    const key = ledgerKey(e);
+    const at = indexByKey.get(key);
+    if (at === undefined) {
+      indexByKey.set(key, out.length);
+      out.push(e);
+    } else {
+      out[at] = e;
+    }
+  }
+  return out;
+}
+
+/**
+ * Render the ledger as the prompt section injected into later rounds. Returns
+ * "" for an empty ledger so callers never emit a dead heading.
+ */
+function renderLedger(ledger = []) {
+  if (!ledger.length) return "";
+
+  const lines = [
+    "## ADJUDICATED-FINDINGS LEDGER",
+    "",
+    "These findings were raised in PRIOR rounds and are already adjudicated —",
+    "each was fixed, and a later round confirmed the fix held. Treat them as",
+    "settled:",
+    "",
+    "- **Do NOT re-litigate them.** Re-raising a settled finding as though it were",
+    "  new is the failure mode this ledger exists to prevent.",
+    "- **DO verify the listed fixes actually held** at the cited evidence location.",
+    "- **If a listed fix has regressed or was undone, report it as a NEW finding**",
+    "  with normal severity — a regression is a real bug, not a re-litigation.",
+    "- This ledger is not a checklist of everything wrong with the artifact. Issues",
+    "  it does not mention are still fully in scope for your review.",
+    "",
+  ];
+
+  for (const e of ledger) {
+    lines.push(`### ${e.id} (round ${e.round}, ${e.severity}): ${e.title}`);
+    lines.push(`**Resolution:** ${e.resolution} — ${e.resolved_by}`);
+    if (e.summary) lines.push(`**What was done:** ${e.summary}`);
+    if (e.evidence) lines.push(`**Evidence:** ${e.evidence}`);
+    else if (e.file) lines.push(`**Location:** ${e.file}`);
+    lines.push("");
+  }
+
+  return lines.join("\n").replace(/\s+$/, "");
+}
+
 // ===== inlined from loop-engine.mjs (generated; edit loop-engine.mjs, then rebuild) =====
 // Shared review→synthesize→gate→fix convergence loop engine.
 //
@@ -738,7 +875,7 @@ const TEST_SCHEMA = {
 // findings ARE held in memory, so they are embedded via formatFindings().
 // ---------------------------------------------------------------------------
 
-function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath) {
+function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath, ledger) {
   const parts = [
     `You are a ${agentDef.name} reviewing an artifact.`,
     '',
@@ -787,6 +924,29 @@ function reviewerPrompt(agentDef, roundNum, artifact, requirements, testSummary,
         'prior resolution, navigate to the cited evidence and verify the fix is correct. Also check ' +
         'for NEW issues introduced by the fixes — regressions, broken logic, incomplete changes.',
     )
+    // LEDGER: everything settled in rounds 1..r-1, not just the previous round.
+    // The body goes inline, or lives in the history file the reviewer is required
+    // to Read (OPT-015). The STANDING RULE is in the prompt itself so it never
+    // depends on the reviewer having opened the file — but it is emitted ONLY
+    // when the ledger is non-empty. Adjudication lags a round, so round 2's
+    // ledger is always empty; announcing a section that isn't there is a false
+    // pointer that costs the reviewer a fruitless search.
+    if ((ledger ?? []).length) {
+    parts.push(
+      '',
+      '## Adjudicated Findings — Standing Rule',
+      '',
+      'Some findings from earlier rounds are already ADJUDICATED (fixed, and a later round ' +
+        'confirmed the fix held); they are listed under "ADJUDICATED-FINDINGS LEDGER" ' +
+        (historyPath ? 'in the summary file above.' : 'below.') +
+        ' Do NOT re-litigate them. DO verify each listed fix actually held at its cited evidence, ' +
+        'and if one has regressed or been undone, report that as a NEW finding at its proper severity. ' +
+        'The ledger is not a list of everything wrong with the artifact — anything it does not ' +
+        'mention is fully in scope.',
+    )
+    const ledgerBlock = historyPath ? '' : renderLedger(ledger ?? [])
+    if (ledgerBlock) parts.push('', ledgerBlock)
+    }
   }
 
   parts.push(
@@ -886,7 +1046,7 @@ function testGatePrompt(artifact, roundNum, carriedCommand) {
 // Single-verifier prompt for the proportional verification round (OPT-009): a
 // clean round + no fixer edits buys a cheap "still clean?" check instead of a
 // full N-reviewer fan-out. ANY real finding it returns re-opens the full loop.
-function verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath) {
+function verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath, ledger) {
   const parts = [
     'You are a single verification reviewer. The prior round found no blocking issues and nothing has been',
     'changed since. Confirm the artifact is still clean.',
@@ -903,6 +1063,8 @@ function verifierPrompt(artifact, requirements, priorFindings, priorResolutions,
       parts.push('', '## Trivial Resolutions Applied', '', lines.join('\n'))
     }
   }
+  const ledgerBlockV = renderLedger(ledger ?? [])
+  if (ledgerBlockV) parts.push('', ledgerBlockV)
   parts.push(
     '',
     '## Instructions',
@@ -917,8 +1079,12 @@ function verifierPrompt(artifact, requirements, priorFindings, priorResolutions,
 }
 
 // Render the prior-round findings + resolutions as the history-file body (OPT-015).
-function renderHistory(findings, resolutions) {
-  const parts = ['## Prior Round Findings', '', formatFindings(findings)]
+function renderHistory(findings, resolutions, ledger) {
+  const parts = []
+  // LEDGER first: the settled cross-round record the reviewer must not re-open.
+  const ledgerBlock = renderLedger(ledger ?? [])
+  if (ledgerBlock) parts.push(ledgerBlock, '')
+  parts.push('## Prior Round Findings', '', formatFindings(findings))
   if (resolutions.length) {
     const resLines = []
     for (const res of resolutions) {
@@ -932,13 +1098,13 @@ function renderHistory(findings, resolutions) {
 
 // Prompt a cheap agent to persist the round's history verbatim to a file so the
 // next round's reviewers Read it by path instead of receiving it embedded.
-function historyWriterPrompt(historyPath, findings, resolutions) {
+function historyWriterPrompt(historyPath, findings, resolutions, ledger) {
   return [
     `Write the following markdown VERBATIM to the file at ${historyPath} (create it, or overwrite if it`,
     'exists). Do NOT edit, summarize, reword, or reformat — write it exactly as given. Output nothing else.',
     '',
     '--- BEGIN CONTENT ---',
-    renderHistory(findings, resolutions),
+    renderHistory(findings, resolutions, ledger),
     '--- END CONTENT ---',
   ].join('\n')
 }
@@ -1056,15 +1222,22 @@ async function runLoop(config, ctx) {
   let carriedTestCommand = null   // reuse round 1's test command in later rounds (OPT-007)
   let historyPath = null          // round r-1's externalized history file, if written (OPT-015)
   const historyPaths = []         // every history file written, for end-of-loop cleanup
+  // LEDGER: cumulative record of findings whose resolution is SETTLED (fixed and
+  // then verified by a later round). Carried into EVERY subsequent round's
+  // prompts so round 5's reviewer still knows what round 1 decided. `pending`
+  // holds the round just fixed — it can only be adjudicated once the NEXT round's
+  // findings prove the fix held, so admission always lags one round.
+  let ledger = []
+  let pendingAdjudication = null
 
   // OPT-015: persist a round's findings+resolutions to a file the NEXT round's
   // reviewers Read by path (constant-size prompts) instead of embedding it in
   // every reviewer prompt. Returns the path on success, or null → prompts embed
   // as before (zero information loss). Skipped when there is nothing to record.
   async function maybeWriteHistory(round, hFindings, hResolutions) {
-    if (!hFindings.length && !hResolutions.length) return null
+    if (!hFindings.length && !hResolutions.length && !ledger.length) return null
     const path = `${artifact}.review-r${round}.md`
-    const res = await agent(historyWriterPrompt(path, hFindings, hResolutions), {
+    const res = await agent(historyWriterPrompt(path, hFindings, hResolutions, ledger), {
       label: `history:r${round}`, phase: `Round ${round}`, model: 'haiku', schema: WROTE_SCHEMA,
     })
     if (res && res.wrote === true) {
@@ -1087,7 +1260,7 @@ async function runLoop(config, ctx) {
       proportionalUsed = true
       phase(`Verify (round ${r})`)
       const verifier = await agent(
-        verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath),
+        verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath, ledger),
         { label: `verify:r${r}`, phase: `Round ${r}`, model: 'sonnet', schema: FINDINGS_SCHEMA },
       )
       reviewerLists = [verifier?.findings || []]
@@ -1118,7 +1291,7 @@ async function runLoop(config, ctx) {
       // caller that supplies flags but skipped team-selector.
       const reviews = await parallel(
         team.map((agentDef) => () =>
-          agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath), {
+          agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath, ledger), {
             label: `review:${agentDef.name}:r${r}`,
             phase: `Round ${r}`,
             model: resolveReviewerModel(agentDef, resolverComplexity, {
@@ -1147,6 +1320,17 @@ async function runLoop(config, ctx) {
     // meaningful and the fixer can echo exact ids.
     const findings = ensureUniqueIds(synthesizeFindings(reviewerLists, dropped))
     const counts = countBySeverity(findings)
+
+    // LEDGER: this round's findings are the verdict on last round's fixes. A fix
+    // this round did NOT re-raise is settled and joins the ledger; one that
+    // recurred stays out, so the ledger never claims a live bug is closed.
+    if (pendingAdjudication) {
+      ledger = mergeLedger(
+        ledger,
+        adjudicateRound({ ...pendingAdjudication, nextRoundFindings: findings }),
+      )
+      pendingAdjudication = null
+    }
 
     // Split into significant (full fix-loop) and trivial (spot-fix). P0/P1 are
     // always significant; a recurring or reviewer-flagged P2/P3 is too.
@@ -1181,6 +1365,11 @@ async function runLoop(config, ctx) {
         })
         if (check && check.all_applied === false && check.not_applied?.length) {
           log(`Round ${r}: spot-check flagged ${check.not_applied.length} trivial fix(es) not applied: ${check.not_applied.join(', ')}`)
+          // LEDGER: the spot-check is affirmative evidence the fix did NOT land,
+          // so drop those resolutions — never ledger a fix as settled while
+          // holding proof it is still open. They stay in the round's log above.
+          const rejected = new Set(check.not_applied.map(String))
+          trivialResolutions = trivialResolutions.filter((res) => !rejected.has(String(res.finding_id ?? '')))
         }
       }
     }
@@ -1202,6 +1391,7 @@ async function runLoop(config, ctx) {
     // Significant cleared (below the floor, or a proportional round that surfaced
     // only trivial findings) → advance to re-review WITHOUT running the fixer.
     if (converged) {
+      pendingAdjudication = { round: r, findings, resolutions: trivialResolutions }
       historyPath = await maybeWriteHistory(r, findings, trivialResolutions)
       priorFindings = findings
       priorResolutions = trivialResolutions
@@ -1238,6 +1428,7 @@ async function runLoop(config, ctx) {
     }
 
     const combinedResolutions = [...resolutions, ...trivialResolutions]
+    pendingAdjudication = { round: r, findings, resolutions: combinedResolutions }
     historyPath = await maybeWriteHistory(r, findings, combinedResolutions)
     priorFindings = findings
     priorResolutions = combinedResolutions
@@ -1253,11 +1444,20 @@ async function runLoop(config, ctx) {
     })
   }
 
+  // A run that ends while a round is still pending has no LATER round to confirm
+  // its fixes. When the loop CONVERGED, the final clean round is itself that
+  // confirmation, so those fixes are settled; on an escalation they are not.
+  if (pendingAdjudication && outcome?.status === 'converged') {
+    ledger = mergeLedger(ledger, adjudicateRound({ ...pendingAdjudication, nextRoundFindings: [] }))
+    pendingAdjudication = null
+  }
+
   const last = roundReports[roundReports.length - 1] || {}
   return {
     outcome,
     rounds: roundReports.length,
     edited_files: [...editedFiles].sort(),
+    ledger,
     final_findings: last.findings || [],
     final_counts: last.counts || countBySeverity([]),
     history: roundReports.map((rr) => ({
