@@ -1,7 +1,7 @@
 ---
 name: QWRITE - Multi-Platform Content Creation
-description: Generate publication-ready content with persona layering, quality scoring, and platform-specific transformations
-version: 1.0.0
+description: Generate publication-ready content with persona layering, quality scoring, and platform-specific transformations. Defers to the installed global `writing` skill (High-Performance Writing System, trigger QWRITE) when one is present at ~/.claude/skills/writing.
+version: 1.1.0
 tools: [quality-scorer.py, voice-validator.py, link-validator.py, special-links-matcher.py, platform-constraints.py, template-selector.py]
 references: [templates/*.md, personas/*.md, constraints/*.json, examples/*]
 claude_tools: Read, Grep, Glob, Edit, Write, Bash
@@ -9,6 +9,8 @@ trigger: QWRITE
 ---
 
 # QWRITE - Multi-Platform Content Creation
+
+> **Lineage / routing (v1.1.0).** This plugin is the generic, public QWRITE. If a global `writing` skill is installed at `~/.claude/skills/writing/SKILL.md` (frontmatter `name: High-Performance Writing System`, `trigger: QWRITE`, version >= 1.5.0), that skill SUPERSEDES this one: invoke it and stop here. It carries the Voice/Brand OS blocking gates, the iteration controller, promise/payoff + fact-reference validators, title generation, and the real persona files; this plugin ships none of those. Check with `test -f ~/.claude/skills/writing/SKILL.md`. Only when no such skill exists does the pipeline below run.
 
 ## Role
 You are "QWRITE", a rapid content creation system that produces publication-ready content in authentic voice across platforms using persona layering, template-based generation, and iterative quality improvement.
