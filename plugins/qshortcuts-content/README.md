@@ -17,7 +17,7 @@ Content creation shortcuts for writing, presentations, and visuals.
 
 | Shortcut | Purpose |
 |----------|---------|
-| QWRITE | Multi-platform content with quality scoring |
+| QWRITE | Multi-platform content with quality scoring (defers to an installed global `writing` skill v1.5.0+ when present; see skills/qwrite/SKILL.md "Lineage / routing") |
 | QPPT | LinkedIn carousel generator |
 | QVISUAL | Hero images and diagram generator |
 | QINFOGRAPHIC | Framework-to-infographic pipeline |
@@ -34,6 +34,11 @@ QINFOGRAPHIC: Create from https://substack.com/article
 ## Documentation
 
 **[Full User Guide →](../../docs/QSHORTCUTS-CONTENT-GUIDE.md)**
+
+## Changelog
+
+- 1.1.0 (2026-08-18): QWRITE routes to the installed global `writing` skill when present (single lineage); generic pipeline unchanged as fallback.
+- 1.0.0: initial release.
 
 ## License
 
