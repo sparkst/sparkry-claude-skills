@@ -1,7 +1,7 @@
 ---
 name: qreview
 description: "This skill should be used when the user asks to \"review an artifact\", \"get multiple perspectives on\", \"multi-agent review\", \"qreview\", or wants N independent reviewers to evaluate any output (code, content, strategy, design) against requirements. Spawns 2-5 clean-context agents in parallel with max-severity deduplication."
-version: 0.2.0
+version: 0.3.0
 ---
 
 # /qreview -- Multi-Agent Artifact Review
@@ -101,8 +101,9 @@ many P0/P1 remain.
 
 ### 5. Scorecard (mandatory)
 
-Always end by running the deterministic scorecard against the run and showing it
-verbatim (pure, reproducible, no LLM):
+Run the deterministic scorecard against the run and show it verbatim (pure,
+reproducible, no LLM); it is the final OUTPUT to the user, but step 6 below still
+runs after it:
 
 ```
 python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
@@ -111,6 +112,53 @@ python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
 It reports Process, Issues Found, Token Cost (per-model USD), and Model
 Execution Time (per-agent wall-clock rolled per model + the workflow wall-clock
 total).
+
+### 6. Record QAC inputs (fail-open telemetry)
+
+Persist the run's findings so `fleet metrics --qac` prices the rework (companion
+to fleet REQ-COST-153..157; spec: `qreview/requirements.md` REQ-QAC-201/203). The
+fleet contract assigns the findings keys to the session that PRODUCED the
+findings, so the orchestrating session writes to its own key, with no `--session`
+(that flag exists for the build-supervisor's ask-size case only):
+
+```
+fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
+```
+
+- Derive the numbers mechanically from the workflow result (`{final_counts,
+  history}`), never by judgment. `--p0p1` = count of P0/P1 entries in
+  `final_findings`. `--p2p3` = the round-level significant-P2/P3 count, matching
+  qloop: `history[0].significant - (history[0].counts.P0 +
+  history[0].counts.P1)` (the returned `significant` is a per-round count that
+  always includes P0/P1, so subtracting them leaves the reviewer-flagged
+  significant P2/P3; single pass, so round 0 is the only round). Do NOT count raw
+  P2/P3 in `final_findings`: the fleet key is `p2p3_significant_findings`, and the
+  trivial cosmetic nits the engine spot-fixes are not significant. `--review-rounds`
+  = review rounds EXECUTED, for single-pass `/qreview`: 1. (The fleet key's gloss
+  is "rounds until no P0/P1"; an unconverged pass records the rounds it ran, and
+  its unresolved P0/P1 are already in `--p0p1`, so the pair reads together.)
+- The counts are per-SESSION cumulative, not per-run: the artifact key is this
+  session, and the findings keys keep the MAX across writes (monotonic floor; a
+  smaller later write does not take). If this session already recorded a review
+  (`fleet qac-inputs` with no value flags is read mode; the stored values are the
+  `qac_inputs` object, absent keys null), write the running total: stored value
+  plus this run's counts. Write once per run, after the run ends, never per round.
+- `--reset` deletes the WHOLE artifact for the key, including any `ask_*` a
+  supervisor wrote there and the `_writers` trail. It is for a typo'd count
+  only: read first, then re-supply every key it held in the same command.
+- Own key is right ONLY when this session is part of the build under review (a
+  spawned `pr<N>-reviewer` child, or a builder reviewing its own work). Rows
+  group by parent, so if this is a cockpit-class session reviewing another
+  build's work, SKIP the write entirely; do not record at your own key (recording
+  the reviewer child at spawn time, per the build-supervisor charter, is the way
+  a supervisor gets these numbers onto the right build).
+- Fail open, exactly this shape: run the command; any non-zero exit or missing
+  CLI is one printed line ("QAC inputs: skipped") and you move on. Never retry,
+  never hunt for the CLI, never ask the user; recording telemetry never blocks
+  or fails a review. Surface the outcome in the run's final output as one line
+  ("QAC inputs: wrote p0p1=N p2p3=N rounds=R at <key>", or "QAC inputs: skipped")
+  so a close-out reader can tell a write from a skip. There is no CI flag to
+  pass; the CI-red signal is read-time-computed on the fleet side.
 
 ## Severity taxonomy
 
