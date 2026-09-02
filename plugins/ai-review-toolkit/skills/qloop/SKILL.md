@@ -1,7 +1,7 @@
 ---
 name: qloop
 description: "This skill should be used when the user asks to \"review and fix\", \"iterative review\", \"review loop\", \"qloop\", \"fix all issues\", or wants an artifact reviewed, all issues fixed at all priorities, and re-reviewed until convergence. Enforces: minimum 2 rounds, fix-ALL gate, clean-context re-review, deterministic tests at every step."
-version: 0.2.0
+version: 0.3.0
 ---
 
 # /qloop -- Iterative Review-Fix-Verify Loop
@@ -106,10 +106,11 @@ Show `history` (findings-per-round) so the convergence trajectory is visible.
 run — each with the round that settled it — and is what later rounds' reviewers
 were told not to re-litigate.
 
-### 5. Scorecard (mandatory final step)
+### 5. Scorecard (mandatory)
 
 Whenever the loop ends (converged OR escalated), run the deterministic scorecard
-against the run and present it verbatim:
+against the run and present it verbatim; it is the final OUTPUT to the user, but
+step 6 below still runs after it:
 
 ```
 python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
@@ -118,6 +119,62 @@ python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
 Four sections in order: **Process**, **Issues Found**, **Token Cost** (per-model
 USD), **Model Execution Time** (per-agent wall-clock rolled per model + the
 workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
+
+### 6. Record QAC inputs (fail-open telemetry)
+
+Persist the loop's findings so `fleet metrics --qac` prices the rework (companion
+to fleet REQ-COST-153..157; spec: `qreview/requirements.md` REQ-QAC-202/203,
+shared with `/qreview`). The fleet contract assigns the findings keys to the
+session that PRODUCED the findings, so the orchestrating session writes to its
+own key, with no `--session` (that flag exists for the build-supervisor's
+ask-size case only):
+
+```
+fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
+```
+
+- Derive the numbers mechanically from the workflow result, never by judgment
+  and never by summing per-round totals (a finding that persists across rounds
+  would double-count, and an inflated write is sticky under the monotonic
+  floor): `--p0p1` = sum of `history[].newP0P1` (newly surfaced relative to the
+  previous round; a converged final round contributes 0, which is correct (note
+  a P0/P1 that regresses and recurs can be counted twice, an acceptable slight
+  over-count). `--p2p3` = max over `history` of (`significant` minus that round's
+  `counts.P0 + counts.P1`): the per-round significant count with P0/P1 removed,
+  a deterministic floor for distinct significant P2/P3 (it under-counts late
+  arrivals rather than double-counting persisters; a later, larger corrected
+  write still takes). `--review-rounds` = review rounds EXECUTED (the result's
+  `rounds`). The fleet key's gloss is "rounds until no P0/P1"; an escalated run
+  records the rounds it ran, and its unresolved P0/P1 are already in `--p0p1`,
+  so the pair reads correctly together.
+- The counts are per-SESSION cumulative, not per-run: the artifact key is this
+  session, and the findings keys keep the MAX across writes (monotonic floor; a
+  smaller later write does not take). If this session already recorded a review
+  (`fleet qac-inputs` with no value flags is read mode; the stored values are the
+  `qac_inputs` object, absent keys null), write the running total: stored value
+  plus this run's counts. Write once per run, after the loop ends (converged OR
+  escalated), never per round. EXCEPTION: a `continue` re-run of the SAME
+  artifact in the SAME session (the escalation choice in step 4) is one logical
+  review, not a second run: it re-surfaces every still-open P0/P1 as new, so do
+  NOT add its counts. Write `max(stored, this run's counts)` for the findings
+  keys and `stored + this run's rounds` for `--review-rounds`.
+- `--reset` deletes the WHOLE artifact for the key, including any `ask_*` a
+  supervisor wrote there and the `_writers` trail. It is for a typo'd count
+  only: read first, then re-supply every key it held in the same command.
+- Own key is right ONLY when this session is part of the build under review (a
+  spawned `pr<N>-reviewer` child, or a builder reviewing its own work). Rows
+  group by parent, so if this is a cockpit-class session reviewing another
+  build's work, SKIP the write entirely; do not record at your own key (a
+  supervisor gets these numbers onto the right build by spawning the reviewer
+  child, per the build-supervisor charter).
+- Fail open, exactly this shape: run the command; any non-zero exit or missing
+  CLI is one printed line ("QAC inputs: skipped") and you move on. Never retry,
+  never hunt for the CLI, never ask the user; recording telemetry never blocks
+  or fails the loop. Surface the outcome in the loop's final output as one line
+  ("QAC inputs: wrote p0p1=N p2p3=N rounds=R at <key>", or "QAC inputs: skipped")
+  so a close-out reader can tell a write from a skip. There is no CI flag to
+  pass; the CI-red signal is
+  read-time-computed on the fleet side.
 
 ## Hard rules (enforced in `review-loop.workflow.js`, not prose)
 
