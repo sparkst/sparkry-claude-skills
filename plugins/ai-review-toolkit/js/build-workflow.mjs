@@ -21,7 +21,7 @@ import { dirname, join } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 // Every generated workflow: its template, output file, and the ordered libraries
-// inlined into it. loop-engine.mjs depends on adjudication/prompts/workflow-helpers,
+// inlined into it. loop-engine.mjs depends on adjudication/prompts/workflow-helpers/stopping-rules,
 // so those precede it; pipeline-auto additionally inlines the TDD, escalation, and
 // integrator helpers it orchestrates.
 const TARGETS = [
@@ -29,7 +29,7 @@ const TARGETS = [
     name: "review-loop",
     template: "review-loop.template.js",
     output: "review-loop.workflow.js",
-    inline: ["adjudication.mjs", "prompts.mjs", "workflow-helpers.mjs", "loop-engine.mjs"],
+    inline: ["adjudication.mjs", "prompts.mjs", "workflow-helpers.mjs", "stopping-rules.mjs", "loop-engine.mjs"],
   },
   {
     name: "pipeline-auto",
@@ -39,6 +39,7 @@ const TARGETS = [
       "adjudication.mjs",
       "prompts.mjs",
       "workflow-helpers.mjs",
+      "stopping-rules.mjs",
       "loop-engine.mjs",
       "tdd-prompts.mjs",
       "escalation-broker.mjs",
