@@ -109,7 +109,9 @@ runs after it:
 python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
 ```
 
-It reports Process, Issues Found, Token Cost (per-model USD), and Model
+Its first line is the VERDICT: status, rounds used against the budget (and their
+kinds), total tokens, USD, and wall-clock, followed by the escalation reason when
+there is one. Then Process, Issues Found, Token Cost (per-model USD), and Model
 Execution Time (per-agent wall-clock rolled per model + the workflow wall-clock
 total).
 

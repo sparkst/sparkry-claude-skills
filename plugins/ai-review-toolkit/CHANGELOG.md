@@ -1,5 +1,57 @@
 # Changelog — ai-review-toolkit
 
+## 1.9.0
+
+### Added
+- **A real stopping rule for `/qloop`, and a proportional-cost path.** Motivated by
+  two runs on 2026-09-02/03. `pm-816-intake-0903` ran **19 rounds, ~3.5 hours and
+  ~5M tokens on ONE issue** and was still surfacing genuinely NEW P0s at round 18
+  until a human halted it and SPLIT the artifact; a separate groom ran **9 rounds
+  at ~11 min and ~273k tokens each** to drain six wording-level P1s, with every
+  lens re-reading the whole artifact every round. Neither is convergence: the loop
+  had no cheap round, no round scoped to what changed, and no stopping rule beyond
+  "no P0/P1 remain".
+  New pure module `js/stopping-rules.mjs` (orchestration-only, like
+  `workflow-helpers.mjs`) with `isDeltaEligible`, `detectDivergence`,
+  `summarizeBudget` and `isContractLine`. Every rule is decided in JS from facts
+  the engine holds; agents supply mechanical measurements only, never the verdict,
+  and every input that is missing or malformed fails CLOSED to the expensive path.
+  - **Deterministic before agentic.** The test/lint gate runs first, and a FAILING
+    gate claims the round: the fixer gets its mechanically-derived work list and
+    no reviewer fans out. Bounded by `maxGateRounds` (default 2 consecutive) so a
+    permanently-red suite cannot starve review, and disabled entirely in
+    single-round (`/qreview`) mode, which promises a lens pass regardless.
+  - **Proportional rounds.** After a FULL round's fix batch, a haiku probe measures
+    the diff (`git diff -U0`) and `isDeltaEligible` decides: zero P0 fixed, at most
+    20 changed lines AND at most 5% of the artifact, and no contract line touched
+    (`REQ-<CLASS>-<n>`, a line starting `Acceptance`, an `sto:` line, or any line
+    inside `### Requirement classes` / `### Cross-repo design` / `### Story points`
+    / `### Review receipt`). Round 1 is always full and a delta round never follows
+    another delta round, so drift stays one small batch behind the last
+    whole-artifact read; any finding a delta round surfaces re-opens the full loop.
+  - **Divergence halt.** Stuck detection only matches an IDENTICAL P0/P1 set, which
+    is exactly why the 19-round run slipped past it. After 6 valid rounds, if each
+    of the last 3 surfaced at least one NEW P0/P1 and that count did not decay
+    against the 3 before, the run escalates with a SPLIT recommendation rather than
+    spending the rest of its budget.
+  - **The budget is spent in VALID rounds.** Round reports carry `valid` (set via
+    the new `validateRound` hook) plus `reviewers_requested`/`reviewers_returned`.
+    An invalid round consumes no budget and fills no divergence window, so a flaky
+    panel cannot exhaust the budget or fabricate a divergence verdict; exhausting
+    `maxInvalidRounds` escalates on the ENVIRONMENT, naming it. This is the seam
+    the reviewer-quorum gate (#43) plugs into.
+  - **Cost in the verdict.** `runLoop` returns `budget` (`maxRounds`, `roundsRun`,
+    `validRounds`, `invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`,
+    `wallClockMs`) and each `history` entry carries `kind`, `ms`, `delta_reason`
+    and the reviewer counts. `scorecard.py` renders a first-line
+    `VERDICT: <status> - N of M rounds (...) - tokens - $ - wall-clock`, and every
+    round logs its budget position live in `/workflows`.
+  New config: `maxGateRounds`, `deltaCaps`, `divergence`, `maxInvalidRounds`,
+  `validateRound`. All default to the behaviour above; a knob widens or tightens a
+  bound, it never switches a rule off. 38 new tests (21 pure + 17 through
+  `runLoop`) plus 6 scorecard tests. Closes #45; the engine half of
+  sparkst/claude-skills#82.
+
 ## 1.7.0
 
 ### Added

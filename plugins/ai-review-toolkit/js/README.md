@@ -13,6 +13,12 @@ model tiering — stays deterministic in-code rather than relying on an LLM agen
 - **`prompts.mjs`** — reviewer/fixer prompt construction:
   `formatFindings`, `buildReviewerPrompt`, `buildFixerPrompt` (pure; the workflow
   reads files and passes content in).
+- **`workflow-helpers.mjs`** — orchestration-only helpers with no Python oracle:
+  `ensureUniqueIds` plus the adjudicated-findings ledger.
+- **`stopping-rules.mjs`** — orchestration-only, no Python oracle: the deterministic
+  stopping rules (`isContractLine`, `isDeltaEligible`, `detectDivergence`,
+  `summarizeBudget`). The engine decides when the loop stops; agents supply
+  mechanical measurements only, and anything missing fails CLOSED to a full round.
 
 ## The Workflow script
 

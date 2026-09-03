@@ -694,3 +694,90 @@ class TestCLIWorkflow:
         out = capsys.readouterr().out
         assert "Token" in out
         assert "workflow total (wall-clock)" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Verdict line (claude-skills#82): rounds, tokens and wall-clock travel WITH the
+# outcome, so a 19-round run is obvious to whoever reads the verdict.
+# ---------------------------------------------------------------------------
+
+def _wf_meta(result, duration_ms=2_530_000):
+    return {"runId": "wf_x", "durationMs": duration_ms, "agentCount": 9,
+            "status": "completed", "result": result}
+
+
+def _agents_for_cost():
+    return {"a1": [_agent_line("claude-opus-4-8", "2026-07-01T01:00:00Z", inp=1_000_000, out=20_000),
+                   _agent_line("claude-opus-4-8", "2026-07-01T01:00:04Z", out=1)]}
+
+
+DIVERGED = {
+    "outcome": {"status": "escalated", "reason": "Diverging: rounds 4-6 each surfaced a NEW P0/P1. SPLIT the artifact."},
+    "rounds": 6,
+    "budget": {"maxRounds": 12, "roundsRun": 6, "validRounds": 6, "invalidRounds": 0,
+               "fullRounds": 4, "deltaRounds": 1, "gateRounds": 1,
+               "maxInvalidRounds": 12, "hardCap": 24, "wallClockMs": 2_530_000},
+    "history": [{"round": 1, "reviewers_requested": 4, "reviewers_returned": 4}],
+}
+
+
+class TestVerdict:
+    def test_verdict_section_carries_rounds_tokens_and_wall_clock(self):
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(DIVERGED))
+        report = build_scorecard({}, agg, load_pricing())
+        v = report["verdict"]
+        assert v["status"] == "ESCALATED"
+        assert v["rounds"] == 6
+        assert v["max_rounds"] == 12
+        assert v["full_rounds"] == 4
+        assert v["delta_rounds"] == 1
+        assert v["gate_rounds"] == 1
+        assert v["tokens"] == 1_020_001
+        assert v["wall_clock_ms"] == 2_530_000
+        assert v["cost_usd"] > 0
+        assert "SPLIT" in v["reason"]
+
+    def test_verdict_line_is_rendered_at_the_top(self):
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(DIVERGED))
+        md = render_markdown(build_scorecard({}, agg, load_pricing()))
+        head = md.split("\n\n")[0] + "\n" + md.split("\n\n")[1]
+        assert "VERDICT: ESCALATED" in head
+        assert "6 of 12 rounds" in md
+        assert "4 full" in md and "1 delta" in md and "1 gate" in md
+        assert "1,020,001 tokens" in md
+        assert "42m" in md  # 2,530,000 ms
+        assert "SPLIT" in md
+
+    def test_converged_verdict_reads_converged(self):
+        result = {"outcome": {"status": "converged", "message": "No blocking issues"}, "rounds": 3,
+                  "budget": {"maxRounds": 5, "roundsRun": 3, "validRounds": 3, "invalidRounds": 0,
+                             "fullRounds": 2, "deltaRounds": 1, "gateRounds": 0}}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        md = render_markdown(build_scorecard({}, agg, load_pricing()))
+        assert "VERDICT: CONVERGED" in md
+        assert "3 of 5 rounds" in md
+
+    def test_invalid_rounds_are_named_in_the_verdict(self):
+        result = {"outcome": {"status": "escalated", "reason": "Environment: 3 of 5 rounds..."}, "rounds": 5,
+                  "budget": {"maxRounds": 5, "roundsRun": 5, "validRounds": 2, "invalidRounds": 3,
+                             "fullRounds": 2, "deltaRounds": 0, "gateRounds": 0}}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        report = build_scorecard({}, agg, load_pricing())
+        assert report["verdict"]["invalid_rounds"] == 3
+        assert "3 invalid" in render_markdown(report)
+
+    def test_verdict_still_renders_for_a_pre_82_run_with_no_budget(self):
+        result = {"outcome": {"status": "converged"}, "rounds": 2}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        report = build_scorecard({}, agg, load_pricing())
+        v = report["verdict"]
+        assert v["rounds"] == 2 and v["max_rounds"] is None
+        md = render_markdown(report)
+        assert "VERDICT: CONVERGED" in md
+        assert "2 rounds" in md
+
+    def test_no_verdict_section_without_a_workflow_result(self):
+        agg = aggregate_workflow(_agents_for_cost(), {"runId": "wf_x", "durationMs": 1000})
+        report = build_scorecard({}, agg, load_pricing())
+        assert "verdict" not in report
+        assert "VERDICT" not in render_markdown(report)

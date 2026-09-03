@@ -45,6 +45,9 @@ function makeCtx(rounds, opts = {}) {
       if (label.startsWith("spotfix:")) return { resolutions: plan.spotResolutions ?? [R("spot")], edited_files: plan.spotEditedFiles ?? [] };
       if (label.startsWith("spotcheck:")) return { all_applied: !opts.notApplied, not_applied: opts.notApplied ?? [] };
       if (label.startsWith("fix:")) return { resolutions: plan.resolutions ?? [], edited_files: plan.editedFiles ?? [] };
+      // The diff probe (#82). No `plan.diff` → the probe came back unusable, which
+      // fails CLOSED to a full round, so every pre-existing test keeps its shape.
+      if (label.startsWith("diff:")) return plan.diff ?? null;
       throw new Error("unexpected agent label: " + label);
     },
     parallel: (thunks) => Promise.all(thunks.map((t) => t())),
@@ -447,4 +450,271 @@ test("LEDGER-014: round 2 gets NO standing rule — its ledger is always empty",
     /ADJUDICATED-FINDINGS LEDGER/,
     "round 3 does have one, so the rule appears",
   );
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// claude-skills#82 / this repo #45 — proportional cost and a real stopping rule.
+//
+// Every assertion below is an acceptance criterion from #82, driven end to end
+// through runLoop with mocked agents.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// A diff probe payload: `n` touched lines in an artifact of `lines` lines.
+const DIFF = (n, lines = 400, section = "") => ({
+  artifact_lines: lines,
+  touched: Array.from({ length: n }, (_, i) => ({ text: `reworded phrase ${i}`, section })),
+});
+const diffLabels = (ctx) => ctx.calls.filter((l) => l.startsWith("diff:"));
+
+// ── Deterministic checks run BEFORE agentic ones ─────────────────────────────
+
+test("STOP-100: a failing test gate claims the round — zero reviewer fan-out, straight to the fixer", async () => {
+  const ctx = makeCtx([
+    { testFailures: [F("P0-t01", "P0", "test_pricing fails")], resolutions: [R("P0-t01")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(reviewersInRound(ctx, 1).length, 0, "a defect a test can name must not cost a reviewer round");
+  assert.equal(labelsWith(ctx, "fix:r1").length, 1, "the fixer still gets the gate's work list");
+  assert.equal(reviewersInRound(ctx, 2).length, 2, "the gate passes in round 2, so the lenses run");
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.budget.gateRounds, 1);
+  assert.equal(out.budget.fullRounds, 1);
+  assert.equal(out.history[0].kind, "gate");
+});
+
+test("STOP-101: gate-only rounds are bounded — a third failing gate reviews anyway", async () => {
+  const ctx = makeCtx([
+    { testFailures: [F("P0-t01", "P0", "fail A")], resolutions: [R("P0-t01")] },
+    { testFailures: [F("P0-t02", "P0", "fail B")], resolutions: [R("P0-t02")] },
+    { testFailures: [F("P0-t03", "P0", "fail C")], findings: [], resolutions: [R("P0-t03")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 6 }, ctx);
+  assert.equal(reviewersInRound(ctx, 1).length, 0);
+  assert.equal(reviewersInRound(ctx, 2).length, 0);
+  assert.equal(reviewersInRound(ctx, 3).length, 2, "a permanently-red suite must not starve review");
+  assert.equal(out.budget.gateRounds, 2, "maxGateRounds caps consecutive gate rounds at 2");
+  assert.equal(out.outcome.status, "converged");
+});
+
+test("STOP-102: maxGateRounds:0 disables the short-circuit entirely", async () => {
+  const ctx = makeCtx([
+    { testFailures: [F("P0-t01", "P0", "fail A")], findings: [], resolutions: [R("P0-t01")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxGateRounds: 0 }, ctx);
+  assert.equal(reviewersInRound(ctx, 1).length, 2, "the lenses run alongside the failing gate, as before");
+  assert.equal(out.budget.gateRounds, 0);
+});
+
+// ── Proportional rounds: a small contract-safe batch buys a delta verifier ────
+
+test("STOP-110: a small, contract-safe P1 batch is verified WITHOUT a full all-lens re-read", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P1-001", "P1", "Awkward wording")], resolutions: [R("P1-001")], diff: DIFF(3) },
+    { verifyFindings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(labelsWith(ctx, "verify:r2").length, 1, "round 2 is a single delta verifier");
+  assert.equal(reviewersInRound(ctx, 2).length, 0, "no full fan-out for a wording fix");
+  assert.equal(labelsWith(ctx, "tests:r2").length, 0, "no test gate in a delta round");
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.budget.deltaRounds, 1);
+  assert.equal(out.history[1].delta_reason, "eligible");
+});
+
+test("STOP-111: the SAME batch touching an acceptance line earns a full round", async () => {
+  const ctx = makeCtx([
+    {
+      findings: [F("P1-001", "P1", "Awkward wording")],
+      resolutions: [R("P1-001")],
+      diff: { artifact_lines: 400, touched: [{ text: "  - Acceptance: the gate fails", section: "" }] },
+    },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(reviewersInRound(ctx, 2).length, 2, "acceptance text is the contract a builder implements from");
+  assert.equal(labelsWith(ctx, "verify:").length, 0);
+  assert.equal(out.history[1].delta_reason, "contract-line:acceptance");
+  assert.equal(out.budget.deltaRounds, 0);
+});
+
+test("STOP-112: a 25-line batch is over the cap and earns a full round", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P1-001", "P1", "Restructure the section")], resolutions: [R("P1-001")], diff: DIFF(25, 10000) },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(reviewersInRound(ctx, 2).length, 2);
+  assert.equal(out.history[1].delta_reason, "size-lines");
+});
+
+test("STOP-113: the bookend rule — delta, full, never delta, delta", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P1-001", "P1", "Wording A")], resolutions: [R("P1-001")], diff: DIFF(3) },
+    { verifyFindings: [F("P1-002", "P1", "Wording B")], resolutions: [R("P1-002")], diff: DIFF(3) },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(labelsWith(ctx, "verify:r2").length, 1, "round 2 is delta");
+  assert.equal(diffLabels(ctx).includes("diff:r2"), false, "a delta round's batch is never even measured");
+  assert.equal(reviewersInRound(ctx, 3).length, 2, "round 3 is FULL — drift stays one small batch deep");
+  assert.equal(out.history.map((h) => h.kind).join(","), "full,delta,full");
+});
+
+test("STOP-114: a delta round that surfaces ANY finding re-opens the full loop", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P1-001", "P1", "Wording")], resolutions: [R("P1-001")], diff: DIFF(3) },
+    { verifyFindings: [F("P3-001", "P3", "A nit the verifier caught")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.rounds, 3, "the delta round must not converge on a finding of any severity");
+  assert.equal(reviewersInRound(ctx, 3).length, 2);
+  assert.equal(out.outcome.status, "converged");
+});
+
+test("STOP-115: a batch containing a P0 is disqualified in JS — the probe never spawns", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Real bug")], resolutions: [R("P0-001")], diff: DIFF(3) },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.deepEqual(diffLabels(ctx), [], "predicate 1 is checked before any agent is paid for");
+  assert.equal(reviewersInRound(ctx, 2).length, 2);
+  assert.equal(out.history[1].delta_reason, "p0-in-batch");
+});
+
+test("STOP-116: an unusable diff probe fails closed to a full round", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P1-001", "P1", "Wording")], resolutions: [R("P1-001")] }, // no `diff` → probe returns null
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.deepEqual(diffLabels(ctx), ["diff:r1"], "the probe ran");
+  assert.equal(reviewersInRound(ctx, 2).length, 2, "and its silence bought nothing");
+  assert.equal(out.history[1].delta_reason, "probe-unavailable");
+});
+
+// ── The stopping rule: divergence halts instead of running the budget out ─────
+
+test("STOP-120: the 19-round shape halts at the warmup and escalates with SPLIT", async () => {
+  // pm-816-intake-0903: a genuinely NEW P0 every round, so stuck detection (which
+  // matches an IDENTICAL P0/P1 set) never fired and the run reached 19 rounds.
+  const rounds = Array.from({ length: 12 }, (_, i) => ({
+    findings: [F("P0-001", "P0", `Bug ${i + 1}`)],
+    resolutions: [R("P0-001")],
+  }));
+  const ctx = makeCtx(rounds);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 12 }, ctx);
+  assert.equal(out.outcome.status, "escalated");
+  assert.match(out.outcome.reason, /SPLIT/);
+  assert.equal(out.rounds, 6, "halts at the warmup, not at the 12-round budget");
+  assert.equal(out.outcome.divergence.diverging, true);
+  assert.equal(labelsWith(ctx, "fix:r6").length, 0, "a diverging round does not also pay for a fix batch");
+});
+
+test("STOP-121: a decaying finding rate is left alone to converge", async () => {
+  const many = (n, tag) => ({
+    findings: Array.from({ length: n }, (_, i) => F(`P0-00${i + 1}`, "P0", `${tag}-${i}`)),
+    resolutions: Array.from({ length: n }, (_, i) => R(`P0-00${i + 1}`)),
+  });
+  const ctx = makeCtx([many(3, "a"), many(3, "b"), many(3, "c"), many(1, "d"), many(1, "e"), many(1, "f"), { findings: [] }]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 12 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.rounds, 7, "3,3,3 then 1,1,1 is decay — the halt must not fire on it");
+});
+
+// ── #81 coordination: an INVALID round is not progress ───────────────────────
+
+test("STOP-125: invalid rounds spend no round budget (#81)", async () => {
+  const rounds = Array.from({ length: 8 }, (_, i) => ({
+    findings: [F("P0-001", "P0", `Bug ${i + 1}`)],
+    resolutions: [R("P0-001")],
+  }));
+  const ctx = makeCtx(rounds);
+  const out = await runLoop(
+    {
+      artifact: "a", requirements: "r", team: TEAM, threshold: 0,
+      maxRounds: 3, maxInvalidRounds: 5,
+      // Stand in for the quorum gate: rounds 1 and 2 lost their reviewer panel.
+      validateRound: (rr) => rr.round > 2,
+    },
+    ctx,
+  );
+  assert.equal(out.outcome.status, "escalated");
+  assert.match(out.outcome.reason, /Max rounds \(3\)/);
+  assert.equal(out.rounds, 5, "3 valid rounds were still owed after 2 dead ones");
+  assert.equal(out.budget.validRounds, 3);
+  assert.equal(out.budget.invalidRounds, 2);
+});
+
+test("STOP-126: too many invalid rounds escalate on the ENVIRONMENT, not the artifact (#81)", async () => {
+  const rounds = Array.from({ length: 8 }, (_, i) => ({
+    findings: [F("P0-001", "P0", `Bug ${i + 1}`)],
+    resolutions: [R("P0-001")],
+  }));
+  const ctx = makeCtx(rounds);
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 2, validateRound: () => false },
+    ctx,
+  );
+  assert.equal(out.outcome.status, "escalated");
+  assert.match(out.outcome.reason, /Environment/);
+  assert.match(out.outcome.reason, /proves nothing about the artifact/);
+  assert.equal(out.budget.validRounds, 0, "a flaky panel must never read as convergence OR as a spent budget");
+});
+
+test("STOP-127: an invalid round cannot fabricate divergence (#81)", async () => {
+  const rounds = Array.from({ length: 10 }, (_, i) => ({
+    findings: [F("P0-001", "P0", `Bug ${i + 1}`)],
+    resolutions: [R("P0-001")],
+  }));
+  const ctx = makeCtx(rounds);
+  // Only rounds 1,3,5,7 are valid, so after 7 rounds just 4 valid ones exist —
+  // one short of the 6-round warmup, so the halt must stay silent.
+  const out = await runLoop(
+    {
+      artifact: "a", requirements: "r", team: TEAM, threshold: 0,
+      maxRounds: 4, maxInvalidRounds: 9, validateRound: (rr) => rr.round % 2 === 1,
+    },
+    ctx,
+  );
+  assert.equal(out.outcome.status, "escalated");
+  assert.match(out.outcome.reason, /Max rounds \(4\)/, "the budget ran out; divergence never fired");
+});
+
+// ── Cost visible in the verdict ──────────────────────────────────────────────
+
+test("STOP-130: the verdict carries rounds by kind, reviewer counts and wall clock", async () => {
+  const ctx = makeCtx([
+    { testFailures: [F("P1-t01", "P1", "ruff: unused import")], resolutions: [R("P1-t01")] },
+    { findings: [F("P1-001", "P1", "Wording")], resolutions: [R("P1-001")], diff: DIFF(3) },
+    { verifyFindings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.deepEqual(
+    { ...out.budget, wallClockMs: undefined },
+    {
+      maxRounds: 5, roundsRun: 3, validRounds: 3, invalidRounds: 0,
+      fullRounds: 1, deltaRounds: 1, gateRounds: 1,
+      maxInvalidRounds: 5, hardCap: 10, wallClockMs: undefined,
+    },
+  );
+  assert.equal(typeof out.budget.wallClockMs, "number");
+  assert.ok(out.history.every((h) => typeof h.ms === "number"));
+  // The reviewer counts the quorum gate needs are recorded on every round (#81).
+  assert.deepEqual(out.history.map((h) => `${h.reviewers_returned}/${h.reviewers_requested}`), ["0/0", "2/2", "0/0"]);
+});
+
+test("STOP-103: single-round (qreview) mode never lets the gate claim the round", async () => {
+  // qreview promises one clean-context diagnose pass. A red suite must not turn
+  // that into "here are your test failures, no reviewer read the artifact".
+  const ctx = makeCtx([{ testFailures: [F("P0-t01", "P0", "suite is red")], findings: [F("P1-001", "P1", "Real finding")] }]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, rounds: 1 }, ctx);
+  assert.equal(reviewersInRound(ctx, 1).length, 2, "the lenses run even with a failing gate");
+  assert.equal(out.budget.gateRounds, 0);
+  assert.equal(out.final_counts.P1, 1, "the reviewer's finding is in the result");
 });

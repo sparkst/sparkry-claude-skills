@@ -1,7 +1,7 @@
 ---
 name: qloop
 description: "This skill should be used when the user asks to \"review and fix\", \"iterative review\", \"review loop\", \"qloop\", \"fix all issues\", or wants an artifact reviewed, all issues fixed at all priorities, and re-reviewed until convergence. Enforces: minimum 2 rounds, fix-ALL gate, clean-context re-review, deterministic tests at every step."
-version: 0.3.0
+version: 0.4.0
 ---
 
 # /qloop -- Iterative Review-Fix-Verify Loop
@@ -80,6 +80,14 @@ Invoke the **Workflow** tool with that `scriptPath` and:
 }
 ```
 
+The stopping rules below all have engine defaults; pass a knob only to widen or
+tighten a specific bound, never to switch a rule off. `maxGateRounds` (default 2)
+caps consecutive deterministic-gate-only rounds; `deltaCaps`
+(`{maxChangedLines: 20, maxChangedFraction: 0.05}`) sizes a proportional round;
+`divergence` (`{window: 3, warmup: 6}`) tunes the non-convergence halt;
+`maxInvalidRounds` (default `maxRounds`) bounds rounds lost to a dead reviewer
+panel.
+
 Omit `rounds` (or set > 1) so the loop runs until-converged. The Workflow runs
 unattended to convergence, streaming per-round progress via `log()` (watchable
 with `/workflows`). It hard-stops — max-rounds or stuck detection — and returns
@@ -99,7 +107,22 @@ The Workflow returns
 - `outcome.status === "escalated"` — present `outcome.reason` and `outcome.unresolved`
   (P0/P1 findings), then ask the user to choose: continue (raise `maxRounds` and
   re-run), accept current state, or abandon. Escalation happens on max-rounds,
-  stuck detection (identical P0/P1 across two rounds), or a failed fix-ALL gate.
+  stuck detection (identical P0/P1 across two rounds), a failed fix-ALL gate,
+  DIVERGENCE, or too many invalid rounds.
+
+  **A divergence escalation is not a "raise maxRounds" case.** `outcome.divergence`
+  is present and the reason names SPLIT: the finding rate is not decaying, so the
+  artifact is under-specified or too large for one loop. Re-running it with a
+  bigger budget reproduces the 19-round, ~5M-token run this rule exists to stop.
+  Split it, re-scope it, or hand it back. An ENVIRONMENT escalation (too many
+  rounds without a valid reviewer panel) says nothing about the artifact at all:
+  fix the environment and re-run.
+
+The result also carries `budget` (`maxRounds`, `roundsRun`, `validRounds`,
+`invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `wallClockMs`), and
+each `history` entry carries its `kind` (`full`/`delta`/`gate`), `ms`,
+`delta_reason` and `reviewers_returned`/`reviewers_requested`. Present the budget
+line with the outcome; it is what makes an expensive run visible.
 
 Show `history` (findings-per-round) so the convergence trajectory is visible.
 `ledger` (returned alongside it) lists the findings adjudicated across the whole
@@ -116,9 +139,11 @@ step 6 below still runs after it:
 python3 <tools>/scorecard.py --workflow <session>/workflows/<runId>.json
 ```
 
-Four sections in order: **Process**, **Issues Found**, **Token Cost** (per-model
-USD), **Model Execution Time** (per-agent wall-clock rolled per model + the
-workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
+A **VERDICT** line first (status, rounds used against the budget and their kinds,
+total tokens, USD, wall-clock, plus the escalation reason when there is one),
+then four sections in order: **Process**, **Issues Found**, **Token Cost**
+(per-model USD), **Model Execution Time** (per-agent wall-clock rolled per model
++ the workflow wall-clock total). Pass `--pricing PATH` to override USD rates.
 
 ### 6. Record QAC inputs (fail-open telemetry)
 
@@ -194,6 +219,40 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
 - **Stuck detection.** Identical P0/P1 findings across two consecutive rounds
   auto-escalate — two failed fix attempts on the same issue means the approach
   is wrong.
+- **Deterministic checks run BEFORE agentic ones.** The test/lint gate runs first
+  every round, and when it FAILS it claims that round on its own: the fixer gets
+  the gate's mechanically-derived work list and no reviewer fans out. A defect a
+  test, a linter or a schema check can name must never cost a reviewer round.
+  Bounded by `maxGateRounds` (default 2 consecutive) so a permanently-red suite
+  cannot starve review of the rest of the artifact.
+- **Proportional rounds: a small, contract-safe fix batch buys ONE cheap
+  verifier, not a full all-lens re-read.** After a full round's fix batch a haiku
+  probe MEASURES the diff and the engine decides in JS. Delta-eligible only when
+  all four hold: the batch fixed zero P0; it changed at most 20 lines AND at most
+  5% of the artifact (both, not either); it touched no contract line (any
+  `REQ-<CLASS>-<n>`, any line whose text starts `Acceptance`, any `sto:` line, and
+  every line inside `### Requirement classes`, `### Cross-repo design`,
+  `### Story points` or `### Review receipt`); and the bookends hold, round 1 is
+  always full and a delta round never follows another delta round, so drift stays
+  one small batch behind the last whole-artifact read. Any finding a delta round
+  surfaces, at any severity, re-opens the full loop. Anything the probe cannot
+  establish fails CLOSED to a full round.
+- **Divergence halt: a loop that is not converging STOPS and says SPLIT.** Stuck
+  detection only matches an IDENTICAL P0/P1 set, so a run surfacing genuinely NEW
+  P0s every round slips straight past it: `pm-816-intake-0903` ran 19 rounds,
+  ~3.5 hours and ~5M tokens on one issue and was still finding P0s at round 18
+  until a human halted it. So: after 6 valid rounds, if each of the last 3
+  surfaced at least one NEW P0/P1 and that count did not decay against the 3
+  before them, the run escalates. It is not approaching a fixed point; a bigger
+  budget will not change that.
+- **The round budget is spent in VALID rounds only.** A round whose reviewer panel
+  did not reach quorum is not evidence, so it consumes no budget and fills no
+  divergence window. Running out of THOSE escalates on the environment, naming it,
+  rather than blaming the artifact.
+- **Cost travels with the verdict.** The scorecard's first line is
+  `VERDICT: <status> - N of M rounds (x full, y delta, z gate) - tokens - $ -
+  wall-clock`, and every round logs its budget position live in `/workflows`, so a
+  19-round run is obvious WHILE it happens rather than afterwards.
 - **Max-severity wins / clean context per reviewer per round / pre-existing
   issues are in-scope** — same as `/qreview`, enforced by the shared JS
   adjudication (drift-locked against the Python oracle in CI).

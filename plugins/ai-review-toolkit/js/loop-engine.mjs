@@ -7,9 +7,9 @@
 // unit-testable function with no hidden dependency on the sandbox runtime.
 //
 // These imports are STRIPPED at build time — build-workflow.mjs inlines
-// adjudication.mjs / prompts.mjs / workflow-helpers.mjs / this file into one
-// scope, so the bare references resolve there. The imports exist only for
-// standalone node use + loop-engine.test.mjs.
+// adjudication.mjs / prompts.mjs / workflow-helpers.mjs / stopping-rules.mjs /
+// this file into one scope, so the bare references resolve there. The imports
+// exist only for standalone node use + loop-engine.test.mjs.
 
 import {
   synthesizeFindings,
@@ -20,6 +20,12 @@ import {
 } from "./adjudication.mjs";
 import { formatFindings, REVIEWER_OUTPUT_INSTRUCTIONS } from "./prompts.mjs";
 import { ensureUniqueIds, adjudicateRound, mergeLedger, renderLedger } from "./workflow-helpers.mjs";
+import {
+  DELTA_DEFAULTS,
+  isDeltaEligible,
+  detectDivergence,
+  summarizeBudget,
+} from "./stopping-rules.mjs";
 
 // ---------------------------------------------------------------------------
 // Structured-output schemas (agents are forced to return these shapes)
@@ -120,6 +126,32 @@ const TEST_SCHEMA = {
         additionalProperties: false,
         required: ['id', 'severity', 'title', 'requirement', 'finding', 'recommendation', 'source'],
         properties: FINDING_PROPS,
+      },
+    },
+  },
+}
+
+// The diff probe returns MEASUREMENTS ONLY. Every risk judgment on this payload
+// is made by isDeltaEligible() in JS, so the model that would like to skip a
+// round never gets to decide whether it may.
+const DIFF_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['artifact_lines', 'touched'],
+  properties: {
+    artifact_lines: { type: 'number', description: 'total line count of the artifact after the fix' },
+    truncated: { type: 'boolean', description: 'true if the diff exceeded the cap or could not be read' },
+    touched: {
+      type: 'array',
+      description: 'one entry per added-or-removed line',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['text'],
+        properties: {
+          text: { type: 'string', description: 'the line content, without the leading + or -' },
+          section: { type: 'string', description: 'nearest preceding heading line, or empty' },
+        },
       },
     },
   },
@@ -301,6 +333,29 @@ function testGatePrompt(artifact, roundNum, carriedCommand) {
   return parts.join(' ')
 }
 
+// Diff probe for the proportional-round predicate (#82 / #45). Deliberately
+// asks for MEASUREMENT and nothing else: the four eligibility predicates are
+// applied by isDeltaEligible() in JS. Anything malformed or missing fails closed
+// to a full round, so a lazy or confused probe costs a round, never a review.
+function diffProbePrompt(artifact, cap) {
+  return [
+    `Mechanical measurement only. Do NOT review, judge, fix or comment on anything at ${artifact}.`,
+    '',
+    `1. Run: git diff -U0 -- ${artifact}`,
+    `   If ${artifact} is untracked, git is unavailable, or the command fails, return`,
+    '   {"artifact_lines": 0, "touched": [], "truncated": true} and stop.',
+    `2. Count the total number of lines in the CURRENT ${artifact} → artifact_lines.`,
+    '3. For EVERY added (+) or removed (-) line in that diff, emit one entry in "touched":',
+    '   - "text": the line content with the leading + or - removed, otherwise verbatim.',
+    `   - "section": the exact text of the nearest preceding line in the CURRENT ${artifact}`,
+    '     that starts with "#" (a markdown heading), or "" if there is none.',
+    `4. If there are more than ${cap} such lines, stop counting and return`,
+    `   {"artifact_lines": <count>, "touched": [], "truncated": true}.`,
+    '',
+    'Report facts. Make no assessment of size, risk, or importance — that is decided elsewhere.',
+  ].join('\n')
+}
+
 // Single-verifier prompt for the proportional verification round (OPT-009): a
 // clean round + no fixer edits buys a cheap "still clean?" check instead of a
 // full N-reviewer fan-out. ANY real finding it returns re-opens the full loop.
@@ -438,8 +493,22 @@ function isSignificant(f, prevTitles, flaggedTitles) {
  *     canonical tier + opus cap into agentDef.model; this is a forwarding pass.
  *   skipTests — optional; skip the per-round test gate for artifacts with no
  *     executable test surface, e.g. documents (OPT-007).
+ *   maxGateRounds — optional (default 2); how many CONSECUTIVE rounds the
+ *     deterministic test/lint gate may claim on its own before a full reviewer
+ *     round runs anyway, so gate thrash can never starve review (#82).
+ *   deltaCaps — optional {maxChangedLines, maxChangedFraction}; overrides for the
+ *     proportional-round size predicate.
+ *   divergence — optional {window, warmup}; overrides for the divergence halt.
+ *   maxInvalidRounds — optional (default maxRounds); how many rounds that did
+ *     not count toward the budget (below reviewer quorum, #81) the loop tolerates
+ *     before escalating on the ENVIRONMENT rather than on the artifact.
+ *   validateRound — optional (report) => boolean; returning false marks a round
+ *     INVALID, so it spends no round budget and fills no divergence window. This
+ *     is the seam the reviewer-quorum gate (#81 / this repo #43) plugs into; the
+ *     report it receives already carries reviewers_requested/reviewers_returned.
+ *     Default: every round is valid.
  * @param ctx { agent, parallel, phase, log } — the injected Workflow globals.
- * @returns { outcome, rounds, final_findings, final_counts, history }
+ * @returns { outcome, rounds, budget, final_findings, final_counts, history }
  */
 export async function runLoop(config, ctx) {
   const { agent, parallel, phase, log } = ctx
@@ -452,11 +521,23 @@ export async function runLoop(config, ctx) {
     maxRounds: maxRoundsArg,
     complexity = null,
     skipTests = false,
+    maxGateRounds = 2,
+    deltaCaps = null,
+    divergence = null,
+    maxInvalidRounds: maxInvalidRoundsArg,
+    validateRound = null,
   } = config
 
   const singleRound = rounds === 1
   const minRounds = singleRound ? 1 : 2
   const maxRounds = Math.max(maxRoundsArg ?? (singleRound ? 1 : 5), minRounds)
+  // The round BUDGET is spent in valid rounds only (#81), so the `for` bound must
+  // be an absolute ceiling or a reviewer panel that keeps dying would spin forever.
+  const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)
+  const hardCap = maxRounds + maxInvalidRounds
+  const deltaOpts = { ...DELTA_DEFAULTS, ...(deltaCaps || {}) }
+  const now = () => (typeof Date !== 'undefined' && Date.now ? Date.now() : 0)
+  const startedAt = now()
 
   if (!artifact || !requirements) throw new Error('runLoop requires artifact and requirements')
   if (team.length < 2 && !singleRound) throw new Error('runLoop requires at least 2 reviewers (team)')
@@ -476,7 +557,10 @@ export async function runLoop(config, ctx) {
   // State for the waste-cutting optimizations.
   let fixerEverRan = false        // full re-review stays mandatory after any fix (OPT-009)
   let lastRoundConverged = false  // was the previous round clean (0 significant)?
-  let proportionalUsed = false    // the cheap verification round fires at most once
+  let proportionalUsed = false    // the no-fixer-yet shortcut (OPT-009) fires at most once
+  let lastRoundKind = null        // 'full' | 'delta' | 'gate' — the bookend rule reads this
+  let deltaEligibility = null     // isDeltaEligible() verdict on the LAST fix batch (#82/#45)
+  let consecutiveGateRounds = 0   // bound on deterministic-gate-only rounds (#82)
   let carriedTestCommand = null   // reuse round 1's test command in later rounds (OPT-007)
   let historyPath = null          // round r-1's externalized history file, if written (OPT-015)
   const historyPaths = []         // every history file written, for end-of-loop cleanup
@@ -505,17 +589,74 @@ export async function runLoop(config, ctx) {
     return null
   }
 
-  for (let r = 1; r <= maxRounds; r++) {
-    // OPT-009: a clean prior round with no fixer edits buys only a single cheap
-    // verifier this round (still honoring the min-2-rounds floor), not a full
-    // fan-out. Fires at most once; any finding it surfaces re-opens the full loop.
-    const proportional = !proportionalUsed && r > 1 && lastRoundConverged && !fixerEverRan
+  // Fan out N clean-context reviewers, each on its resolved model (OPT-002).
+  // team-selector.py already bakes the per-reviewer tier (with its domain-score
+  // gates + opus-seat cap) into agentDef.model; we route through
+  // resolveReviewerModel forwarding whatever escalation/high-stakes flags the
+  // team object carries (default false → identity for the canonical path, so the
+  // Python cap is never overridden), which also enforces tiering for a caller
+  // that supplies flags but skipped team-selector.
+  //
+  // Returns the per-reviewer findings lists PLUS how many reviewers were asked
+  // for versus how many came back. The counts are recorded on every round report
+  // and in the verdict; deciding that a shortfall makes the round INVALID is the
+  // quorum gate (#81 / this repo #43), which flips `valid` on the round report.
+  // Everything downstream of that flag — the round budget and the divergence
+  // window — already ignores invalid rounds.
+  async function fanOutReviewers(r, testSummary) {
+    const reviews = await parallel(
+      team.map((agentDef) => () =>
+        agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath, ledger), {
+          label: `review:${agentDef.name}:r${r}`,
+          phase: `Round ${r}`,
+          model: resolveReviewerModel(agentDef, resolverComplexity, {
+            escalationEligible: agentDef.escalation_eligible ?? agentDef.escalationEligible ?? false,
+            highStakes: agentDef.high_stakes ?? agentDef.highStakes ?? false,
+          }) || agentDef.model || 'sonnet',
+          schema: FINDINGS_SCHEMA,
+        }),
+      ),
+    )
+    const returned = reviews.filter(Boolean)
+    return { lists: returned.map((x) => x.findings || []), requested: team.length, returned: returned.length }
+  }
+
+  for (let r = 1; r <= hardCap; r++) {
+    const roundStartedAt = now()
+    let reviewersRequested = 0
+    let reviewersReturned = 0
+
+    // ── Is this round PROPORTIONAL (one cheap verifier) or FULL (every lens)? ──
+    //
+    // Two routes in, both bounded by the same bookend rule: round 1 is always
+    // full, and a delta round may only follow a FULL one — never another delta.
+    // That keeps drift to at most one small, contract-safe batch behind the last
+    // whole-artifact read.
+    //
+    //   (a) OPT-009 — the prior round was clean and the fixer has never run, so
+    //       nothing has changed since a full read. Fires at most once.
+    //   (b) #82/#45 — the prior FULL round's fix batch was measured by the diff
+    //       probe and judged small, P0-free and contract-safe by isDeltaEligible.
+    const bookendOk = r > 1 && lastRoundKind === 'full'
+    const opt009 = !proportionalUsed && lastRoundConverged && !fixerEverRan
+    const deltaOk = deltaEligibility?.eligible === true
+    const proportional = bookendOk && (opt009 || deltaOk)
+
+    // Why this round is (or is not) proportional — recorded on the round report so
+    // an operator can see the predicate's verdict, not just its consequence.
+    const deltaReasonForRound = proportional
+      ? (opt009 ? 'no-fixer-yet' : 'eligible')
+      : !bookendOk && r > 1
+        ? `bookend:${lastRoundKind ?? 'none'}`
+        : deltaEligibility?.reason ?? (r === 1 ? 'round-1-always-full' : 'no-probe')
 
     let reviewerLists
     let testSummary = 'No test results available.'
+    let roundKind = proportional ? 'delta' : 'full'
 
     if (proportional) {
-      proportionalUsed = true
+      if (opt009) proportionalUsed = true
+      deltaEligibility = null
       phase(`Verify (round ${r})`)
       const verifier = await agent(
         verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath, ledger),
@@ -524,13 +665,18 @@ export async function runLoop(config, ctx) {
       reviewerLists = [verifier?.findings || []]
       testSummary = 'Proportional verification round — no test gate run.'
     } else {
-      phase(r === 1 ? 'Review' : `Review (round ${r})`)
+      deltaEligibility = null
 
-      // Deterministic test gate — an agent runs the project's tests, returns a
-      // summary. Skipped for artifacts with no executable test surface (OPT-007).
-      // Mechanical exit-code work → haiku, same as the TDD red/green gates (OPT-010).
+      // ── DETERMINISTIC BEFORE AGENTIC (#82) ──────────────────────────────────
+      // The test/lint gate runs FIRST, and when it fails it claims the round on
+      // its own: a defect a test or a linter can name must never cost a reviewer
+      // round. A failing gate means the artifact is provably broken, so paying
+      // four lenses to read the whole thing is waste — the fixer already has a
+      // complete, mechanically-derived work list. Bounded by maxGateRounds so a
+      // permanently-red suite cannot starve review of the rest of the artifact.
       let test = null
       if (!skipTests) {
+        phase(r === 1 ? 'Gate' : `Gate (round ${r})`)
         test = await agent(testGatePrompt(artifact, r, carriedTestCommand), {
           label: `tests:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: TEST_SCHEMA,
         })
@@ -540,29 +686,32 @@ export async function runLoop(config, ctx) {
         testSummary = 'Tests skipped for this artifact (no executable test surface).'
       }
 
-      // Fan out N clean-context reviewers, each on its resolved model (OPT-002).
-      // team-selector.py already bakes the per-reviewer tier (with its domain-score
-      // gates + opus-seat cap) into agentDef.model; we route through
-      // resolveReviewerModel forwarding whatever escalation/high-stakes flags the
-      // team object carries (default false → identity for the canonical path, so
-      // the Python cap is never overridden), which also enforces tiering for a
-      // caller that supplies flags but skipped team-selector.
-      const reviews = await parallel(
-        team.map((agentDef) => () =>
-          agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath, ledger), {
-            label: `review:${agentDef.name}:r${r}`,
-            phase: `Round ${r}`,
-            model: resolveReviewerModel(agentDef, resolverComplexity, {
-              escalationEligible: agentDef.escalation_eligible ?? agentDef.escalationEligible ?? false,
-              highStakes: agentDef.high_stakes ?? agentDef.highStakes ?? false,
-            }) || agentDef.model || 'sonnet',
-            schema: FINDINGS_SCHEMA,
-          }),
-        ),
-      )
-
-      reviewerLists = reviews.filter(Boolean).map((x) => x.findings || [])
-      if (test?.failures?.length) reviewerLists.push(test.failures)
+      const gateFailures = test?.failures?.length ? test.failures : []
+      // NEVER in single-round mode: qreview promises one clean-context diagnose
+      // pass, and a caller who asked for lenses must get lenses even when the
+      // suite is red. The short-circuit only pays off across rounds anyway — it
+      // trades this round's fan-out for a cheaper one after the fix lands, and a
+      // single-round run has no next round to spend it on.
+      const gateMayClaimRound = !singleRound && consecutiveGateRounds < maxGateRounds
+      if (gateFailures.length && gateMayClaimRound) {
+        consecutiveGateRounds += 1
+        roundKind = 'gate'
+        reviewerLists = [gateFailures]
+        log(
+          `Round ${r}: deterministic gate failed with ${gateFailures.length} finding(s) — fixing those first, ` +
+            `no reviewer fan-out this round (gate round ${consecutiveGateRounds}/${maxGateRounds}).`,
+        )
+      } else {
+        if (gateFailures.length) {
+          log(`Round ${r}: gate still failing after ${consecutiveGateRounds} gate round(s) — running the full review anyway.`)
+        }
+        consecutiveGateRounds = 0
+        const fan = await fanOutReviewers(r, testSummary)
+        reviewerLists = fan.lists
+        reviewersRequested = fan.requested
+        reviewersReturned = fan.returned
+        if (gateFailures.length) reviewerLists.push(gateFailures)
+      }
     }
 
     // Capture reviewer `significance` flags from the RAW findings by normalized
@@ -605,8 +754,28 @@ export async function runLoop(config, ctx) {
     const newP0P1 = findings.filter(
       (f) => (f.severity === 'P0' || f.severity === 'P1') && !prevP0P1?.has(normTitle(f)),
     ).length
-    roundReports.push({ round: r, findings, counts, significant: significant.length, trivial: trivial.length, newP0P1, dropped: dropped.length, converged, message, proportional })
-    log(`Round ${r}: ${findings.length} findings (P0=${counts.P0} P1=${counts.P1} P2=${counts.P2} P3=${counts.P3}; ${significant.length} significant / ${trivial.length} trivial, ${newP0P1} new P0/P1) — ${message}`)
+    // `valid` is the quorum gate's flag (#81): a round whose reviewer panel did
+    // not reach quorum is not evidence, so it must not spend budget or fill the
+    // divergence window. Every round is valid unless `validateRound` says
+    // otherwise — that hook is the seam the quorum gate plugs into.
+    const report = {
+      round: r, findings, counts, significant: significant.length, trivial: trivial.length,
+      newP0P1, dropped: dropped.length, converged, message, proportional,
+      kind: roundKind, valid: true, ms: Math.max(0, now() - roundStartedAt),
+      reviewers_requested: reviewersRequested, reviewers_returned: reviewersReturned,
+      delta_reason: deltaReasonForRound,
+    }
+    if (validateRound) report.valid = validateRound(report) !== false
+    roundReports.push(report)
+    // The round's position in the budget rides on every line, so a run that is
+    // heading for 19 rounds is visible in `/workflows` WHILE it happens (#82).
+    const spentSoFar = summarizeBudget(roundReports, { maxRounds })
+    log(
+      `Round ${r}/${maxRounds} [${roundKind}${report.valid ? '' : ', INVALID'}]: ${findings.length} findings ` +
+        `(P0=${counts.P0} P1=${counts.P1} P2=${counts.P2} P3=${counts.P3}; ${significant.length} significant / ` +
+        `${trivial.length} trivial, ${newP0P1} new P0/P1) — budget ${spentSoFar.validRounds}/${maxRounds} valid ` +
+        `(${spentSoFar.fullRounds} full, ${spentSoFar.deltaRounds} delta, ${spentSoFar.gateRounds} gate) — ${message}`,
+    )
 
     // Spot-fix trivial nits cheaply (Haiku) + a light spot-check. Opportunistic,
     // non-blocking, doesn't reset the convergence counter.
@@ -639,10 +808,39 @@ export async function runLoop(config, ctx) {
       break
     }
 
-    // Out of rounds → escalate with the unresolved P0/P1s.
-    if (r >= maxRounds) {
-      const unresolved = findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
-      outcome = { status: 'escalated', reason: `Max rounds (${maxRounds}) reached without convergence. ${message}.`, unresolved, round: r }
+    const unresolvedNow = () => findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
+
+    // DIVERGENCE (#82) — the loop is not approaching a fixed point, so more rounds
+    // will not converge it. Stuck detection cannot see this shape: it matches an
+    // IDENTICAL P0/P1 title set, and a diverging run surfaces genuinely NEW P0s
+    // every round (pm-816-intake-0903 ran 19 rounds and ~5M tokens that way before
+    // a human halted it). Checked BEFORE the fixer, so a diverging round does not
+    // also pay for a fix batch nobody will re-review.
+    const div = detectDivergence(roundReports, divergence || {})
+    if (div.diverging) {
+      log(`Round ${r}: ${div.reason}`)
+      outcome = { status: 'escalated', reason: div.reason, divergence: div, unresolved: unresolvedNow(), round: r }
+      break
+    }
+
+    // Out of BUDGET → escalate with the unresolved P0/P1s. The budget is spent in
+    // VALID rounds, so rounds lost to a dead reviewer panel (#81) do not consume
+    // it — but they are capped separately, and running out of THOSE escalates on
+    // the environment rather than blaming the artifact.
+    const spent = summarizeBudget(roundReports, { maxRounds })
+    if (spent.validRounds >= maxRounds) {
+      outcome = { status: 'escalated', reason: `Max rounds (${maxRounds}) reached without convergence. ${message}.`, unresolved: unresolvedNow(), round: r }
+      break
+    }
+    if (spent.invalidRounds >= maxInvalidRounds && maxInvalidRounds > 0) {
+      outcome = {
+        status: 'escalated',
+        reason:
+          `Environment: ${spent.invalidRounds} of ${spent.roundsRun} rounds did not produce a valid reviewer panel ` +
+          `(limit ${maxInvalidRounds}). This run proves nothing about the artifact — fix the environment and re-run.`,
+        unresolved: unresolvedNow(),
+        round: r,
+      }
       break
     }
 
@@ -656,6 +854,7 @@ export async function runLoop(config, ctx) {
       prevP0P1 = p0p1Titles(findings)
       prevAllTitles = new Set(findings.map(normTitle))
       lastRoundConverged = true
+      lastRoundKind = roundKind
       continue
     }
 
@@ -685,6 +884,32 @@ export async function runLoop(config, ctx) {
       break
     }
 
+    // PROPORTIONAL ROUNDS (#82 / this repo #45) — does this fix batch buy a cheap
+    // delta round, or must the next round re-read the whole artifact with every
+    // lens? Only a FULL round's batch can, so a gate or delta round never even
+    // pays for the probe; neither does a batch that fixed a P0, which is
+    // disqualified by predicate 1 before any agent is spawned. That ordering is
+    // the deterministic-before-agentic rule applied to the engine's own spending.
+    const p0FixedCount = significant.filter((f) => f.severity === 'P0').length
+    if (roundKind !== 'full' || p0FixedCount > 0) {
+      deltaEligibility = { eligible: false, reason: roundKind !== 'full' ? `bookend:${roundKind}` : 'p0-in-batch' }
+    } else {
+      const probe = await agent(diffProbePrompt(artifact, deltaOpts.maxChangedLines), {
+        label: `diff:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: DIFF_SCHEMA,
+      })
+      deltaEligibility = isDeltaEligible(
+        probe
+          ? { p0FixedCount, artifactLines: probe.artifact_lines, touched: probe.touched, truncated: probe.truncated }
+          : null,
+        deltaOpts,
+      )
+      log(
+        `Round ${r}: fix batch is ${deltaEligibility.eligible ? 'DELTA-ELIGIBLE' : 'not delta-eligible'} ` +
+          `(${deltaEligibility.reason}; ${deltaEligibility.changedLines ?? '?'} changed line(s)) — round ${r + 1} is a ` +
+          `${deltaEligibility.eligible ? 'single delta verifier' : 'full review'}.`,
+      )
+    }
+
     const combinedResolutions = [...resolutions, ...trivialResolutions]
     pendingAdjudication = { round: r, findings, resolutions: combinedResolutions }
     historyPath = await maybeWriteHistory(r, findings, combinedResolutions)
@@ -693,6 +918,7 @@ export async function runLoop(config, ctx) {
     prevP0P1 = curP0P1
     prevAllTitles = new Set(findings.map(normTitle))
     lastRoundConverged = false
+    lastRoundKind = roundKind
   }
 
   // Best-effort cleanup of the temporary history files (OPT-015).
@@ -711,9 +937,20 @@ export async function runLoop(config, ctx) {
   }
 
   const last = roundReports[roundReports.length - 1] || {}
+  // COST IN THE VERDICT (#82) — rounds by kind and wall-clock travel WITH the
+  // outcome, so a 19-round run is obvious to whoever reads the result rather than
+  // only to whoever re-reads the workflow JSON afterwards. Token cost is priced
+  // by tools/scorecard.py, which has the per-agent usage this sandbox cannot see.
+  const budget = {
+    ...summarizeBudget(roundReports, { maxRounds }),
+    maxInvalidRounds,
+    hardCap,
+    wallClockMs: Math.max(0, now() - startedAt),
+  }
   return {
     outcome,
     rounds: roundReports.length,
+    budget,
     edited_files: [...editedFiles].sort(),
     ledger,
     final_findings: last.findings || [],
@@ -721,6 +958,8 @@ export async function runLoop(config, ctx) {
     history: roundReports.map((rr) => ({
       round: rr.round, counts: rr.counts, significant: rr.significant, trivial: rr.trivial,
       newP0P1: rr.newP0P1, converged: rr.converged, message: rr.message,
+      kind: rr.kind, valid: rr.valid, ms: rr.ms, delta_reason: rr.delta_reason,
+      reviewers_requested: rr.reviewers_requested, reviewers_returned: rr.reviewers_returned,
     })),
   }
 }

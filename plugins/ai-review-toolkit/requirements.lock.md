@@ -43,3 +43,29 @@ Snapshot for the "Option 3" model-tiering + deterministic scorecard task.
 - Bump `ai-review-toolkit` version in `plugin.json` and `marketplace.json` (1.0.0 → 1.1.0).
 - Full tool test suite green (299 baseline + new tests).
 - Sync tools + SKILLs to the user-level fork after green.
+
+## REQ-STOP-201: Deterministic checks precede agentic ones
+- The per-round test/lint gate runs FIRST; a failing gate claims the round (fixer only, no reviewer fan-out).
+- Bounded by `maxGateRounds` (default 2 consecutive); disabled in single-round (`/qreview`) mode.
+- Acceptance: a fixture whose round-1 gate fails runs 0 reviewers and 1 fixer; a third consecutive failing gate runs the full fan-out anyway; `rounds:1` always fans out.
+
+## REQ-STOP-202: Proportional rounds (a small contract-safe batch buys one delta verifier)
+- `isDeltaEligible` (pure, `js/stopping-rules.mjs`) requires ALL of: zero P0 in the batch; <= 20 changed lines AND <= 5% of the artifact; no contract line touched (`REQ-<CLASS>-<n>`, a line starting `Acceptance`, an `sto:` line, any line inside `### Requirement classes` / `### Cross-repo design` / `### Story points` / `### Review receipt`).
+- Bookends owned by `runLoop`: round 1 is always full; a delta round never follows a delta round; any finding in a delta round re-opens the full loop.
+- The diff is MEASURED by a haiku probe and JUDGED in JS. Any missing/malformed measurement fails CLOSED to a full round.
+- Acceptance: a 3-line prose batch runs round 3 as a single verifier and converges; the same edit on an `Acceptance:` line runs a full round; a 25-line edit runs a full round; delta,delta is impossible; a delta round returning one P3 re-opens a full round.
+
+## REQ-STOP-203: Divergence halt
+- After `warmup` (6) valid rounds, if each of the last `window` (3) surfaced >= 1 NEW P0/P1 and that sum did not decay against the prior `window`, the run escalates with a SPLIT recommendation and `outcome.divergence`.
+- Checked BEFORE the round's fixer, so a diverging round does not also pay for a fix batch.
+- Acceptance: replaying the 19-round shape halts at round 6 with `/SPLIT/` and no `fix:r6`; a decaying 3,3,3,1,1,1 run converges untouched.
+
+## REQ-STOP-204: The round budget is spent in VALID rounds only
+- Round reports carry `valid` (via the `validateRound` hook) and `reviewers_requested`/`reviewers_returned`; the quorum gate (#43) sets `valid`.
+- Invalid rounds consume no budget and fill no divergence window; exhausting `maxInvalidRounds` escalates naming the ENVIRONMENT, not the artifact. An absolute `hardCap = maxRounds + maxInvalidRounds` bounds the loop.
+- Acceptance: 2 invalid rounds leave 3 valid rounds owed against `maxRounds: 3`; an all-invalid run escalates with `/Environment/`; invalid rounds cannot fill the divergence window.
+
+## REQ-STOP-205: Cost travels with the verdict
+- `runLoop` returns `budget` (`maxRounds`, `roundsRun`, `validRounds`, `invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `maxInvalidRounds`, `hardCap`, `wallClockMs`); `history` entries carry `kind`, `ms`, `delta_reason`, reviewer counts.
+- `scorecard.py` renders a first-line `VERDICT: <status> - N of M rounds (x full, y delta, z gate) - tokens - $ - wall-clock`, plus the escalation reason; absent a workflow result no verdict is invented.
+- Acceptance: the verdict section carries rounds/tokens/wall-clock and renders at the top; a pre-1.9.0 run with no `budget` still renders a verdict without a fabricated denominator.

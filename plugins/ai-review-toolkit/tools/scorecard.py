@@ -255,6 +255,9 @@ def aggregate_workflow(
             "status": workflow_meta.get("status"),
             "total_tokens": workflow_meta.get("totalTokens"),
             "phases": phases,
+            # The workflow script's return value — runLoop's {outcome, rounds,
+            # budget, history, ...}. It is what the verdict line is built from.
+            "result": workflow_meta.get("result"),
         }
 
     leak = _detect_model_leak(agent_raw_models, workflow_meta)
@@ -485,6 +488,58 @@ def _deploy_section(state: dict[str, Any]) -> dict[str, Any] | None:
     return section
 
 
+def _verdict_section(
+    wf: dict[str, Any],
+    tokens_total: dict[str, Any],
+    cost_usd: float,
+    time_section: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The one line an operator reads (claude-skills#82).
+
+    Rounds, tokens and wall-clock belong WITH the outcome, not three sections
+    apart: a 19-round, 5M-token run should be obvious at a glance rather than
+    reconstructed afterwards. Built entirely from the workflow's own return
+    value plus the priced transcript — no judgment, no estimation.
+
+    Returns None when the run produced no workflow result (a state-only qreview),
+    so nothing is invented for a run that cannot support it.
+    """
+    result = wf.get("result") if isinstance(wf, dict) else None
+    if not isinstance(result, dict):
+        return None
+
+    outcome = result.get("outcome") if isinstance(result.get("outcome"), dict) else {}
+    status = str(outcome.get("status") or "unknown").upper()
+    budget = result.get("budget") if isinstance(result.get("budget"), dict) else {}
+
+    total_tokens = (
+        tokens_total.get("input", 0)
+        + tokens_total.get("cache_read", 0)
+        + tokens_total.get("cache_write", 0)
+        + tokens_total.get("output", 0)
+    )
+    wall = time_section.get("workflow_wall_clock_ms")
+    if wall is None:
+        wall = budget.get("wallClockMs") or time_section.get("total_ms")
+
+    return {
+        "status": status,
+        "reason": outcome.get("reason") or outcome.get("message") or "",
+        "rounds": result.get("rounds"),
+        # Absent on a run from before the budget existed — rendered without the
+        # "of N" clause rather than with a fabricated denominator.
+        "max_rounds": budget.get("maxRounds"),
+        "valid_rounds": budget.get("validRounds"),
+        "invalid_rounds": budget.get("invalidRounds"),
+        "full_rounds": budget.get("fullRounds"),
+        "delta_rounds": budget.get("deltaRounds"),
+        "gate_rounds": budget.get("gateRounds"),
+        "tokens": total_tokens,
+        "cost_usd": round(cost_usd, 4),
+        "wall_clock_ms": wall,
+    }
+
+
 def build_scorecard(
     state: dict[str, Any],
     transcript_agg: dict[str, Any],
@@ -571,6 +626,10 @@ def build_scorecard(
         "time": time_section,
     }
 
+    verdict = _verdict_section(wf, report["tokens"]["total"], total_cost, time_section)
+    if verdict is not None:
+        report["verdict"] = verdict
+
     leak = wf.get("model_leak") if wf else None
     if leak is not None:
         report["model_leak"] = leak
@@ -610,6 +669,28 @@ def render_markdown(report: dict[str, Any]) -> str:
     lines: list[str] = []
     proc = report["process"]
     lines.append("# Review Scorecard\n")
+
+    # The verdict line goes FIRST — status, what it cost, and why it stopped.
+    v = report.get("verdict")
+    if v is not None:
+        if v.get("max_rounds"):
+            rounds_str = f"{v['rounds']} of {v['max_rounds']} rounds"
+        else:
+            rounds_str = f"{v['rounds']} rounds"
+        kinds = [
+            (v.get("full_rounds"), "full"), (v.get("delta_rounds"), "delta"),
+            (v.get("gate_rounds"), "gate"), (v.get("invalid_rounds"), "invalid"),
+        ]
+        breakdown = ", ".join(f"{n} {label}" for n, label in kinds if n)
+        if breakdown:
+            rounds_str += f" ({breakdown})"
+        wall = v.get("wall_clock_ms")
+        parts = [rounds_str, f"{_fmt_tokens(v['tokens'])} tokens", f"${v['cost_usd']:.2f}"]
+        if wall:
+            parts.append(f"{_fmt_ms(wall)} wall-clock")
+        lines.append(f"**VERDICT: {v['status']}** — " + " · ".join(parts) + "\n")
+        if v.get("reason"):
+            lines.append(f"> {v['reason']}\n")
 
     leak = report.get("model_leak")
     if leak is not None:

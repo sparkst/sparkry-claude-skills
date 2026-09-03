@@ -27,6 +27,16 @@ return await runLoop(
     // gate for artifacts with no executable test surface.
     complexity: A.complexity ?? null,
     skipTests: A.skipTests ?? false,
+    // Stopping-rule knobs (#82). All have engine defaults; a caller only passes
+    // one to widen or tighten a specific bound, never to turn a rule off silently.
+    // `maxGateRounds` caps consecutive deterministic-gate-only rounds;
+    // `deltaCaps` {maxChangedLines, maxChangedFraction} sizes a proportional round;
+    // `divergence` {window, warmup} tunes the non-convergence halt;
+    // `maxInvalidRounds` bounds rounds lost to a dead reviewer panel.
+    maxGateRounds: A.maxGateRounds,
+    deltaCaps: A.deltaCaps ?? null,
+    divergence: A.divergence ?? null,
+    maxInvalidRounds: A.maxInvalidRounds,
   },
   { agent, parallel, phase, log },
 )
