@@ -100,7 +100,7 @@ ship)** = zero P0, zero P1, low-severity within threshold; otherwise state how
 many P0/P1 remain.
 
 **Never present a clean result from a panel that did not run.** The verdict carries
-`reviewers <returned>/<requested> returned`, and a round whose panel fell below
+`reviewers <returned>/<requested> returned`, and a review whose panel fell below
 quorum comes back `escalated` with `valid: false` on that `history` entry and a
 reason per missing reviewer (`reviewers_missing`). Report that as an ENVIRONMENT
 failure and re-run it: zero findings there means nobody looked, not that the

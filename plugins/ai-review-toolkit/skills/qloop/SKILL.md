@@ -213,7 +213,7 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
 - **Reviewer quorum: a round is evidence only if the panel reported.** Every
   requested reviewer is attested as returned, or missing WITH the reason it died
   (expired auth, killed session, timeout). A round below quorum (a majority of the
-  panel, floor 2; the single verifier of a delta round is its own whole panel) is
+  panel, floor 2; a round whose panel is one verifier is still a whole panel) is
   recorded `valid: false` and INVALID: it spends no round budget, feeds no ledger
   adjudication, reaches no fixer or spot-fixer, and can never converge. The loop
   re-runs; a panel that keeps dying escalates on the ENVIRONMENT. Zero findings
