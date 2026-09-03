@@ -1,5 +1,46 @@
 # Changelog — ai-review-toolkit
 
+## 1.10.0
+
+### Fixed
+- **A dead reviewer no longer reads as a reviewer who found nothing.** `runLoop`
+  aggregated its panel with `reviews.filter(Boolean)`, which silently discarded
+  every reviewer that failed to return. An all-dead round therefore produced zero
+  findings, and the termination rule read zero findings as CONVERGED: a false
+  GREEN, worse than a false red because a false red stops and a false green ships.
+  It shipped twice on record. **29 of 32** review agents died on a usage limit and
+  the loop returned `converged:true` over a broken artifact; the root cause was
+  identified at that line and the remedy written down as an operator habit rather
+  than code. On 2026-09-02 it recurred unattended: **both** reviewers died on
+  `Login expired` (scorecard: opus 0 agents/0.0s, sonnet 0 agents/0.0s), the run
+  reported "converged" at $3.85 with all five findings untouched, and the surviving
+  haiku spot-fixer had written a test that PINNED a known defect, swept into two
+  commits under the green verdict. An operator habit is not a control; it failed
+  the first time it ran unsupervised.
+  - **Attestation.** Every reviewer is settled, not awaited raw: one that rejects
+    is recorded with its reason and cannot abort the fan-out, and one that returns
+    nothing (or a result with no `findings` array) is recorded missing with a named
+    reason. New pure helpers in `js/workflow-helpers.mjs`: `reviewerQuorum`,
+    `attestReviewers`, `describeReviewerShortfall`, `renderAttestation`.
+  - **Quorum gates termination.** Quorum is a majority of the requested panel with
+    a floor of 2 (32 requested needs 16, so the 29-of-32 shape is INVALID where a
+    constant floor waved it through). A below-quorum round is `valid: false` and
+    short-circuits before synthesis: no ledger adjudication, no fixer, no
+    spot-fixer on the survivors' partial list, and no convergence. It spends no
+    round budget, the next round is a full re-read, and a panel that keeps dying
+    escalates on the ENVIRONMENT. The `validateRound` hook may only ADD
+    invalidation. The min-rounds floor now counts VALID rounds.
+  - **The delta round's verifier is a panel of one.** It used to report `0/0`
+    reviewers, which would have kept a dead verifier invisible to the gate.
+  - **The count and the reason ride in the verdict.** A converged `outcome.message`
+    carries `reviewers <returned>/<requested> returned`, `outcome.reviewers` carries
+    it as data, `history` entries add `reviewers_quorum`/`reviewers_missing`, and
+    `scorecard.py` renders it on the verdict line.
+  - **No run ends without a verdict.** A loop that reached the hard cap could
+    return a null `outcome`, which reads downstream as neither converged nor
+    escalated. It escalates now.
+  - Closes sparkst/claude-skills#81 and this repo's #43.
+
 ## 1.9.0
 
 ### Added

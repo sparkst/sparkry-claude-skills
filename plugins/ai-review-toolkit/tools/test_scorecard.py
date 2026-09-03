@@ -766,6 +766,36 @@ class TestVerdict:
         assert report["verdict"]["invalid_rounds"] == 3
         assert "3 invalid" in render_markdown(report)
 
+    def test_converged_verdict_carries_the_reviewer_attestation(self):
+        """#81: the count a human reads on the verdict line, not only in the table."""
+        result = {"outcome": {"status": "converged", "message": "No blocking issues (reviewers 2/2 returned)",
+                              "reviewers": {"requested": 2, "returned": 2, "quorum": 2, "missing": []}},
+                  "rounds": 2,
+                  "budget": {"maxRounds": 5, "roundsRun": 2, "validRounds": 2, "invalidRounds": 0,
+                             "fullRounds": 2, "deltaRounds": 0, "gateRounds": 0}}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        report = build_scorecard({}, agg, load_pricing())
+        assert report["verdict"]["reviewers"] == {"requested": 2, "returned": 2, "quorum": 2, "missing": []}
+        md = render_markdown(report)
+        assert "reviewers 2/2 returned" in md
+
+    def test_dead_panel_verdict_shows_the_shortfall_not_a_clean_line(self):
+        """#81 (Quark, 2026-09-02): 0 of 2 reviewers returned must be on the verdict line."""
+        result = {"outcome": {"status": "escalated",
+                              "reason": "Environment: 2 of 2 rounds did not produce a valid reviewer panel. "
+                                        "Failed reviewers - opus: Login expired; sonnet: Login expired.",
+                              "reviewers": {"requested": 2, "returned": 0, "quorum": 2,
+                                            "missing": [{"name": "opus", "reason": "Login expired"}]}},
+                  "rounds": 2,
+                  "budget": {"maxRounds": 5, "roundsRun": 2, "validRounds": 0, "invalidRounds": 2,
+                             "fullRounds": 0, "deltaRounds": 0, "gateRounds": 0}}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        md = render_markdown(build_scorecard({}, agg, load_pricing()))
+        assert "VERDICT: ESCALATED" in md
+        assert "reviewers 0/2 returned" in md
+        assert "2 invalid" in md
+        assert "Login expired" in md
+
     def test_verdict_still_renders_for_a_pre_82_run_with_no_budget(self):
         result = {"outcome": {"status": "converged"}, "rounds": 2}
         agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))

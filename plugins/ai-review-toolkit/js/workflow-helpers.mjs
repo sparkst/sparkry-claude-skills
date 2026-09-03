@@ -162,3 +162,111 @@ export function renderLedger(ledger = []) {
 
   return lines.join("\n").replace(/\s+$/, "");
 }
+
+// ---------------------------------------------------------------------------
+// Reviewer attestation + quorum (#81 / this repo #43)
+//
+// A review round is EVIDENCE only if the panel that was asked for actually
+// reported. Before this, `reviews.filter(Boolean)` dropped every reviewer that
+// failed to return, so a dead reviewer and a reviewer that found nothing were
+// indistinguishable — and an all-dead round yielded zero findings, which the
+// termination rule read as CONVERGED. That false GREEN shipped twice on record:
+// 29 of 32 review agents died on a usage limit and the loop returned
+// `converged:true` over a broken artifact (2026-08), and both reviewers died on
+// `Login expired` while the surviving spot-fixer wrote a test that PINNED a known
+// defect, all under a green verdict (Quark, 2026-09-02).
+//
+// So the count is never dropped: every requested reviewer is attested as returned
+// or missing-with-a-reason, and the quorum decides whether the round counts.
+// ---------------------------------------------------------------------------
+
+/** A reviewer that produced nothing at all — the shape `filter(Boolean)` ate. */
+export const REVIEWER_NO_RESULT = "returned no result (agent produced no output)";
+/** A reviewer that answered with something that is not a findings list. */
+export const REVIEWER_MALFORMED = "returned a malformed result (no findings array)";
+/** A death whose cause the runtime did not name. */
+export const REVIEWER_UNKNOWN_REASON = "failed for an unnamed reason";
+
+// Reasons come from agent runtimes and can be long or multi-line; the verdict has
+// to stay one readable line, so normalize and cap them.
+function cleanReason(reason) {
+  const s = String(reason ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return REVIEWER_UNKNOWN_REASON;
+  return s.length > 240 ? `${s.slice(0, 237)}...` : s;
+}
+
+/**
+ * How many reviewers must actually report for a round to count as evidence.
+ *
+ * A majority of the panel, with a floor of 2 (or the whole panel when only one
+ * was asked for, as in a proportional verifier round). Majority — not a fixed
+ * floor — is what makes the 29-of-32 shape INVALID: three survivors clear any
+ * constant floor while 90% of the lenses are silent.
+ */
+export function reviewerQuorum(requested) {
+  const n = Math.max(0, Math.trunc(Number(requested) || 0));
+  if (n === 0) return 0;
+  return Math.max(Math.min(2, n), Math.ceil(n / 2));
+}
+
+/**
+ * Attest one round's reviewer panel.
+ *
+ * @param settled per-reviewer results in request order, each
+ *   `{ name, ok: true, value }` or `{ name, ok: false, reason }`. The caller
+ *   settles them (catching rejections) so one dead reviewer cannot abort the fan-out.
+ * @returns { requested, returned, quorum, quorumMet, missing: [{name, reason}], lists }
+ *   `lists` holds ONLY the findings of reviewers that genuinely reported, so
+ *   synthesis never mixes a silence in with the evidence.
+ */
+export function attestReviewers(settled = []) {
+  const attested = (settled ?? []).map((s, i) => {
+    const name = String(s?.name ?? `reviewer-${i + 1}`);
+    if (s && s.ok === false) return { name, returned: false, reason: cleanReason(s.reason) };
+    const value = s ? s.value : undefined;
+    if (value === null || value === undefined) return { name, returned: false, reason: REVIEWER_NO_RESULT };
+    const findings = Array.isArray(value)
+      ? value
+      : Array.isArray(value.findings)
+        ? value.findings
+        : null;
+    if (findings === null) return { name, returned: false, reason: REVIEWER_MALFORMED };
+    return { name, returned: true, findings };
+  });
+
+  const requested = attested.length;
+  const returned = attested.filter((a) => a.returned);
+  const quorum = reviewerQuorum(requested);
+  return {
+    requested,
+    returned: returned.length,
+    quorum,
+    // A round that asked for no reviewers (the deterministic gate round) has
+    // nothing to attest and is valid on its own terms — quorum gates panels.
+    quorumMet: requested === 0 ? true : returned.length >= quorum,
+    missing: attested.filter((a) => !a.returned).map((a) => ({ name: a.name, reason: a.reason })),
+    lists: returned.map((a) => a.findings),
+  };
+}
+
+/**
+ * The loud line. A reviewer that died environmentally names WHY, because
+ * "0 findings" and "nobody looked" must never read the same to a human.
+ */
+export function describeReviewerShortfall(round, attestation) {
+  const a = attestation ?? {};
+  const why = (a.missing ?? []).length
+    ? (a.missing ?? []).map((m) => `${m.name}: ${m.reason}`).join("; ")
+    : "no reviewer reported";
+  return (
+    `Round ${round} INVALID — reviewer quorum not met: ${a.returned ?? 0}/${a.requested ?? 0} reviewers ` +
+    `returned (quorum ${a.quorum ?? 0}). Failed reviewers — ${why}. Zero findings from a panel that did not ` +
+    `run is absence of evidence, not evidence of absence: this round proves nothing and counts for nothing.`
+  );
+}
+
+/** The attestation as it rides in the verdict string: `reviewers 2/2 returned`. */
+export function renderAttestation(attestation) {
+  const a = attestation ?? {};
+  return `reviewers ${a.returned ?? 0}/${a.requested ?? 0} returned`;
+}

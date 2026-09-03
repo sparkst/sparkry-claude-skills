@@ -37,6 +37,17 @@ function makeCtx(rounds, opts = {}) {
       promptByLabel[label] = prompt;
       const r = Number((label.match(/:r(\d+)$/) || [])[1] || 1);
       const plan = rounds[r - 1] || {};
+      // #81: simulate a reviewer/verifier that never reports back.
+      // `opts.reviewerOutcome(label, round)` returns "throw:<reason>" (an
+      // environmental death, e.g. Login expired), "null" (no output at all — the
+      // shape `filter(Boolean)` used to eat), "empty" (a malformed result with no
+      // findings array), or undefined for the normal path.
+      if (label.startsWith("review:") || label.startsWith("verify:")) {
+        const fate = opts.reviewerOutcome ? opts.reviewerOutcome(label, r) : undefined;
+        if (fate === "null") return null;
+        if (fate === "empty") return {};
+        if (typeof fate === "string" && fate.startsWith("throw:")) throw new Error(fate.slice(6));
+      }
       if (label.startsWith("tests:")) return { summary: `round ${r}`, all_passed: true, failures: plan.testFailures ?? [], command: plan.testCommand };
       if (label.startsWith("review:")) return { findings: plan.findings ?? [] };
       if (label.startsWith("verify:")) return { findings: plan.verifyFindings ?? plan.findings ?? [] };
@@ -706,7 +717,10 @@ test("STOP-130: the verdict carries rounds by kind, reviewer counts and wall clo
   assert.equal(typeof out.budget.wallClockMs, "number");
   assert.ok(out.history.every((h) => typeof h.ms === "number"));
   // The reviewer counts the quorum gate needs are recorded on every round (#81).
-  assert.deepEqual(out.history.map((h) => `${h.reviewers_returned}/${h.reviewers_requested}`), ["0/0", "2/2", "0/0"]);
+  // The gate round asks for no reviewers (0/0); the full round fans out to both
+  // lenses (2/2); the delta round's single verifier IS its panel, so it attests
+  // 1/1 — recording it as 0/0 would leave a dead verifier invisible to the gate.
+  assert.deepEqual(out.history.map((h) => `${h.reviewers_returned}/${h.reviewers_requested}`), ["0/0", "2/2", "1/1"]);
 });
 
 test("STOP-103: single-round (qreview) mode never lets the gate claim the round", async () => {
@@ -717,4 +731,217 @@ test("STOP-103: single-round (qreview) mode never lets the gate claim the round"
   assert.equal(reviewersInRound(ctx, 1).length, 2, "the lenses run even with a failing gate");
   assert.equal(out.budget.gateRounds, 0);
   assert.equal(out.final_counts.P1, 1, "the reviewer's finding is in the result");
+});
+
+// ---------------------------------------------------------------------------
+// #81 — reviewer attestation + the quorum gate.
+//
+// Both false-GREEN incidents on record are replayed here: 29 of 32 review agents
+// dead on a usage limit with the loop returning converged over a broken artifact
+// (2026-08), and both reviewers dead on `Login expired` with only the spot-fixer
+// alive (Quark, 2026-09-02, $3.85, five findings untouched). A dead reviewer and
+// a reviewer that found nothing must never be the same thing.
+// ---------------------------------------------------------------------------
+
+const reviewerName = (label) => (label.match(/^review:(.+):r\d+$/) || [])[1] ?? "";
+const TEAM32 = Array.from({ length: 32 }, (_, i) => ({
+  name: `r${i + 1}`, model: "sonnet", review_lens: `lens-${i + 1}`,
+}));
+
+test("QUORUM-001 (#81): an all-dead reviewer round is INVALID, never converged", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }], {
+    reviewerOutcome: () => "throw:Login expired",
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 1 },
+    ctx,
+  );
+  assert.notEqual(out.outcome.status, "converged", "zero findings from a dead panel is not convergence");
+  assert.equal(out.outcome.status, "escalated");
+  assert.equal(out.history[0].valid, false);
+  assert.equal(out.history[0].reviewers_requested, 2);
+  assert.equal(out.history[0].reviewers_returned, 0);
+  assert.match(out.outcome.reason, /Login expired/, "the environmental reason must reach the verdict");
+  assert.deepEqual(labelsWith(ctx, "fix:"), [], "no fixer may run under a dead panel");
+  assert.deepEqual(labelsWith(ctx, "spotfix:"), [], "no spot-fixer may run under a dead panel");
+});
+
+test("QUORUM-002 (#81): 29 of 32 reviewers dead is below quorum — the 2026-08 incident shape", async () => {
+  const dead = new Set(TEAM32.slice(0, 29).map((t) => t.name));
+  const ctx = makeCtx([{ findings: [] }], {
+    reviewerOutcome: (label) => (dead.has(reviewerName(label)) ? "throw:usage limit reached" : undefined),
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM32, threshold: 0, maxRounds: 5, maxInvalidRounds: 1 },
+    ctx,
+  );
+  assert.notEqual(out.outcome.status, "converged");
+  assert.equal(out.history[0].valid, false, "3 of 32 survivors is not a panel");
+  assert.equal(out.history[0].reviewers_returned, 3);
+  assert.equal(out.history[0].reviewers_requested, 32);
+  assert.equal(out.history[0].reviewers_quorum, 16);
+  assert.match(out.outcome.reason, /usage limit reached/);
+});
+
+test("QUORUM-003 (#81): the Quark shape — both reviewers dead, fixer alive — is INVALID and names why", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }], {
+    reviewerOutcome: (label) => (label.startsWith("review:") ? "throw:Login expired" : undefined),
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 2 },
+    ctx,
+  );
+  assert.notEqual(out.outcome.status, "converged");
+  assert.match(out.outcome.reason, /Login expired/);
+  assert.deepEqual(
+    out.history[0].reviewers_missing.map((m) => `${m.name}: ${m.reason}`),
+    ["r1: Login expired", "r2: Login expired"],
+  );
+});
+
+test("QUORUM-004 (#81): a below-quorum round never reaches the spot-fixer with its partial findings", async () => {
+  // One survivor of four reports a trivial nit. Under the old code that nit was
+  // spot-fixed and the round read clean; the panel that would have caught the
+  // real defects never ran, so nothing here may be acted on.
+  const team4 = Array.from({ length: 4 }, (_, i) => ({ name: `r${i + 1}`, model: "sonnet", review_lens: "x" }));
+  const ctx = makeCtx([{ findings: [F("P3-001", "P3", "Cosmetic nit")] }], {
+    reviewerOutcome: (label) => (reviewerName(label) === "r1" ? undefined : "throw:Login expired"),
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: team4, threshold: 0, maxRounds: 5, maxInvalidRounds: 1 },
+    ctx,
+  );
+  assert.equal(out.history[0].valid, false);
+  assert.equal(out.history[0].reviewers_returned, 1);
+  assert.deepEqual(labelsWith(ctx, "spotfix:"), [], "partial findings from a dead panel are not a work list");
+  assert.notEqual(out.outcome.status, "converged");
+});
+
+test("QUORUM-005 (#81): a healthy round converges exactly as before, verdict carrying returned/requested", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.outcome.round, 2);
+  assert.match(out.outcome.message, /reviewers 2\/2 returned/);
+  assert.equal(out.outcome.reviewers.returned, 2);
+  assert.equal(out.outcome.reviewers.requested, 2);
+  assert.equal(out.history[1].valid, true);
+});
+
+test("QUORUM-006 (#81): one dead of two is below quorum (majority, floor 2)", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }], {
+    reviewerOutcome: (label) => (reviewerName(label) === "r2" ? "throw:session killed" : undefined),
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 1 },
+    ctx,
+  );
+  assert.notEqual(out.outcome.status, "converged");
+  assert.equal(out.history[0].valid, false);
+  assert.match(out.outcome.reason, /session killed/);
+});
+
+test("QUORUM-007 (#81): a reviewer that returns nothing at all counts as missing, not as clean", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }], { reviewerOutcome: () => "null" });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 1 },
+    ctx,
+  );
+  assert.notEqual(out.outcome.status, "converged");
+  assert.equal(out.history[0].reviewers_returned, 0);
+  assert.match(out.outcome.reason, /no result/i);
+});
+
+test("QUORUM-008 (#81): an invalid round spends no round budget and the recovered panel converges", async () => {
+  const ctx = makeCtx(
+    [
+      { findings: [] },
+      { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+      { findings: [] },
+    ],
+    { reviewerOutcome: (label, r) => (r === 1 ? "throw:Login expired" : undefined) },
+  );
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 3, maxInvalidRounds: 2 },
+    ctx,
+  );
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.budget.invalidRounds, 1);
+  assert.equal(out.budget.validRounds, 2);
+});
+
+test("QUORUM-009 (#81): the min-2-rounds floor counts VALID rounds, not attempts", async () => {
+  // Round 1's panel dies, round 2 is clean. Converging at round 2 would rest the
+  // whole verdict on a single valid round — the floor exists to prevent exactly that.
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }, { findings: [] }], {
+    reviewerOutcome: (label, r) => (r === 1 ? "throw:Login expired" : undefined),
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 2 },
+    ctx,
+  );
+  assert.equal(out.outcome.status, "converged");
+  assert.equal(out.outcome.round, 3, "rounds 2 and 3 are the two valid rounds");
+});
+
+test("QUORUM-010 (#81): a dead verifier on a proportional round is INVALID too", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }, { findings: [] }], {
+    reviewerOutcome: (label) => (label.startsWith("verify:") ? "throw:Login expired" : undefined),
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 1 },
+    ctx,
+  );
+  assert.equal(out.history[1].kind, "delta", "round 2 is the proportional verifier round");
+  assert.equal(out.history[1].valid, false);
+  assert.equal(out.history[1].reviewers_requested, 1);
+  assert.equal(out.history[1].reviewers_returned, 0);
+  assert.notEqual(out.outcome.status, "converged");
+});
+
+test("QUORUM-011 (#81): a deterministic gate round asks for no reviewers and stays valid", async () => {
+  const ctx = makeCtx([
+    { testFailures: [F("P0-t1", "P0", "Suite red")], resolutions: [R("P0-t1")] },
+    { findings: [] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+  assert.equal(out.history[0].kind, "gate");
+  assert.equal(out.history[0].reviewers_requested, 0);
+  assert.equal(out.history[0].valid, true, "quorum gates reviewer panels, not gate rounds");
+  assert.equal(out.outcome.status, "converged");
+});
+
+test("QUORUM-012 (#81): the validateRound hook can still invalidate, but cannot validate a dead panel", async () => {
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }], {
+    reviewerOutcome: () => "throw:Login expired",
+  });
+  const out = await runLoop(
+    {
+      artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5, maxInvalidRounds: 1,
+      validateRound: () => true,
+    },
+    ctx,
+  );
+  assert.equal(out.history[0].valid, false, "the quorum gate is not overridable from config");
+  assert.notEqual(out.outcome.status, "converged");
+});
+
+test("QUORUM-013 (#81): the run never ends with a null outcome, even when every round is invalid", async () => {
+  // maxInvalidRounds:0 disables the environment escalation; the hard cap must
+  // still produce a verdict, because a null outcome reads downstream as neither
+  // converged nor escalated — the same silence this issue exists to kill.
+  const ctx = makeCtx([{ findings: [] }, { findings: [] }, { findings: [] }], {
+    reviewerOutcome: () => "throw:Login expired",
+  });
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 2, maxInvalidRounds: 0 },
+    ctx,
+  );
+  assert.ok(out.outcome, "a run must always carry a verdict");
+  assert.equal(out.outcome.status, "escalated");
+  assert.match(out.outcome.reason, /valid reviewer panel|Login expired/);
 });
