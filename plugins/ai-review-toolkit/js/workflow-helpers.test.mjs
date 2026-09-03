@@ -5,6 +5,13 @@ import {
   adjudicateRound,
   mergeLedger,
   renderLedger,
+  reviewerQuorum,
+  attestReviewers,
+  describeReviewerShortfall,
+  renderAttestation,
+  REVIEWER_NO_RESULT,
+  REVIEWER_MALFORMED,
+  REVIEWER_UNKNOWN_REASON,
 } from "./workflow-helpers.mjs";
 
 test("leaves already-unique ids untouched", () => {
@@ -161,4 +168,93 @@ test("LEDGER-006: renderLedger emits the do-not-re-litigate framing and every en
 
 test("LEDGER-006b: renderLedger returns empty string for an empty ledger (no dead section)", () => {
   assert.strictEqual(renderLedger([]), "");
+});
+
+// ---------------------------------------------------------------------------
+// #81 — reviewer attestation + quorum
+// ---------------------------------------------------------------------------
+
+test("QUORUM-H01: quorum is a majority of the panel with a floor of 2", () => {
+  // 32 reviewers with 3 survivors (the 2026-08 incident) must be below quorum,
+  // which a constant floor of 2 would have waved through.
+  const table = [[0, 0], [1, 1], [2, 2], [3, 2], [4, 2], [5, 3], [8, 4], [32, 16]];
+  for (const [requested, expected] of table) {
+    assert.equal(reviewerQuorum(requested), expected, `requested=${requested}`);
+  }
+});
+
+test("QUORUM-H02: garbage panel sizes never produce a negative or fractional quorum", () => {
+  for (const bad of [-4, null, undefined, "x", NaN]) {
+    assert.equal(reviewerQuorum(bad), 0, `requested=${String(bad)}`);
+  }
+});
+
+test("QUORUM-H03: a full panel attests as returned and its findings pass through", () => {
+  const att = attestReviewers([
+    { name: "opus", ok: true, value: { findings: [{ id: "P0-001" }] } },
+    { name: "sonnet", ok: true, value: { findings: [] } },
+  ]);
+  assert.equal(att.requested, 2);
+  assert.equal(att.returned, 2);
+  assert.equal(att.quorumMet, true);
+  assert.deepStrictEqual(att.missing, []);
+  assert.deepStrictEqual(att.lists, [[{ id: "P0-001" }], []]);
+});
+
+test("QUORUM-H04: a thrown reason is preserved verbatim, not swallowed", () => {
+  const att = attestReviewers([
+    { name: "opus", ok: false, reason: "Login expired" },
+    { name: "sonnet", ok: false, reason: "Login expired" },
+  ]);
+  assert.equal(att.returned, 0);
+  assert.equal(att.quorumMet, false);
+  assert.deepStrictEqual(att.missing, [
+    { name: "opus", reason: "Login expired" },
+    { name: "sonnet", reason: "Login expired" },
+  ]);
+  assert.deepStrictEqual(att.lists, []);
+});
+
+test("QUORUM-H05: a null result and a malformed result are missing, not silent zeros", () => {
+  const att = attestReviewers([
+    { name: "a", ok: true, value: null },
+    { name: "b", ok: true, value: {} },
+    { name: "c", ok: true, value: { findings: [] } },
+  ]);
+  assert.equal(att.returned, 1, "only the reviewer with a findings array reported");
+  assert.deepStrictEqual(att.missing, [
+    { name: "a", reason: REVIEWER_NO_RESULT },
+    { name: "b", reason: REVIEWER_MALFORMED },
+  ]);
+});
+
+test("QUORUM-H06: an unnamed failure still names that it failed", () => {
+  const att = attestReviewers([{ name: "a", ok: false, reason: "   " }]);
+  assert.equal(att.missing[0].reason, REVIEWER_UNKNOWN_REASON);
+});
+
+test("QUORUM-H07: a multi-line runtime error collapses to one capped line", () => {
+  const att = attestReviewers([{ name: "a", ok: false, reason: `boom\n  at x\n${"y".repeat(400)}` }]);
+  assert.ok(!att.missing[0].reason.includes("\n"), "reason must stay one line");
+  assert.ok(att.missing[0].reason.length <= 240, "reason must stay capped");
+});
+
+test("QUORUM-H08: an empty panel (the deterministic gate round) is valid on its own terms", () => {
+  const att = attestReviewers([]);
+  assert.equal(att.requested, 0);
+  assert.equal(att.quorumMet, true, "quorum gates reviewer panels, not gate rounds");
+});
+
+test("QUORUM-H09: the shortfall line names the count AND every failure reason", () => {
+  const line = describeReviewerShortfall(3, attestReviewers([
+    { name: "opus", ok: false, reason: "Login expired" },
+    { name: "sonnet", ok: false, reason: "Login expired" },
+  ]));
+  assert.match(line, /Round 3 INVALID/);
+  assert.match(line, /0\/2 reviewers returned \(quorum 2\)/);
+  assert.match(line, /opus: Login expired; sonnet: Login expired/);
+});
+
+test("QUORUM-H10: the verdict fragment carries returned/requested", () => {
+  assert.equal(renderAttestation({ returned: 2, requested: 4 }), "reviewers 2/4 returned");
 });

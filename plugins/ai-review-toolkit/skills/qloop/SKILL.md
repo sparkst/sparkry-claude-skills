@@ -103,7 +103,11 @@ run `/qloop` on an artifact whose current state you are willing to have modified
 
 The Workflow returns
 `{ outcome, rounds, final_findings, final_counts, history, ledger }`:
-- `outcome.status === "converged"` — present the convergence summary and round count.
+- `outcome.status === "converged"` — present the convergence summary and round
+  count. `outcome.message` carries `reviewers <returned>/<requested> returned` and
+  `outcome.reviewers` carries the same as data, so a reader who sees only the
+  verdict knows the panel actually ran. A converged verdict is only reachable from
+  rounds that met quorum.
 - `outcome.status === "escalated"` — present `outcome.reason` and `outcome.unresolved`
   (P0/P1 findings), then ask the user to choose: continue (raise `maxRounds` and
   re-run), accept current state, or abandon. Escalation happens on max-rounds,
@@ -121,8 +125,11 @@ The Workflow returns
 The result also carries `budget` (`maxRounds`, `roundsRun`, `validRounds`,
 `invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `wallClockMs`), and
 each `history` entry carries its `kind` (`full`/`delta`/`gate`), `ms`,
-`delta_reason` and `reviewers_returned`/`reviewers_requested`. Present the budget
-line with the outcome; it is what makes an expensive run visible.
+`delta_reason`, `valid`, `reviewers_returned`/`reviewers_requested`/`reviewers_quorum`
+and `reviewers_missing` (`[{name, reason}]` for every reviewer that did not report).
+Present the budget line with the outcome; it is what makes an expensive run visible.
+**Any round with `valid: false` must be named when you present the run**, with the
+reasons from its `reviewers_missing`, because that round certified nothing.
 
 Show `history` (findings-per-round) so the convergence trajectory is visible.
 `ledger` (returned alongside it) lists the findings adjudicated across the whole
@@ -203,8 +210,17 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
 
 ## Hard rules (enforced in `review-loop.workflow.js`, not prose)
 
-- **Minimum 2 rounds.** Round 1 finds; round 2 verifies fixes and catches
-  regressions. The loop never reports `converged` before the floor.
+- **Reviewer quorum: a round is evidence only if the panel reported.** Every
+  requested reviewer is attested as returned, or missing WITH the reason it died
+  (expired auth, killed session, timeout). A round below quorum (a majority of the
+  panel, floor 2; the single verifier of a delta round is its own whole panel) is
+  recorded `valid: false` and INVALID: it spends no round budget, feeds no ledger
+  adjudication, reaches no fixer or spot-fixer, and can never converge. The loop
+  re-runs; a panel that keeps dying escalates on the ENVIRONMENT. Zero findings
+  from reviewers that never ran is absence of evidence, not evidence of absence.
+- **Minimum 2 rounds, counted in VALID rounds.** Round 1 finds; round 2 verifies
+  fixes and catches regressions. The loop never reports `converged` before the
+  floor, and a round lost to a dead panel does not count toward it.
 - **Fix-ALL gate on significant findings.** Every P0/P1 — plus any P2/P3 a
   reviewer flags `significance:true` or that recurs across rounds — needs a
   `FIXED`/`ESCALATED` resolution with evidence (`checkFixCompleteness`). No

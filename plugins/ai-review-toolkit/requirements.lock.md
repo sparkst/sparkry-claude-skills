@@ -69,3 +69,23 @@ Snapshot for the "Option 3" model-tiering + deterministic scorecard task.
 - `runLoop` returns `budget` (`maxRounds`, `roundsRun`, `validRounds`, `invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `maxInvalidRounds`, `hardCap`, `wallClockMs`); `history` entries carry `kind`, `ms`, `delta_reason`, reviewer counts.
 - `scorecard.py` renders a first-line `VERDICT: <status> - N of M rounds (x full, y delta, z gate) - tokens - $ - wall-clock`, plus the escalation reason; absent a workflow result no verdict is invented.
 - Acceptance: the verdict section carries rounds/tokens/wall-clock and renders at the top; a pre-1.9.0 run with no `budget` still renders a verdict without a fabricated denominator.
+
+## REQ-QRM-301: Every reviewer is attested, none is silently dropped
+- The fan-out SETTLES each reviewer (`settleReviewer`): a reviewer that rejects is recorded `{name, ok:false, reason}` and never aborts the round; one that returns nothing, or a result with no `findings` array, is recorded missing with a named reason.
+- `attestReviewers` (pure, `js/workflow-helpers.mjs`) returns `{requested, returned, quorum, quorumMet, missing:[{name,reason}], lists}`; only reviewers that genuinely reported contribute findings to synthesis.
+- Acceptance: 2 reviewers dead on `Login expired` attest 0/2 with both reasons preserved; a `null` result and a `{}` result are missing (not clean); a reason that is multi-line or 400 chars collapses to one capped line.
+
+## REQ-QRM-302: Quorum gates termination
+- Quorum is a majority of the requested panel with a floor of 2 (`reviewerQuorum`: 1 -> 1, 2 -> 2, 4 -> 2, 32 -> 16). A round that requested no reviewers (the deterministic gate round) is exempt.
+- A round below quorum is recorded `valid: false` and short-circuits BEFORE synthesis: no ledger adjudication, no fixer, no spot-fixer, no convergence. It spends no round budget, and the next round is a full re-read.
+- The min-rounds floor counts VALID rounds, so a run cannot converge off a single valid round.
+- The `validateRound` hook may only ADD invalidation; it can never validate a below-quorum round.
+- Acceptance: all reviewers dead -> INVALID and escalated, never converged; 29 of 32 dead -> INVALID; 1 of 4 returning a P3 never reaches the spot-fixer; a healthy round converges exactly as before.
+
+## REQ-QRM-303: The count and the reason ride in the verdict
+- A converged `outcome.message` carries `reviewers <returned>/<requested> returned`, and `outcome.reviewers` carries `{requested, returned, quorum, missing}`.
+- An environment escalation names every failed reviewer and its reason; `history` entries carry `reviewers_quorum` and `reviewers_missing`.
+- `scorecard.py` renders `reviewers N/M returned` on the verdict line when the run reports it.
+- A run that reaches the hard cap never returns a null outcome: it escalates, since a null outcome reads downstream as neither converged nor escalated.
+- Acceptance: the Quark shape (0 of 2 reviewers, live spot-fixer) renders `VERDICT: ESCALATED ... reviewers 0/2 returned` with `Login expired` in the reason.
+

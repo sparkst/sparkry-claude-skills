@@ -99,6 +99,13 @@ title, requirement, finding, recommendation, evidence (file:line), sources
 ship)** = zero P0, zero P1, low-severity within threshold; otherwise state how
 many P0/P1 remain.
 
+**Never present a clean result from a panel that did not run.** The verdict carries
+`reviewers <returned>/<requested> returned`, and a round whose panel fell below
+quorum comes back `escalated` with `valid: false` on that `history` entry and a
+reason per missing reviewer (`reviewers_missing`). Report that as an ENVIRONMENT
+failure and re-run it: zero findings there means nobody looked, not that the
+artifact is clean.
+
 ### 5. Scorecard (mandatory)
 
 Run the deterministic scorecard against the run and show it verbatim (pure,
@@ -180,6 +187,10 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
   and to the team composition.
 - **Pre-existing issues are in-scope.** Reviewers do not self-censor as "out of
   scope."
+- **Reviewer quorum.** Every requested reviewer is attested as returned or missing
+  with its failure reason; a review below quorum (a majority of the panel, floor 2)
+  is INVALID, never clean. A dead reviewer and a reviewer who found nothing are not
+  the same thing.
 
 ## Tools
 

@@ -522,10 +522,16 @@ def _verdict_section(
     if wall is None:
         wall = budget.get("wallClockMs") or time_section.get("total_ms")
 
+    # #81: who was ASKED to review versus who actually reported. A verdict read on
+    # its own must never be able to hide that the panel was dead — "0 findings"
+    # and "nobody looked" print differently here.
+    reviewers = outcome.get("reviewers") if isinstance(outcome.get("reviewers"), dict) else None
+
     return {
         "status": status,
         "reason": outcome.get("reason") or outcome.get("message") or "",
         "rounds": result.get("rounds"),
+        "reviewers": reviewers,
         # Absent on a run from before the budget existed — rendered without the
         # "of N" clause rather than with a fabricated denominator.
         "max_rounds": budget.get("maxRounds"),
@@ -686,6 +692,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             rounds_str += f" ({breakdown})"
         wall = v.get("wall_clock_ms")
         parts = [rounds_str, f"{_fmt_tokens(v['tokens'])} tokens", f"${v['cost_usd']:.2f}"]
+        rev = v.get("reviewers")
+        if isinstance(rev, dict) and rev.get("requested"):
+            parts.append(f"reviewers {rev.get('returned', 0)}/{rev['requested']} returned")
         if wall:
             parts.append(f"{_fmt_ms(wall)} wall-clock")
         lines.append(f"**VERDICT: {v['status']}** — " + " · ".join(parts) + "\n")

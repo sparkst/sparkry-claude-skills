@@ -749,6 +749,114 @@ function renderLedger(ledger = []) {
   return lines.join("\n").replace(/\s+$/, "");
 }
 
+// ---------------------------------------------------------------------------
+// Reviewer attestation + quorum (#81 / this repo #43)
+//
+// A review round is EVIDENCE only if the panel that was asked for actually
+// reported. Before this, `reviews.filter(Boolean)` dropped every reviewer that
+// failed to return, so a dead reviewer and a reviewer that found nothing were
+// indistinguishable — and an all-dead round yielded zero findings, which the
+// termination rule read as CONVERGED. That false GREEN shipped twice on record:
+// 29 of 32 review agents died on a usage limit and the loop returned
+// `converged:true` over a broken artifact (2026-08), and both reviewers died on
+// `Login expired` while the surviving spot-fixer wrote a test that PINNED a known
+// defect, all under a green verdict (Quark, 2026-09-02).
+//
+// So the count is never dropped: every requested reviewer is attested as returned
+// or missing-with-a-reason, and the quorum decides whether the round counts.
+// ---------------------------------------------------------------------------
+
+/** A reviewer that produced nothing at all — the shape `filter(Boolean)` ate. */
+const REVIEWER_NO_RESULT = "returned no result (agent produced no output)";
+/** A reviewer that answered with something that is not a findings list. */
+const REVIEWER_MALFORMED = "returned a malformed result (no findings array)";
+/** A death whose cause the runtime did not name. */
+const REVIEWER_UNKNOWN_REASON = "failed for an unnamed reason";
+
+// Reasons come from agent runtimes and can be long or multi-line; the verdict has
+// to stay one readable line, so normalize and cap them.
+function cleanReason(reason) {
+  const s = String(reason ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return REVIEWER_UNKNOWN_REASON;
+  return s.length > 240 ? `${s.slice(0, 237)}...` : s;
+}
+
+/**
+ * How many reviewers must actually report for a round to count as evidence.
+ *
+ * A majority of the panel, with a floor of 2 (or the whole panel when only one
+ * was asked for, as in a proportional verifier round). Majority — not a fixed
+ * floor — is what makes the 29-of-32 shape INVALID: three survivors clear any
+ * constant floor while 90% of the lenses are silent.
+ */
+function reviewerQuorum(requested) {
+  const n = Math.max(0, Math.trunc(Number(requested) || 0));
+  if (n === 0) return 0;
+  return Math.max(Math.min(2, n), Math.ceil(n / 2));
+}
+
+/**
+ * Attest one round's reviewer panel.
+ *
+ * @param settled per-reviewer results in request order, each
+ *   `{ name, ok: true, value }` or `{ name, ok: false, reason }`. The caller
+ *   settles them (catching rejections) so one dead reviewer cannot abort the fan-out.
+ * @returns { requested, returned, quorum, quorumMet, missing: [{name, reason}], lists }
+ *   `lists` holds ONLY the findings of reviewers that genuinely reported, so
+ *   synthesis never mixes a silence in with the evidence.
+ */
+function attestReviewers(settled = []) {
+  const attested = (settled ?? []).map((s, i) => {
+    const name = String(s?.name ?? `reviewer-${i + 1}`);
+    if (s && s.ok === false) return { name, returned: false, reason: cleanReason(s.reason) };
+    const value = s ? s.value : undefined;
+    if (value === null || value === undefined) return { name, returned: false, reason: REVIEWER_NO_RESULT };
+    const findings = Array.isArray(value)
+      ? value
+      : Array.isArray(value.findings)
+        ? value.findings
+        : null;
+    if (findings === null) return { name, returned: false, reason: REVIEWER_MALFORMED };
+    return { name, returned: true, findings };
+  });
+
+  const requested = attested.length;
+  const returned = attested.filter((a) => a.returned);
+  const quorum = reviewerQuorum(requested);
+  return {
+    requested,
+    returned: returned.length,
+    quorum,
+    // A round that asked for no reviewers (the deterministic gate round) has
+    // nothing to attest and is valid on its own terms — quorum gates panels.
+    quorumMet: requested === 0 ? true : returned.length >= quorum,
+    missing: attested.filter((a) => !a.returned).map((a) => ({ name: a.name, reason: a.reason })),
+    lists: returned.map((a) => a.findings),
+  };
+}
+
+/**
+ * The loud line. A reviewer that died environmentally names WHY, because
+ * "0 findings" and "nobody looked" must never read the same to a human.
+ */
+function describeReviewerShortfall(round, attestation) {
+  const a = attestation ?? {};
+  const why = (a.missing ?? []).length
+    ? (a.missing ?? []).map((m) => `${m.name}: ${m.reason}`).join("; ")
+    : "no reviewer reported";
+  return (
+    `Round ${round} INVALID — reviewer quorum not met: ${a.returned ?? 0}/${a.requested ?? 0} reviewers ` +
+    `returned (quorum ${a.quorum ?? 0}). Failed reviewers — ${why}. Zero findings from a panel that did not ` +
+    `run is absence of evidence, not evidence of absence: this round proves nothing and counts for nothing.`
+  );
+}
+
+/** The attestation as it rides in the verdict string: `reviewers 2/2 returned`. */
+function renderAttestation(attestation) {
+  const a = attestation ?? {};
+  return `reviewers ${a.returned ?? 0}/${a.requested ?? 0} returned`;
+}
+
 // ===== inlined from stopping-rules.mjs (generated; edit stopping-rules.mjs, then rebuild) =====
 // Deterministic stopping rules for the convergence loop.
 //
@@ -1580,28 +1688,43 @@ async function runLoop(config, ctx) {
   // Python cap is never overridden), which also enforces tiering for a caller
   // that supplies flags but skipped team-selector.
   //
-  // Returns the per-reviewer findings lists PLUS how many reviewers were asked
-  // for versus how many came back. The counts are recorded on every round report
+  // Returns the ATTESTATION (#81): the per-reviewer findings lists PLUS how many
+  // reviewers were asked for versus how many came back, and why each missing one
+  // is missing. The counts are recorded on every round report
   // and in the verdict; deciding that a shortfall makes the round INVALID is the
   // quorum gate (#81 / this repo #43), which flips `valid` on the round report.
   // Everything downstream of that flag — the round budget and the divergence
   // window — already ignores invalid rounds.
+  //
+  // Each reviewer is SETTLED rather than awaited raw: one that dies
+  // environmentally (expired auth, killed session, timeout) must be recorded WITH
+  // its reason — never allowed to abort the whole fan-out, and never dropped by a
+  // filter that leaves it indistinguishable from a reviewer who found nothing.
+  async function settleReviewer(name, thunk) {
+    try {
+      return { name, ok: true, value: await thunk() }
+    } catch (e) {
+      return { name, ok: false, reason: e && e.message ? e.message : String(e) }
+    }
+  }
+
   async function fanOutReviewers(r, testSummary) {
     const reviews = await parallel(
       team.map((agentDef) => () =>
-        agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath, ledger), {
-          label: `review:${agentDef.name}:r${r}`,
-          phase: `Round ${r}`,
-          model: resolveReviewerModel(agentDef, resolverComplexity, {
-            escalationEligible: agentDef.escalation_eligible ?? agentDef.escalationEligible ?? false,
-            highStakes: agentDef.high_stakes ?? agentDef.highStakes ?? false,
-          }) || agentDef.model || 'sonnet',
-          schema: FINDINGS_SCHEMA,
-        }),
+        settleReviewer(agentDef.name, () =>
+          agent(reviewerPrompt(agentDef, r, artifact, requirements, testSummary, priorFindings, priorResolutions, historyPath, ledger), {
+            label: `review:${agentDef.name}:r${r}`,
+            phase: `Round ${r}`,
+            model: resolveReviewerModel(agentDef, resolverComplexity, {
+              escalationEligible: agentDef.escalation_eligible ?? agentDef.escalationEligible ?? false,
+              highStakes: agentDef.high_stakes ?? agentDef.highStakes ?? false,
+            }) || agentDef.model || 'sonnet',
+            schema: FINDINGS_SCHEMA,
+          }),
+        ),
       ),
     )
-    const returned = reviews.filter(Boolean)
-    return { lists: returned.map((x) => x.findings || []), requested: team.length, returned: returned.length }
+    return attestReviewers(reviews)
   }
 
   for (let r = 1; r <= hardCap; r++) {
@@ -1636,16 +1759,26 @@ async function runLoop(config, ctx) {
     let reviewerLists
     let testSummary = 'No test results available.'
     let roundKind = proportional ? 'delta' : 'full'
+    // #81: this round's reviewer attestation. A deterministic gate round asks for
+    // no reviewers at all, so it starts as an empty — and therefore satisfied — panel.
+    let attestation = attestReviewers([])
 
     if (proportional) {
       if (opt009) proportionalUsed = true
       deltaEligibility = null
       phase(`Verify (round ${r})`)
-      const verifier = await agent(
-        verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath, ledger),
-        { label: `verify:r${r}`, phase: `Round ${r}`, model: 'sonnet', schema: FINDINGS_SCHEMA },
+      // The single verifier IS this round's whole panel, so it is attested like any
+      // other: a dead verifier makes a dead round, not a clean one (#81).
+      const verifier = await settleReviewer('verifier', () =>
+        agent(
+          verifierPrompt(artifact, requirements, priorFindings, priorResolutions, historyPath, ledger),
+          { label: `verify:r${r}`, phase: `Round ${r}`, model: 'sonnet', schema: FINDINGS_SCHEMA },
+        ),
       )
-      reviewerLists = [verifier?.findings || []]
+      attestation = attestReviewers([verifier])
+      reviewersRequested = attestation.requested
+      reviewersReturned = attestation.returned
+      reviewerLists = attestation.lists
       testSummary = 'Proportional verification round — no test gate run.'
     } else {
       deltaEligibility = null
@@ -1689,12 +1822,56 @@ async function runLoop(config, ctx) {
           log(`Round ${r}: gate still failing after ${consecutiveGateRounds} gate round(s) — running the full review anyway.`)
         }
         consecutiveGateRounds = 0
-        const fan = await fanOutReviewers(r, testSummary)
-        reviewerLists = fan.lists
-        reviewersRequested = fan.requested
-        reviewersReturned = fan.returned
+        attestation = await fanOutReviewers(r, testSummary)
+        reviewerLists = attestation.lists
+        reviewersRequested = attestation.requested
+        reviewersReturned = attestation.returned
         if (gateFailures.length) reviewerLists.push(gateFailures)
       }
+    }
+
+    // ── THE QUORUM GATE (#81 / this repo #43) ───────────────────────────────
+    // The panel that was asked for did not report, so this round is not evidence
+    // ABOUT THE ARTIFACT and nothing downstream may act on it: no synthesis, no
+    // ledger adjudication (a fix "not re-raised" by reviewers who never ran is not
+    // settled), no spot-fixer on the survivors' partial list, and above all no
+    // convergence. The round is recorded INVALID with every failure reason, spends
+    // no round budget, and the loop re-runs. A panel that keeps dying escalates on
+    // the ENVIRONMENT rather than certifying the artifact.
+    if (!attestation.quorumMet) {
+      const shortfall = describeReviewerShortfall(r, attestation)
+      log(shortfall)
+      roundReports.push({
+        round: r, findings: [], counts: countBySeverity([]), significant: 0, trivial: 0,
+        newP0P1: 0, dropped: 0, converged: false, message: shortfall, proportional,
+        kind: roundKind, valid: false, ms: Math.max(0, now() - roundStartedAt),
+        reviewers_requested: attestation.requested, reviewers_returned: attestation.returned,
+        reviewers_quorum: attestation.quorum, reviewers_missing: attestation.missing,
+        delta_reason: deltaReasonForRound,
+      })
+      const spentInvalid = summarizeBudget(roundReports, { maxRounds })
+      if (maxInvalidRounds > 0 && spentInvalid.invalidRounds >= maxInvalidRounds) {
+        outcome = {
+          status: 'escalated',
+          reason:
+            `Environment: ${spentInvalid.invalidRounds} of ${spentInvalid.roundsRun} rounds did not produce a ` +
+            `valid reviewer panel (limit ${maxInvalidRounds}). This run proves nothing about the artifact — ` +
+            `fix the environment and re-run. ${shortfall}`,
+          reviewers: {
+            requested: attestation.requested, returned: attestation.returned,
+            quorum: attestation.quorum, missing: attestation.missing,
+          },
+          unresolved: [],
+          round: r,
+        }
+        break
+      }
+      // A dead panel leaves the artifact unread, so nothing carries forward: the
+      // next round is a FULL re-read, never a delta off state nobody verified.
+      lastRoundKind = 'invalid'
+      lastRoundConverged = false
+      deltaEligibility = null
+      continue
     }
 
     // Capture reviewer `significance` flags from the RAW findings by normalized
@@ -1746,8 +1923,11 @@ async function runLoop(config, ctx) {
       newP0P1, dropped: dropped.length, converged, message, proportional,
       kind: roundKind, valid: true, ms: Math.max(0, now() - roundStartedAt),
       reviewers_requested: reviewersRequested, reviewers_returned: reviewersReturned,
+      reviewers_quorum: attestation.quorum, reviewers_missing: attestation.missing,
       delta_reason: deltaReasonForRound,
     }
+    // The hook may only ADD invalidation: a round that failed the quorum gate never
+    // reaches here, so no caller can vote a dead panel back into evidence.
     if (validateRound) report.valid = validateRound(report) !== false
     roundReports.push(report)
     // The round's position in the budget rides on every line, so a run that is
@@ -1786,8 +1966,21 @@ async function runLoop(config, ctx) {
 
     // Converged (no significant findings) AND past the minimum-rounds floor → done.
     // A re-opening proportional round never converges here (any finding re-opens).
-    if (converged && r >= minRounds && !proportionalReopen) {
-      outcome = { status: 'converged', message, round: r }
+    // The min-rounds floor counts VALID rounds, not attempts (#81): converging off
+    // one valid round because the other attempt had a dead panel is the same false
+    // green by another route.
+    if (converged && spentSoFar.validRounds >= minRounds && !proportionalReopen) {
+      outcome = {
+        status: 'converged',
+        // The count rides IN the verdict, so a human reading only this line sees
+        // what the execution table shows: who was asked, and who answered.
+        message: `${message} (${renderAttestation(attestation)})`,
+        round: r,
+        reviewers: {
+          requested: attestation.requested, returned: attestation.returned,
+          quorum: attestation.quorum, missing: attestation.missing,
+        },
+      }
       break
     }
 
@@ -1904,6 +2097,23 @@ async function runLoop(config, ctx) {
     lastRoundKind = roundKind
   }
 
+  // A run that falls out of the loop with no verdict would read downstream as
+  // neither converged nor escalated — silence that the pipeline's halt check waves
+  // through. Every exit gets a verdict (#81).
+  if (!outcome) {
+    const spentFinal = summarizeBudget(roundReports, { maxRounds })
+    const lastReport = roundReports[roundReports.length - 1] || {}
+    outcome = {
+      status: 'escalated',
+      reason:
+        `Hard cap (${hardCap} rounds) reached without a verdict: ${spentFinal.validRounds} valid round(s), ` +
+        `${spentFinal.invalidRounds} invalid (below reviewer quorum). This run proves nothing about the artifact.` +
+        (lastReport.message ? ` Last round: ${lastReport.message}` : ''),
+      unresolved: (lastReport.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1'),
+      round: roundReports.length,
+    }
+  }
+
   // Best-effort cleanup of the temporary history files (OPT-015).
   if (historyPaths.length) {
     await agent(cleanupPrompt(historyPaths), {
@@ -1943,6 +2153,7 @@ async function runLoop(config, ctx) {
       newP0P1: rr.newP0P1, converged: rr.converged, message: rr.message,
       kind: rr.kind, valid: rr.valid, ms: rr.ms, delta_reason: rr.delta_reason,
       reviewers_requested: rr.reviewers_requested, reviewers_returned: rr.reviewers_returned,
+      reviewers_quorum: rr.reviewers_quorum, reviewers_missing: rr.reviewers_missing,
     })),
   }
 }
