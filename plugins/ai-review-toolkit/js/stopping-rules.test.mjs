@@ -215,3 +215,30 @@ test("STOP-031: an empty run summarizes to zeros rather than throwing", () => {
     gateRounds: 0,
   });
 });
+
+// ── Replay of the two REAL runs on record ────────────────────────────────────
+//
+// Source: ~/memory/global/qreview-large-diff-does-not-converge-budget-rounds.md
+// (written 2026-09-03 from the live runs). The rule has to halt the first and
+// leave the second alone, or it is either useless or actively harmful.
+
+test("STOP-040: pm-816-intake-0903 (19 rounds, ~5M tokens) is halted at round 6", () => {
+  // Rounds 9-18 each surfaced 1-2 REAL P0s, so the run never decayed. Rounds 1-6
+  // are replayed at the same steady arrival rate the halt would have seen.
+  const rounds = [1, 2, 3, 4, 5, 6].map((r) => RR(r, r % 2 ? 1 : 2));
+  const got = detectDivergence(rounds);
+  assert.equal(got.diverging, true);
+  assert.match(got.reason, /SPLIT/);
+});
+
+test("STOP-041: PR #18's 7 asymptotic-but-decaying rounds are NOT halted", () => {
+  // The counter-case, same memory entry: a 300 KB diff whose panel found real
+  // hardening every round (P1 10, 8, 5, 7, 7, 6, 6) and which the independent
+  // reviewer then merged clean. Real work that is slowly decaying must not be
+  // mistaken for divergence — a halt here would have destroyed a good run.
+  const counts = [10, 8, 5, 7, 7, 6, 6];
+  const rounds = counts.map((n, i) => RR(i + 1, n));
+  for (let n = 6; n <= rounds.length; n++) {
+    assert.equal(detectDivergence(rounds.slice(0, n)).diverging, false, `fired after round ${n}`);
+  }
+});
