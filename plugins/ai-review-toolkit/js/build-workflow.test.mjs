@@ -8,9 +8,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import vm from "node:vm";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKFLOWS = ["review-loop.workflow.js", "pipeline-auto.workflow.js"];
@@ -39,3 +41,42 @@ for (const wf of WORKFLOWS) {
     );
   });
 }
+
+test("REQ-NOW-03: generated review workflow resolves when the runtime clock throws", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "review-workflow-now-"));
+  try {
+    const artifact = join(dir, "artifact.txt");
+    const requirements = join(dir, "requirements.txt");
+    writeFileSync(artifact, "tiny artifact\n");
+    writeFileSync(requirements, "REQ-1: remain reviewable\n");
+
+    // Workflow accepts exported helpers in its script body. A classic vm.Script
+    // does not, so remove only the export modifier before wrapping the same body.
+    const source = readFileSync(join(HERE, "review-loop.workflow.js"), "utf8")
+      .replace(/^export\s+/gm, "");
+    const context = vm.createContext({
+      args: {
+        artifact,
+        requirements,
+        team: [{ name: "reviewer", model: "sonnet", review_lens: "correctness" }],
+        rounds: 1,
+        skipTests: true,
+      },
+      Date: class WorkflowDate extends Date {
+        static now() {
+          throw new Error("Date.now() / new Date() are unavailable in workflow scripts (breaks resume)");
+        }
+      },
+      agent: async () => ({ findings: [] }),
+      parallel: (thunks) => Promise.all(thunks.map((thunk) => thunk())),
+      pipeline: async (fn) => fn(),
+      phase: () => {},
+      log: () => {},
+      budget: {},
+    });
+    const result = await new vm.Script(`(async () => {\n${source}\n})()`).runInContext(context);
+    assert.equal(typeof result.outcome, "object");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

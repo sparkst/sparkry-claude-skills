@@ -88,6 +88,27 @@ test("converges once findings clear, respecting the min-2-rounds floor", async (
   assert.deepEqual(out.final_counts, { P0: 0, P1: 0, P2: 0, P3: 0 });
 });
 
+test("REQ-NOW-02: unavailable workflow clock does not prevent two-round convergence", async () => {
+  const originalNow = globalThis.Date.now;
+  globalThis.Date.now = () => {
+    throw new Error("Date.now() / new Date() are unavailable in workflow scripts (breaks resume)");
+  };
+  try {
+    const ctx = makeCtx([
+      { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+      { findings: [] },
+    ]);
+    const out = await runLoop(
+      { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 },
+      ctx,
+    );
+    assert.equal(out.outcome.status, "converged");
+    assert.equal(out.budget.wallClockMs, null);
+  } finally {
+    globalThis.Date.now = originalNow;
+  }
+});
+
 test("escalates on max rounds when it never converges (distinct findings avoid stuck)", async () => {
   const ctx = makeCtx([
     { findings: [F("P0-001", "P0", "Bug A")], resolutions: [R("P0-001")] },
