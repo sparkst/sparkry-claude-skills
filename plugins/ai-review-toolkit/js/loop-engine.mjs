@@ -542,10 +542,12 @@ export async function runLoop(config, ctx) {
   const singleRound = rounds === 1
   const minRounds = singleRound ? 1 : 2
   const maxRounds = Math.max(maxRoundsArg ?? (singleRound ? 1 : 5), minRounds)
-  // The spot-fixer is withheld only when the run truly cannot exceed one round
-  // (REQ-42-1: a plain /qreview). A run that may take further rounds keeps it, so
-  // the Haiku spot-fixer is never disabled while the full fixer keeps editing.
-  const spotFixAllowed = maxRounds > 1
+  // REQ-42-1 (literal): the spot-fixer never edits a single-pass run, regardless
+  // of what maxRounds the caller also passed. singleRound (rounds === 1) is the
+  // one-round floor a caller sets deliberately (a plain /qreview, or
+  // pipeline-auto's documented single-pass integration-plan diagnose) — a caller
+  // that wants the spot-fixer available must not also ask for exactly one round.
+  const spotFixAllowed = !singleRound
   // The round BUDGET is spent in valid rounds only (#81), so the `for` bound must
   // be an absolute ceiling or a reviewer panel that keeps dying would spin forever.
   const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)

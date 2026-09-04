@@ -133,7 +133,7 @@ test("REQ-42-1: single-round (qreview) mode never runs the spot-fixer or spot-ch
   assert.equal(out.history[0].trivial, 1, "the trivial finding is still reported, just never spot-fixed");
 });
 
-test("REQ-42-1 latent-shape guard: rounds:1 with maxRounds>1 keeps the spot-fixer active", async () => {
+test("REQ-42-1 latent-shape guard: rounds:1 with maxRounds>1 still withholds the spot-fixer", async () => {
   const ctx = makeCtx([
     { findings: [F("P2-001", "P2", "Cosmetic nit")] },
     { findings: [] },
@@ -142,14 +142,15 @@ test("REQ-42-1 latent-shape guard: rounds:1 with maxRounds>1 keeps the spot-fixe
     { artifact: "a", requirements: "r", team: TEAM, threshold: 0, rounds: 1, maxRounds: 5 },
     ctx
   );
+  assert.equal(out.rounds, 1, "rounds:1 must keep its 1-round floor (no forced second round)");
   assert.equal(
     labelsWith(ctx, "spotfix:").length,
-    1,
-    "a caller that also passes maxRounds>1 gets the spot-fixer, not the qreview diagnose-only guard"
+    0,
+    "REQ-42-1 is literal: rounds:1 withholds the spot-fixer regardless of maxRounds"
   );
 });
 
-test("REQ-42-1 no-regression: pipeline-auto's {rounds:1, maxRounds:4} still converges in ONE round", async () => {
+test("REQ-42-1: pipeline-auto's {rounds:1, maxRounds:4} integration-plan diagnose stays edit-free", async () => {
   const ctx = makeCtx([
     { findings: [F("P2-001", "P2", "Cosmetic nit")] },
     { findings: [] },
@@ -160,6 +161,11 @@ test("REQ-42-1 no-regression: pipeline-auto's {rounds:1, maxRounds:4} still conv
   );
   assert.equal(out.rounds, 1, "rounds:1 must keep its 1-round floor (no forced second round)");
   assert.equal(labelsWith(ctx, "fix:").length, 0, "no full fixer round may run on a single-pass diagnose");
+  assert.equal(
+    labelsWith(ctx, "spotfix:").length,
+    0,
+    "no spot-fixer may run on pipeline-auto's documented single-pass diagnose"
+  );
 });
 
 test("validates inputs", async () => {
