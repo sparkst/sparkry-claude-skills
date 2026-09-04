@@ -1942,8 +1942,11 @@ async function runLoop(config, ctx) {
 
     // Spot-fix trivial nits cheaply (Haiku) + a light spot-check. Opportunistic,
     // non-blocking, doesn't reset the convergence counter.
+    // REQ-42-1: single-round (/qreview) mode is DIAGNOSE-ONLY. The skill promises
+    // "/qreview never edits the artifact", so no spot-fixer and no spot-check may
+    // touch the tree there — trivial findings are still counted and reported.
     let trivialResolutions = []
-    if (trivial.length) {
+    if (trivial.length && !singleRound) {
       const spot = await agent(spotFixerPrompt(artifact, requirements, trivial), {
         label: `spotfix:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: RESOLUTIONS_SCHEMA,
       })
