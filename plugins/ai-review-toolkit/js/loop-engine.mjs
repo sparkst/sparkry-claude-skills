@@ -536,7 +536,11 @@ export async function runLoop(config, ctx) {
     validateRound = null,
   } = config
 
-  const singleRound = rounds === 1
+  // singleRound gates the spot-fixer (REQ-42-1): it must stay true only when the
+  // run truly cannot exceed one round, so a caller passing {rounds: 1, maxRounds: N>1}
+  // (which would still let the loop run multiple rounds) does not get the spot-fixer
+  // silently disabled for those later rounds while the full sonnet fixer keeps editing.
+  const singleRound = rounds === 1 && (maxRoundsArg == null || maxRoundsArg === 1)
   const minRounds = singleRound ? 1 : 2
   const maxRounds = Math.max(maxRoundsArg ?? (singleRound ? 1 : 5), minRounds)
   // The round BUDGET is spent in valid rounds only (#81), so the `for` bound must

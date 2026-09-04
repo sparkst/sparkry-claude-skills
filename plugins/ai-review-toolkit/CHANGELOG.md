@@ -1,6 +1,6 @@
 # Changelog — ai-review-toolkit
 
-## 1.11.0
+## 1.10.1
 
 ### Fixed
 - **`/qreview` is diagnose-only again: single-round mode no longer runs the Haiku

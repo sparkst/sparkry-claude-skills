@@ -142,7 +142,8 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
   always includes P0/P1, so subtracting them leaves the reviewer-flagged
   significant P2/P3; single pass, so round 0 is the only round). Do NOT count raw
   P2/P3 in `final_findings`: the fleet key is `p2p3_significant_findings`, and the
-  trivial cosmetic nits the engine spot-fixes are not significant. `--review-rounds`
+  trivial cosmetic nits (which the engine spot-fixes only on multi-round `/qloop`
+  runs, never on single-pass `/qreview`) are not significant. `--review-rounds`
   = review rounds EXECUTED, for single-pass `/qreview`: 1. (The fleet key's gloss
   is "rounds until no P0/P1"; an unconverged pass records the rounds it ran, and
   its unresolved P0/P1 are already in `--p0p1`, so the pair reads together.)
