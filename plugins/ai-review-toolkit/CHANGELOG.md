@@ -13,7 +13,11 @@
   Trivial findings are still counted and reported in single-round mode; only the
   edit is withheld (REQ-42-1). Multi-round `/qloop` behavior is unchanged —
   trivial findings are still spot-fixed and still do not block convergence
-  (REQ-42-2). Bundles regenerated (REQ-42-5).
+  (REQ-42-2). The guard is a dedicated `spotFixAllowed = maxRounds > 1` flag, so
+  `singleRound` keeps its original meaning and callers that pass `{rounds: 1,
+  maxRounds: N>1}` (pipeline-auto's integration-plan single-pass diagnose) keep
+  their 1-round floor and their round budget unchanged. Bundles regenerated
+  (REQ-42-5).
 
 ## 1.10.0
 

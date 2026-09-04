@@ -133,22 +133,33 @@ test("REQ-42-1: single-round (qreview) mode never runs the spot-fixer or spot-ch
   assert.equal(out.history[0].trivial, 1, "the trivial finding is still reported, just never spot-fixed");
 });
 
-test("REQ-42-1 latent-shape guard: rounds:1 with maxRounds>1 is NOT single-round — spot-fixer stays active", async () => {
+test("REQ-42-1 latent-shape guard: rounds:1 with maxRounds>1 keeps the spot-fixer active", async () => {
   const ctx = makeCtx([
-    { findings: [F("P2-001", "P2", "Cosmetic nit")] }, // trivial, first-seen → no significant
+    { findings: [F("P2-001", "P2", "Cosmetic nit")] },
     { findings: [] },
   ]);
   const out = await runLoop(
     { artifact: "a", requirements: "r", team: TEAM, threshold: 0, rounds: 1, maxRounds: 5 },
     ctx
   );
-  assert.equal(out.outcome.status, "converged");
-  assert.equal(out.rounds, 2, "maxRounds must still govern the loop even though rounds was 1");
   assert.equal(
     labelsWith(ctx, "spotfix:").length,
     1,
-    "a caller that also passes maxRounds>1 gets ordinary multi-round behavior, not the qreview single-round guard"
+    "a caller that also passes maxRounds>1 gets the spot-fixer, not the qreview diagnose-only guard"
   );
+});
+
+test("REQ-42-1 no-regression: pipeline-auto's {rounds:1, maxRounds:4} still converges in ONE round", async () => {
+  const ctx = makeCtx([
+    { findings: [F("P2-001", "P2", "Cosmetic nit")] },
+    { findings: [] },
+  ]);
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, rounds: 1, maxRounds: 4 },
+    ctx
+  );
+  assert.equal(out.rounds, 1, "rounds:1 must keep its 1-round floor (no forced second round)");
+  assert.equal(labelsWith(ctx, "fix:").length, 0, "no full fixer round may run on a single-pass diagnose");
 });
 
 test("validates inputs", async () => {

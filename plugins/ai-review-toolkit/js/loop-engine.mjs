@@ -536,13 +536,16 @@ export async function runLoop(config, ctx) {
     validateRound = null,
   } = config
 
-  // singleRound gates the spot-fixer (REQ-42-1): it must stay true only when the
-  // run truly cannot exceed one round, so a caller passing {rounds: 1, maxRounds: N>1}
-  // (which would still let the loop run multiple rounds) does not get the spot-fixer
-  // silently disabled for those later rounds while the full sonnet fixer keeps editing.
-  const singleRound = rounds === 1 && (maxRoundsArg == null || maxRoundsArg === 1)
+  // singleRound keeps its original meaning (the caller asked for one round), so a
+  // caller like pipeline-auto's integration-plan step ({rounds: 1, maxRounds: 4})
+  // keeps its 1-round floor and does not silently become a 2-round fix loop.
+  const singleRound = rounds === 1
   const minRounds = singleRound ? 1 : 2
   const maxRounds = Math.max(maxRoundsArg ?? (singleRound ? 1 : 5), minRounds)
+  // The spot-fixer is withheld only when the run truly cannot exceed one round
+  // (REQ-42-1: a plain /qreview). A run that may take further rounds keeps it, so
+  // the Haiku spot-fixer is never disabled while the full fixer keeps editing.
+  const spotFixAllowed = maxRounds > 1
   // The round BUDGET is spent in valid rounds only (#81), so the `for` bound must
   // be an absolute ceiling or a reviewer panel that keeps dying would spin forever.
   const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)
@@ -863,11 +866,12 @@ export async function runLoop(config, ctx) {
 
     // Spot-fix trivial nits cheaply (Haiku) + a light spot-check. Opportunistic,
     // non-blocking, doesn't reset the convergence counter.
-    // REQ-42-1: single-round (/qreview) mode is DIAGNOSE-ONLY. The skill promises
+    // REQ-42-1: single-round (/qreview) mode is DIAGNOSE-ONLY (rounds:1 and no
+    // maxRounds above 1, i.e. maxRounds === 1). The skill promises
     // "/qreview never edits the artifact", so no spot-fixer and no spot-check may
     // touch the tree there — trivial findings are still counted and reported.
     let trivialResolutions = []
-    if (trivial.length && !singleRound) {
+    if (trivial.length && spotFixAllowed) {
       const spot = await agent(spotFixerPrompt(artifact, requirements, trivial), {
         label: `spotfix:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: RESOLUTIONS_SCHEMA,
       })
