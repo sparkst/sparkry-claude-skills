@@ -767,6 +767,23 @@ test("STOP-130: the verdict carries rounds by kind, reviewer counts and wall clo
   assert.deepEqual(out.history.map((h) => `${h.reviewers_returned}/${h.reviewers_requested}`), ["0/0", "2/2", "1/1"]);
 });
 
+test("NOW-001 (#52): runLoop completes when Date.now throws the Workflow runtime error", async () => {
+  const ctx = makeCtx([
+    { verifyFindings: [] },
+  ]);
+  const realDateNow = Date.now;
+  Date.now = () => {
+    throw new Error("Date.now() / new Date() are unavailable in workflow scripts (breaks resume)");
+  };
+  try {
+    const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 }, ctx);
+    assert.equal(out.outcome.status, "converged");
+    assert.equal(out.budget.wallClockMs, "n/a");
+  } finally {
+    Date.now = realDateNow;
+  }
+});
+
 test("STOP-103: single-round (qreview) mode never lets the gate claim the round", async () => {
   // qreview promises one clean-context diagnose pass. A red suite must not turn
   // that into "here are your test failures, no reviewer read the artifact".

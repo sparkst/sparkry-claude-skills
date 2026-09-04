@@ -737,6 +737,23 @@ class TestVerdict:
         assert v["cost_usd"] > 0
         assert "SPLIT" in v["reason"]
 
+    def test_verdict_line_renders_na_wall_clock_when_clock_unavailable(self):
+        na_result = {
+            "outcome": {"status": "converged", "reason": "clean"},
+            "rounds": 3,
+            "budget": {"maxRounds": 5, "roundsRun": 3, "validRounds": 3, "invalidRounds": 0,
+                       "fullRounds": 1, "deltaRounds": 1, "gateRounds": 1,
+                       "maxInvalidRounds": 5, "hardCap": 10, "wallClockMs": "n/a"},
+            "history": [{"round": 1, "reviewers_requested": 2, "reviewers_returned": 2}],
+        }
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(na_result))
+        report = build_scorecard({}, agg, load_pricing())
+        v = report["verdict"]
+        assert v["wall_clock_ms"] == "n/a"
+        md = render_markdown(report)
+        assert "n/a wall-clock" in md
+        assert "0 ms wall-clock" not in md
+
     def test_verdict_line_is_rendered_at_the_top(self):
         agg = aggregate_workflow(_agents_for_cost(), _wf_meta(DIVERGED))
         md = render_markdown(build_scorecard({}, agg, load_pricing()))
