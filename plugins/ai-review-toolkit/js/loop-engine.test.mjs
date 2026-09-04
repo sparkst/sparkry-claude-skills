@@ -124,6 +124,15 @@ test("single-round (qreview) mode: one round, no fixer, escalates unresolved", a
   assert.equal(out.outcome.status, "escalated");
 });
 
+test("REQ-42-1: single-round (qreview) mode never runs the spot-fixer or spot-check on trivial findings", async () => {
+  const ctx = makeCtx([{ findings: [F("P2-001", "P2", "Cosmetic nit")] }]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: [TEAM[0]], rounds: 1 }, ctx);
+  assert.equal(out.rounds, 1);
+  assert.deepEqual(labelsWith(ctx, "spotfix:"), [], "no spot-fixer may run on a plain /qreview");
+  assert.deepEqual(labelsWith(ctx, "spotcheck:"), [], "no spot-check may run on a plain /qreview");
+  assert.equal(out.history[0].trivial, 1, "the trivial finding is still reported, just never spot-fixed");
+});
+
 test("validates inputs", async () => {
   const ctx = makeCtx([]);
   await assert.rejects(() => runLoop({ requirements: "r", team: TEAM }, ctx), /requires artifact/);
