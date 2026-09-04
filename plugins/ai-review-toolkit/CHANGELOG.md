@@ -1,5 +1,14 @@
 # Changelog — ai-review-toolkit
 
+## 1.10.3
+
+### Fixed
+- Workflow runs no longer fail before round 1 when the runtime replaces
+  `Date.now` with a throwing function. The convergence engine treats an
+  unavailable clock as unknown, reports `budget.wallClockMs` as `null`, and
+  renders `wall-clock n/a` instead of a fabricated zero duration. Both generated
+  workflow bundles include the fix.
+
 ## 1.10.2
 
 Re-land of 1.10.1 after the deploy walkthrough gate rolled it back (receipt gap, not a code defect).

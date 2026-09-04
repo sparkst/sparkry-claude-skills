@@ -757,6 +757,30 @@ class TestVerdict:
         assert "VERDICT: CONVERGED" in md
         assert "3 of 5 rounds" in md
 
+    def test_unknown_engine_clock_falls_back_to_the_harness_wall_clock(self):
+        # #52 P2: the loop's own clock is unavailable (null) under the Workflow
+        # runtime, but the harness independently measured 60s of real elapsed
+        # time — the verdict must show that, not an invented "n/a" while the
+        # Model Execution Time section reports the same known duration.
+        result = {"outcome": {"status": "converged"}, "rounds": 1,
+                  "budget": {"maxRounds": 1, "wallClockMs": None}}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        report = build_scorecard({}, agg, load_pricing())
+        assert report["verdict"]["wall_clock_ms"] == 60_000
+        assert "wall-clock n/a" not in render_markdown(report)
+
+    def test_verdict_line_renders_zero_wall_clock_when_genuinely_instant(self):
+        # #52 P3: a real 0ms run must render its wall-clock, not be conflated
+        # with "clock unavailable" — only `None` means unknown.
+        result = {"outcome": {"status": "converged"}, "rounds": 1,
+                  "budget": {"maxRounds": 1, "wallClockMs": 0}}
+        agg = aggregate_workflow(_agents_for_cost(), _wf_meta(result, 60_000))
+        report = build_scorecard({}, agg, load_pricing())
+        assert report["verdict"]["wall_clock_ms"] == 0
+        md = render_markdown(report)
+        assert "wall-clock n/a" not in md
+        assert "wall-clock" in md
+
     def test_invalid_rounds_are_named_in_the_verdict(self):
         result = {"outcome": {"status": "escalated", "reason": "Environment: 3 of 5 rounds..."}, "rounds": 5,
                   "budget": {"maxRounds": 5, "roundsRun": 5, "validRounds": 2, "invalidRounds": 3,

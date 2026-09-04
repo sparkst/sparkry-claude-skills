@@ -66,7 +66,7 @@ Snapshot for the "Option 3" model-tiering + deterministic scorecard task.
 - Acceptance: 2 invalid rounds leave 3 valid rounds owed against `maxRounds: 3`; an all-invalid run escalates with `/Environment/`; invalid rounds cannot fill the divergence window.
 
 ## REQ-STOP-205: Cost travels with the verdict
-- `runLoop` returns `budget` (`maxRounds`, `roundsRun`, `validRounds`, `invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `maxInvalidRounds`, `hardCap`, `wallClockMs`); `history` entries carry `kind`, `ms`, `delta_reason`, reviewer counts.
+- `runLoop` returns `budget` (`maxRounds`, `roundsRun`, `validRounds`, `invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `maxInvalidRounds`, `hardCap`, `wallClockMs`); `history` entries carry `kind`, `ms`, `delta_reason`, reviewer counts. `wallClockMs` and per-round `ms` are `null` (never a fabricated number) when the runtime has no clock (Workflow scripts forbid `Date.now`); `scorecard.py` falls back to the harness-measured wall-clock when the loop's own is null.
 - `scorecard.py` renders a first-line `VERDICT: <status> - N of M rounds (x full, y delta, z gate) - tokens - $ - wall-clock`, plus the escalation reason; absent a workflow result no verdict is invented.
 - Acceptance: the verdict section carries rounds/tokens/wall-clock and renders at the top; a pre-1.9.0 run with no `budget` still renders a verdict without a fabricated denominator.
 

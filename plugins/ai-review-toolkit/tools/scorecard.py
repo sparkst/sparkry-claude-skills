@@ -518,9 +518,15 @@ def _verdict_section(
         + tokens_total.get("cache_write", 0)
         + tokens_total.get("output", 0)
     )
-    wall = time_section.get("workflow_wall_clock_ms")
+    # #52 P2: the loop's own wallClockMs is null under the Workflow runtime
+    # (Date.now is forbidden there), but the harness independently measures
+    # the run's real elapsed time — fall through to that rather than printing
+    # "n/a" while the Model Execution Time section shows a known duration.
+    wall = budget.get("wallClockMs")
     if wall is None:
-        wall = budget.get("wallClockMs") or time_section.get("total_ms")
+        wall = time_section.get("workflow_wall_clock_ms")
+        if wall is None:
+            wall = time_section.get("total_ms")
 
     # #81: who was ASKED to review versus who actually reported. A verdict read on
     # its own must never be able to hide that the panel was dead — "0 findings"
@@ -695,8 +701,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         rev = v.get("reviewers")
         if isinstance(rev, dict) and rev.get("requested"):
             parts.append(f"reviewers {rev.get('returned', 0)}/{rev['requested']} returned")
-        if wall:
-            parts.append(f"{_fmt_ms(wall)} wall-clock")
+        parts.append(f"{_fmt_ms(wall)} wall-clock" if wall is not None else "wall-clock n/a")
         lines.append(f"**VERDICT: {v['status']}** — " + " · ".join(parts) + "\n")
         if v.get("reason"):
             lines.append(f"> {v['reason']}\n")
