@@ -1,5 +1,18 @@
 # Changelog — ai-review-toolkit
 
+## 1.10.3
+
+### Fixed
+- **The review loop no longer dies when the runtime has no clock (#52).**
+  Workflow scripts replace `Date.now` with a thrower (a live clock breaks
+  resume determinism), and `js/loop-engine.mjs` called it unguarded, so
+  `runLoop` threw on its very first statement inside a Workflow run
+  (REQ-NOW-001). The clock is now optional: `now()` returns `null` when it is
+  unavailable, per-round `ms` falls back to `0`, and the run reports
+  `budget.wallClockMs: "n/a"` instead of a fabricated duration.
+  `tools/scorecard.py` honors that sentinel and renders `n/a wall-clock` in the
+  verdict line rather than `0 ms wall-clock`.
+
 ## 1.10.2
 
 Re-land of 1.10.1 after the deploy walkthrough gate rolled it back (receipt gap, not a code defect).

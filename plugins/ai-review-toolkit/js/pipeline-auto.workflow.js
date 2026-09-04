@@ -1636,7 +1636,21 @@ async function runLoop(config, ctx) {
   const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)
   const hardCap = maxRounds + maxInvalidRounds
   const deltaOpts = { ...DELTA_DEFAULTS, ...(deltaCaps || {}) }
-  const now = () => (typeof Date !== 'undefined' && Date.now ? Date.now() : 0)
+  // #52: Workflow scripts replace Date.now with a thrower (it breaks resume
+  // determinism), so the clock is OPTIONAL, never assumed. `now()` yields null
+  // when unavailable and elapsed() propagates that as null — per-round ms fall
+  // back to 0 and the run's wall clock reports the sentinel 'n/a'.
+  const now = () => {
+    try {
+      return typeof Date !== 'undefined' && Date.now ? Date.now() : null
+    } catch {
+      return null
+    }
+  }
+  const elapsed = (from) => {
+    const t = now()
+    return from === null || t === null ? null : Math.max(0, t - from)
+  }
   const startedAt = now()
 
   if (!artifact || !requirements) throw new Error('runLoop requires artifact and requirements')
@@ -1853,7 +1867,7 @@ async function runLoop(config, ctx) {
       roundReports.push({
         round: r, findings: [], counts: countBySeverity([]), significant: 0, trivial: 0,
         newP0P1: 0, dropped: 0, converged: false, message: shortfall, proportional,
-        kind: roundKind, valid: false, ms: Math.max(0, now() - roundStartedAt),
+        kind: roundKind, valid: false, ms: elapsed(roundStartedAt) ?? 0,
         reviewers_requested: attestation.requested, reviewers_returned: attestation.returned,
         reviewers_quorum: attestation.quorum, reviewers_missing: attestation.missing,
         delta_reason: deltaReasonForRound,
@@ -1930,7 +1944,7 @@ async function runLoop(config, ctx) {
     const report = {
       round: r, findings, counts, significant: significant.length, trivial: trivial.length,
       newP0P1, dropped: dropped.length, converged, message, proportional,
-      kind: roundKind, valid: true, ms: Math.max(0, now() - roundStartedAt),
+      kind: roundKind, valid: true, ms: elapsed(roundStartedAt) ?? 0,
       reviewers_requested: reviewersRequested, reviewers_returned: reviewersReturned,
       reviewers_quorum: attestation.quorum, reviewers_missing: attestation.missing,
       delta_reason: deltaReasonForRound,
@@ -2150,7 +2164,7 @@ async function runLoop(config, ctx) {
     ...summarizeBudget(roundReports, { maxRounds }),
     maxInvalidRounds,
     hardCap,
-    wallClockMs: Math.max(0, now() - startedAt),
+    wallClockMs: elapsed(startedAt) ?? 'n/a',
   }
   return {
     outcome,
