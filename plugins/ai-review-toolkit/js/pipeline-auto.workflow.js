@@ -1619,18 +1619,9 @@ async function runLoop(config, ctx) {
     validateRound = null,
   } = config
 
-  // singleRound keeps its original meaning (the caller asked for one round), so a
-  // caller like pipeline-auto's integration-plan step ({rounds: 1, maxRounds: 4})
-  // keeps its 1-round floor and does not silently become a 2-round fix loop.
   const singleRound = rounds === 1
   const minRounds = singleRound ? 1 : 2
   const maxRounds = Math.max(maxRoundsArg ?? (singleRound ? 1 : 5), minRounds)
-  // REQ-42-1 (literal): the spot-fixer never edits a single-pass run, regardless
-  // of what maxRounds the caller also passed. singleRound (rounds === 1) is the
-  // one-round floor a caller sets deliberately (a plain /qreview, or
-  // pipeline-auto's documented single-pass integration-plan diagnose) — a caller
-  // that wants the spot-fixer available must not also ask for exactly one round.
-  const spotFixAllowed = !singleRound
   // The round BUDGET is spent in valid rounds only (#81), so the `for` bound must
   // be an absolute ceiling or a reviewer panel that keeps dying would spin forever.
   const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)
@@ -1951,11 +1942,8 @@ async function runLoop(config, ctx) {
 
     // Spot-fix trivial nits cheaply (Haiku) + a light spot-check. Opportunistic,
     // non-blocking, doesn't reset the convergence counter.
-    // REQ-42-1: single-round (/qreview, rounds === 1) mode is DIAGNOSE-ONLY:
-    // the spot-fixer never runs, whatever maxRounds is; multi-round (qloop)
-    // behaviour is unchanged.
     let trivialResolutions = []
-    if (trivial.length && spotFixAllowed) {
+    if (trivial.length) {
       const spot = await agent(spotFixerPrompt(artifact, requirements, trivial), {
         label: `spotfix:r${r}`, phase: `Round ${r}`, model: 'haiku', schema: RESOLUTIONS_SCHEMA,
       })
