@@ -553,15 +553,21 @@ export async function runLoop(config, ctx) {
   const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)
   const hardCap = maxRounds + maxInvalidRounds
   const deltaOpts = { ...DELTA_DEFAULTS, ...(deltaCaps || {}) }
-  let clockKnown = false
+  // #52/P3: the clock is OPTIONAL under the Workflow runtime (Date.now throws —
+  // it breaks resume determinism). `now()` yields null when unavailable, and
+  // every elapsed reading propagates that null rather than fabricating a
+  // number from a 0 sentinel (a thrown-then-recovered clock, or a real 0ms
+  // sample, must never be read as a real duration).
   const now = () => {
     try {
-      const sample = Date.now()
-      if (sample !== 0) clockKnown = true
-      return sample
+      return Date.now()
     } catch (_e) {
-      return 0
+      return null
     }
+  }
+  const elapsed = (from) => {
+    const t = now()
+    return from === null || t === null ? null : Math.max(0, t - from)
   }
   const startedAt = now()
 
@@ -779,7 +785,7 @@ export async function runLoop(config, ctx) {
       roundReports.push({
         round: r, findings: [], counts: countBySeverity([]), significant: 0, trivial: 0,
         newP0P1: 0, dropped: 0, converged: false, message: shortfall, proportional,
-        kind: roundKind, valid: false, ms: Math.max(0, now() - roundStartedAt),
+        kind: roundKind, valid: false, ms: elapsed(roundStartedAt),
         reviewers_requested: attestation.requested, reviewers_returned: attestation.returned,
         reviewers_quorum: attestation.quorum, reviewers_missing: attestation.missing,
         delta_reason: deltaReasonForRound,
@@ -856,7 +862,7 @@ export async function runLoop(config, ctx) {
     const report = {
       round: r, findings, counts, significant: significant.length, trivial: trivial.length,
       newP0P1, dropped: dropped.length, converged, message, proportional,
-      kind: roundKind, valid: true, ms: Math.max(0, now() - roundStartedAt),
+      kind: roundKind, valid: true, ms: elapsed(roundStartedAt),
       reviewers_requested: reviewersRequested, reviewers_returned: reviewersReturned,
       reviewers_quorum: attestation.quorum, reviewers_missing: attestation.missing,
       delta_reason: deltaReasonForRound,
@@ -1072,12 +1078,11 @@ export async function runLoop(config, ctx) {
   // outcome, so a 19-round run is obvious to whoever reads the result rather than
   // only to whoever re-reads the workflow JSON afterwards. Token cost is priced
   // by tools/scorecard.py, which has the per-agent usage this sandbox cannot see.
-  const finishedAt = now()
   const budget = {
     ...summarizeBudget(roundReports, { maxRounds }),
     maxInvalidRounds,
     hardCap,
-    wallClockMs: clockKnown ? Math.max(0, finishedAt - startedAt) : null,
+    wallClockMs: elapsed(startedAt),
   }
   return {
     outcome,

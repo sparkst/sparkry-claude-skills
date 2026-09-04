@@ -104,6 +104,37 @@ test("REQ-NOW-02: unavailable workflow clock does not prevent two-round converge
     );
     assert.equal(out.outcome.status, "converged");
     assert.equal(out.budget.wallClockMs, null);
+    // #52 P3: per-round ms must not fabricate 0 when the clock is unavailable
+    // — a real 0ms round and "no clock" must stay distinguishable.
+    assert.ok(out.history.every((h) => h.ms === null));
+  } finally {
+    globalThis.Date.now = originalNow;
+  }
+});
+
+test("REQ-NOW-03 (#52): a clock that throws once then recovers never fabricates a wallClockMs", async () => {
+  // Regression for the latched clockKnown bug: if the FIRST Date.now() call
+  // throws (so startedAt would be an invented 0) and a LATER call succeeds,
+  // the run must still report wallClockMs: null — never a bogus epoch-sized
+  // duration computed against the fabricated start.
+  const originalNow = globalThis.Date.now;
+  let calls = 0;
+  globalThis.Date.now = () => {
+    calls += 1;
+    if (calls === 1) throw new Error("Date.now() unavailable");
+    return originalNow.call(Date);
+  };
+  try {
+    const ctx = makeCtx([
+      { findings: [F("P0-001", "P0", "Bug X")], resolutions: [R("P0-001")] },
+      { findings: [] },
+    ]);
+    const out = await runLoop(
+      { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 5 },
+      ctx,
+    );
+    assert.equal(out.outcome.status, "converged");
+    assert.equal(out.budget.wallClockMs, null);
   } finally {
     globalThis.Date.now = originalNow;
   }
