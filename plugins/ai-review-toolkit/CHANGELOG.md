@@ -1,25 +1,5 @@
 # Changelog — ai-review-toolkit
 
-## 1.10.1
-
-### Fixed
-- **`/qreview` is diagnose-only again: single-round mode no longer runs the Haiku
-  spot-fixer.** `skills/qreview/SKILL.md` promises "/qreview never edits the
-  artifact", but the spot-fix block in `js/loop-engine.mjs` had no `singleRound`
-  guard, so a plain `/qreview` still handed trivial P2/P3 findings to a Haiku
-  fixer with edit rights. Twice on record that fixer ran `git checkout <file>`
-  over uncommitted in-flight edits and reported `edited_files: []` while editing
-  the tree: a diagnostic command silently destroying an hour of unsaved work.
-  Trivial findings are still counted and reported in single-round mode; only the
-  edit is withheld (REQ-42-1). Multi-round `/qloop` behavior is unchanged —
-  trivial findings are still spot-fixed and still do not block convergence
-  (REQ-42-2). The guard is `spotFixAllowed = !singleRound`, keyed on `rounds
-  === 1` itself rather than `maxRounds`, so REQ-42-1 holds literally regardless
-  of what `maxRounds` a caller also passes — pipeline-auto's integration-plan
-  single-pass diagnose (`{rounds: 1, maxRounds: 4}`) is edit-free too, while its
-  1-round floor and round budget stay unchanged. Bundles regenerated
-  (REQ-42-5).
-
 ## 1.10.0
 
 ### Fixed
