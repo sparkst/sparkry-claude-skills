@@ -553,7 +553,16 @@ export async function runLoop(config, ctx) {
   const maxInvalidRounds = Math.max(0, maxInvalidRoundsArg ?? maxRounds)
   const hardCap = maxRounds + maxInvalidRounds
   const deltaOpts = { ...DELTA_DEFAULTS, ...(deltaCaps || {}) }
-  const now = () => (typeof Date !== 'undefined' && Date.now ? Date.now() : 0)
+  let clockKnown = false
+  const now = () => {
+    try {
+      const sample = Date.now()
+      if (sample !== 0) clockKnown = true
+      return sample
+    } catch (_e) {
+      return 0
+    }
+  }
   const startedAt = now()
 
   if (!artifact || !requirements) throw new Error('runLoop requires artifact and requirements')
@@ -1063,11 +1072,12 @@ export async function runLoop(config, ctx) {
   // outcome, so a 19-round run is obvious to whoever reads the result rather than
   // only to whoever re-reads the workflow JSON afterwards. Token cost is priced
   // by tools/scorecard.py, which has the per-agent usage this sandbox cannot see.
+  const finishedAt = now()
   const budget = {
     ...summarizeBudget(roundReports, { maxRounds }),
     maxInvalidRounds,
     hardCap,
-    wallClockMs: Math.max(0, now() - startedAt),
+    wallClockMs: clockKnown ? Math.max(0, finishedAt - startedAt) : null,
   }
   return {
     outcome,

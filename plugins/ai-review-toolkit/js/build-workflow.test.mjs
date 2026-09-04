@@ -76,6 +76,7 @@ test("REQ-NOW-03: generated review workflow resolves when the runtime clock thro
     });
     const result = await new vm.Script(`(async () => {\n${source}\n})()`).runInContext(context);
     assert.equal(typeof result.outcome, "object");
+    assert.equal(result.budget.wallClockMs, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
