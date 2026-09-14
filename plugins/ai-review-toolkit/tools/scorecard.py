@@ -546,6 +546,12 @@ def _verdict_section(
         "full_rounds": budget.get("fullRounds"),
         "delta_rounds": budget.get("deltaRounds"),
         "gate_rounds": budget.get("gateRounds"),
+        # Valid rounds in which a reviewer panel actually read the artifact (full or
+        # delta), as opposed to gate-only rounds. A CONVERGED verdict with
+        # reviewed_rounds == 0 reviewed nothing and is a false green (claude-skills#175);
+        # this is the field a stored receipt is audited against. Absent (None) on a
+        # run recorded before the field existed — such a receipt cannot be classified.
+        "reviewed_rounds": budget.get("reviewedRounds"),
         "tokens": total_tokens,
         "cost_usd": round(cost_usd, 4),
         "wall_clock_ms": wall,

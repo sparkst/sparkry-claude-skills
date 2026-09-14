@@ -806,7 +806,7 @@ test("STOP-130: the verdict carries rounds by kind, reviewer counts and wall clo
     { ...out.budget, wallClockMs: undefined },
     {
       maxRounds: 5, roundsRun: 3, validRounds: 3, invalidRounds: 0,
-      fullRounds: 1, deltaRounds: 1, gateRounds: 1,
+      fullRounds: 1, deltaRounds: 1, gateRounds: 1, reviewedRounds: 2,
       maxInvalidRounds: 5, hardCap: 10, wallClockMs: undefined,
     },
   );
@@ -827,6 +827,53 @@ test("STOP-103: single-round (qreview) mode never lets the gate claim the round"
   assert.equal(reviewersInRound(ctx, 1).length, 2, "the lenses run even with a failing gate");
   assert.equal(out.budget.gateRounds, 0);
   assert.equal(out.final_counts.P1, 1, "the reviewer's finding is in the result");
+});
+
+// ── #175: a gate-ONLY run reviewed nothing and must never read as CONVERGED ───
+//
+// The quorum gate (#81) catches a DEAD panel (asked N, got < quorum). It does not
+// catch a round that asked for NO panel at all — the deterministic gate round.
+// A gate round is `valid: true` with reviewers 0/0, so a run made entirely of gate
+// rounds satisfied the min-rounds floor and converged having read nothing. Observed
+// on 1.10.3 (claude-skills#175): both rounds `kind: "gate"`, `converged (reviewers
+// 0/0 returned)`. A round that could not review (gate-only) must be a DISTINCT
+// outcome from a round that reviewed clean.
+
+test("GATE-175-001 (#175): a gate-only run never converges — the converging round must have seated reviewers", async () => {
+  // The gate names a non-significant, non-recurring failure every round (a host-only
+  // flake, different each round), so `significant` is empty and the OLD loop would
+  // 'converge' at round 2 with reviewers 0/0 — yet no lens ever read the artifact.
+  const ctx = makeCtx([
+    { testFailures: [F("P3-r1", "P3", "host-only flake r1")] },
+    { testFailures: [F("P3-r2", "P3", "host-only flake r2")] },
+    { testFailures: [F("P3-r3", "P3", "host-only flake r3")], findings: [] },
+    { findings: [] },
+  ]);
+  const out = await runLoop({ artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 6 }, ctx);
+  assert.ok(reviewersInRound(ctx, 3).length > 0, "a permanently-noisy gate must not starve review — a full round must run");
+  assert.equal(out.outcome.status, "converged", "once a real review runs clean, it converges honestly");
+  assert.ok(out.outcome.reviewers.returned > 0, "a CONVERGED verdict must be certified by a reviewer that returned, never 0/0");
+  assert.ok(out.budget.reviewedRounds >= 1, "convergence requires at least one round where a reviewer panel returned");
+  assert.equal(out.budget.gateRounds, 2, "the two leading gate rounds are recorded as gate rounds, not full ones");
+});
+
+test("GATE-175-002 (#175): a gate that eats the whole budget escalates COULD-NOT-REVIEW, never converged", async () => {
+  // maxGateRounds high enough that the gate claims every round; a non-significant
+  // failure each round means the OLD loop converged at round 2. The fix: no reviewer
+  // ever seated, so the run cannot converge and escalates with reviewedRounds: 0.
+  const ctx = makeCtx([
+    { testFailures: [F("P3-r1", "P3", "flake r1")] },
+    { testFailures: [F("P3-r2", "P3", "flake r2")] },
+    { testFailures: [F("P3-r3", "P3", "flake r3")] },
+  ]);
+  const out = await runLoop(
+    { artifact: "a", requirements: "r", team: TEAM, threshold: 0, maxRounds: 3, maxGateRounds: 9 },
+    ctx,
+  );
+  assert.equal(out.outcome.status, "escalated", "a gate-only run proves nothing about the artifact and cannot converge");
+  assert.equal(out.budget.reviewedRounds, 0, "no reviewer panel ever returned across the whole run");
+  assert.equal(reviewersInRound(ctx, 1).length + reviewersInRound(ctx, 2).length + reviewersInRound(ctx, 3).length, 0);
+  assert.match(out.outcome.reason, /review/i, "the reason must name that no review ran, not blame the artifact");
 });
 
 // ---------------------------------------------------------------------------

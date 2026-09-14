@@ -201,6 +201,7 @@ test("STOP-030: the budget counts rounds by kind and excludes invalid ones (#81)
     fullRounds: 2,
     deltaRounds: 1,
     gateRounds: 1,
+    reviewedRounds: 3,
   });
 });
 
@@ -213,6 +214,7 @@ test("STOP-031: an empty run summarizes to zeros rather than throwing", () => {
     fullRounds: 0,
     deltaRounds: 0,
     gateRounds: 0,
+    reviewedRounds: 0,
   });
 });
 

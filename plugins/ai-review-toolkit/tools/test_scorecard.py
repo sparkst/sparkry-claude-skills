@@ -715,7 +715,7 @@ DIVERGED = {
     "outcome": {"status": "escalated", "reason": "Diverging: rounds 4-6 each surfaced a NEW P0/P1. SPLIT the artifact."},
     "rounds": 6,
     "budget": {"maxRounds": 12, "roundsRun": 6, "validRounds": 6, "invalidRounds": 0,
-               "fullRounds": 4, "deltaRounds": 1, "gateRounds": 1,
+               "fullRounds": 4, "deltaRounds": 1, "gateRounds": 1, "reviewedRounds": 5,
                "maxInvalidRounds": 12, "hardCap": 24, "wallClockMs": 2_530_000},
     "history": [{"round": 1, "reviewers_requested": 4, "reviewers_returned": 4}],
 }
@@ -732,6 +732,7 @@ class TestVerdict:
         assert v["full_rounds"] == 4
         assert v["delta_rounds"] == 1
         assert v["gate_rounds"] == 1
+        assert v["reviewed_rounds"] == 5  # #175: 4 full + 1 delta actually reviewed
         assert v["tokens"] == 1_020_001
         assert v["wall_clock_ms"] == 2_530_000
         assert v["cost_usd"] > 0

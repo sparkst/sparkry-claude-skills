@@ -223,6 +223,13 @@ export function detectDivergence(rounds, opts = {}) {
  *
  * `validRounds` — not `roundsRun` — is what the round budget is spent against:
  * a round whose reviewers died is not progress toward an answer (#81).
+ *
+ * `reviewedRounds` — valid rounds in which a reviewer panel actually RETURNED
+ * (a full fan-out or a delta verifier), as opposed to a deterministic gate round
+ * that asked for no reviewers at all. It is the provenance a CONVERGED verdict
+ * must be able to point at: a run with `reviewedRounds: 0` reviewed nothing, so it
+ * cannot have converged (claude-skills#175). Gate rounds report reviewers 0/0, so
+ * they are counted by `validRounds`/`gateRounds` but never by `reviewedRounds`.
  */
 export function summarizeBudget(rounds, opts = {}) {
   const all = rounds ?? [];
@@ -236,5 +243,9 @@ export function summarizeBudget(rounds, opts = {}) {
     fullRounds: countKind("full"),
     deltaRounds: countKind("delta"),
     gateRounds: countKind("gate"),
+    // Reviewed = valid rounds that were NOT gate-only: a full fan-out or a delta
+    // verifier, i.e. a round where a reviewer panel read the artifact. Gate rounds
+    // ask for no reviewers, so among valid rounds they are the only unreviewed kind.
+    reviewedRounds: v.length - countKind("gate"),
   };
 }
