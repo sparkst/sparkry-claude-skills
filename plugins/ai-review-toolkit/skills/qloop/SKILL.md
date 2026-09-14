@@ -107,7 +107,11 @@ The Workflow returns
   count. `outcome.message` carries `reviewers <returned>/<requested> returned` and
   `outcome.reviewers` carries the same as data, so a reader who sees only the
   verdict knows the panel actually ran. A converged verdict is only reachable from
-  rounds that met quorum.
+  rounds that met quorum, and only from a round a reviewer actually READ (the
+  converging round has `reviewers_returned > 0`): a deterministic gate round asks
+  for no reviewers, so it can never certify convergence. `budget.reviewedRounds`
+  is how many rounds a reviewer panel read the artifact; a converged run always has
+  at least one, and `reviewedRounds: 0` means nothing was reviewed.
 - `outcome.status === "escalated"` — present `outcome.reason` and `outcome.unresolved`
   (P0/P1 findings), then ask the user to choose: continue (raise `maxRounds` and
   re-run), accept current state, or abandon. Escalation happens on max-rounds,
@@ -123,7 +127,8 @@ The Workflow returns
   fix the environment and re-run.
 
 The result also carries `budget` (`maxRounds`, `roundsRun`, `validRounds`,
-`invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `wallClockMs`), and
+`invalidRounds`, `fullRounds`, `deltaRounds`, `gateRounds`, `reviewedRounds`,
+`wallClockMs`), and
 each `history` entry carries its `kind` (`full`/`delta`/`gate`), `ms`,
 `delta_reason`, `valid`, `reviewers_returned`/`reviewers_requested`/`reviewers_quorum`
 and `reviewers_missing` (`[{name, reason}]` for every reviewer that did not report).
@@ -221,6 +226,16 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
 - **Minimum 2 rounds, counted in VALID rounds.** Round 1 finds; round 2 verifies
   fixes and catches regressions. The loop never reports `converged` before the
   floor, and a round lost to a dead panel does not count toward it.
+- **A converged verdict requires a reviewed round: a gate-only run never
+  converges.** The quorum gate catches a DEAD panel; a deterministic gate round
+  asks for no panel at all, so it is `valid` with `reviewers 0/0` and used to
+  satisfy the min-rounds floor and converge having read nothing (claude-skills#175:
+  both rounds `kind: "gate"`, `converged (reviewers 0/0 returned)`). Convergence
+  now requires the CONVERGING round to be one a reviewer read (`reviewers_returned
+  > 0`, i.e. a full fan-out or a delta verifier). A run the gate starves of review
+  escalates as COULD-NOT-REVIEW, naming the gate rather than the artifact. This is
+  not a second floor: 1 gate round that finds + fixes a real defect, then 1 full
+  clean round, still converges.
 - **Fix-ALL gate on significant findings.** Every P0/P1 — plus any P2/P3 a
   reviewer flags `significance:true` or that recurs across rounds — needs a
   `FIXED`/`ESCALATED` resolution with evidence (`checkFixCompleteness`). No
@@ -240,7 +255,8 @@ fleet qac-inputs --p0p1 <N> --p2p3 <N> --review-rounds <R>
   the gate's mechanically-derived work list and no reviewer fans out. A defect a
   test, a linter or a schema check can name must never cost a reviewer round.
   Bounded by `maxGateRounds` (default 2 consecutive) so a permanently-red suite
-  cannot starve review of the rest of the artifact.
+  cannot starve review of the rest of the artifact. A gate round is never the
+  round that certifies convergence (see the reviewed-round rule above).
 - **Proportional rounds: a small, contract-safe fix batch buys ONE cheap
   verifier, not a full all-lens re-read.** After a full round's fix batch a haiku
   probe MEASURES the diff and the engine decides in JS. Delta-eligible only when
