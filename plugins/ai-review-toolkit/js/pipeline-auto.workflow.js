@@ -1083,6 +1083,13 @@ function detectDivergence(rounds, opts = {}) {
  *
  * `validRounds` — not `roundsRun` — is what the round budget is spent against:
  * a round whose reviewers died is not progress toward an answer (#81).
+ *
+ * `reviewedRounds` — valid rounds in which a reviewer panel actually RETURNED
+ * (a full fan-out or a delta verifier), as opposed to a deterministic gate round
+ * that asked for no reviewers at all. It is the provenance a CONVERGED verdict
+ * must be able to point at: a run with `reviewedRounds: 0` reviewed nothing, so it
+ * cannot have converged (claude-skills#175). Gate rounds report reviewers 0/0, so
+ * they are counted by `validRounds`/`gateRounds` but never by `reviewedRounds`.
  */
 function summarizeBudget(rounds, opts = {}) {
   const all = rounds ?? [];
@@ -1096,6 +1103,10 @@ function summarizeBudget(rounds, opts = {}) {
     fullRounds: countKind("full"),
     deltaRounds: countKind("delta"),
     gateRounds: countKind("gate"),
+    // Reviewed = valid rounds that were NOT gate-only: a full fan-out or a delta
+    // verifier, i.e. a round where a reviewer panel read the artifact. Gate rounds
+    // ask for no reviewers, so among valid rounds they are the only unreviewed kind.
+    reviewedRounds: v.length - countKind("gate"),
   };
 }
 
@@ -1991,12 +2002,22 @@ async function runLoop(config, ctx) {
       }
     }
 
-    // Converged (no significant findings) AND past the minimum-rounds floor → done.
-    // A re-opening proportional round never converges here (any finding re-opens).
-    // The min-rounds floor counts VALID rounds, not attempts (#81): converging off
-    // one valid round because the other attempt had a dead panel is the same false
-    // green by another route.
-    if (converged && spentSoFar.validRounds >= minRounds && !proportionalReopen) {
+    // #175: a converged verdict must be CERTIFIED BY A REVIEWER that actually read
+    // the artifact. A deterministic gate round asks for no reviewers (0/0) and is
+    // `valid: true`, so before this a run of only gate rounds satisfied the
+    // min-rounds floor and "converged" having reviewed nothing — the gate-blocked =
+    // CONVERGED false green. So the CONVERGING round must itself be a reviewed round
+    // (a full fan-out or a delta verifier that returned), never a gate round. This
+    // is not a second floor: STOP-100's 1 gate + 1 full clean round still converges,
+    // because the clean full round IS the reviewed converging round.
+    const thisRoundReviewed = Number(reviewersReturned) > 0
+
+    // Converged (no significant findings) AND past the minimum-rounds floor AND a
+    // reviewer certified this round → done. A re-opening proportional round never
+    // converges here (any finding re-opens). The min-rounds floor counts VALID
+    // rounds, not attempts (#81): converging off one valid round because the other
+    // attempt had a dead panel is the same false green by another route.
+    if (converged && thisRoundReviewed && spentSoFar.validRounds >= minRounds && !proportionalReopen) {
       outcome = {
         status: 'converged',
         // The count rides IN the verdict, so a human reading only this line sees
@@ -2032,7 +2053,17 @@ async function runLoop(config, ctx) {
     // the environment rather than blaming the artifact.
     const spent = summarizeBudget(roundReports, { maxRounds })
     if (spent.validRounds >= maxRounds) {
-      outcome = { status: 'escalated', reason: `Max rounds (${maxRounds}) reached without convergence. ${message}.`, unresolved: unresolvedNow(), round: r }
+      // #175: distinguish "reviewed and did not converge" from "never reviewed".
+      // If the deterministic gate consumed every round and no reviewer panel ever
+      // returned, this is COULD-NOT-REVIEW — name the environment, do not blame the
+      // artifact (the run proves nothing about it).
+      const reason =
+        spent.reviewedRounds === 0
+          ? `Could not review: the deterministic gate claimed all ${spent.validRounds} round(s) and no reviewer ` +
+            `panel ever ran, so no lens read the artifact. This run proves nothing about the artifact — this is ` +
+            `not convergence. Fix the gate (or set skipTests for an artifact with no executable test surface) and re-run. ${message}.`
+          : `Max rounds (${maxRounds}) reached without convergence. ${message}.`
+      outcome = { status: 'escalated', reason, unresolved: unresolvedNow(), round: r }
       break
     }
     if (spent.invalidRounds >= maxInvalidRounds && maxInvalidRounds > 0) {

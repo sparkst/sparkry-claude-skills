@@ -1,5 +1,21 @@
 # Changelog — ai-review-toolkit
 
+## 1.10.4
+
+### Fixed
+- **A gate-only review loop no longer reports CONVERGED (claude-skills#175).** When
+  the deterministic test/lint gate claimed every round (e.g. a persistent host-only
+  test failure, or a markdown artifact the gate still tried to `pytest`), the loop
+  could satisfy the min-rounds floor and converge with `reviewers 0/0 returned` —
+  a review that never ran read identically to a review that ran clean. Convergence
+  now requires the converging round to be a **reviewed** round (a full fan-out or a
+  delta verifier that returned); a gate round can never certify convergence. A run
+  the gate starves of review escalates as COULD-NOT-REVIEW, naming the gate rather
+  than blaming the artifact. `budget.reviewedRounds` (and the scorecard's
+  `reviewed_rounds`) now record how many rounds a reviewer panel actually read the
+  artifact, so a stored receipt can be audited: `reviewed_rounds == 0` reviewed
+  nothing. Both generated workflow bundles include the fix.
+
 ## 1.10.3
 
 ### Fixed
